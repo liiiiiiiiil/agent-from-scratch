@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.txt
+!examples/*.txt
+!doc/*.txt
+!requirements*.txt

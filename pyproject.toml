@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-agent"
+version = "0.1.0"
+description = "逐步生长的编程 agent"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]
