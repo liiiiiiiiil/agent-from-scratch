@@ -35,7 +35,9 @@ mini_agent/
 └── doc/
     ├── README.txt          # 文档目录说明
     ├── governance/         # 治理文档：约束、规范、决策记录
-    └── plans/               # 计划文档：路线图、功能计划、任务拆解
+    ├── plans/               # 计划文档：路线图、功能计划、任务拆解
+    └── operation/          # 操作文档：运行手册、使用指南
+        └── manual.md       # 操作手册
 ```
 
 - LLM 调用：`http.client` 流式，OpenAI function calling 协议（`tools` 参数）。
