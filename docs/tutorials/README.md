@@ -1,26 +1,69 @@
 # 教学路径（tutorials）
 
-本目录是 `mini_agent` 教学仓库的核心：按版本号切片的教程文档。
+本目录是 `mini_agent` 教学仓库的核心：教程文件都放在同一个目录中，`README.md` 负责按阶段导航，具体课程负责解释对应版本的代码变化。
 
-## 学习顺序
+## 先从这里开始
 
-`v0.01 → v0.02 → ... → v0.X`（持续迭代，不设上限），每版配套一份文档，每版只引入一个新概念。
+- 第一次学习 Agent：从阶段一开始，按顺序读到阶段三。
+- 想理解一个可工作的 Mini Agent：重点完成阶段一至阶段三，并完成阶段三的实践任务。
+- 只想查某个功能：直接从下面的版本表进入对应课程。
+
+## 学习阶段
+
+### 阶段一：理解 Agent Loop
+
+目标：理解 LLM 调用、`messages`、循环和结束条件，先写出最小的对话 Agent。
 
 | 版本 | 主题 | 文档 |
 |---|---|---|
 | v0.01 | 最简 agent loop | [01-minimal-loop.md](01-minimal-loop.md) |
+
+### 阶段二：工具与安全
+
+目标：让 Agent 能调用工具，并在产生文件副作用前请求用户授权。
+
+| 版本 | 主题 | 文档 |
+|---|---|---|
 | v0.02 | 第一个工具 | [02-first-tool.md](02-first-tool.md) |
 | v0.03 | 文件读写工具 | [03-file-tools.md](03-file-tools.md) |
 | v0.04 | 权限闸门 | [04-permission-gate.md](04-permission-gate.md) |
+
+### 阶段三：Mini Agent 里程碑
+
+目标：补齐交互、文件操作和命令执行能力，形成一个能完成基础编程任务的 Mini Agent。
+
+| 版本 | 主题 | 文档 |
+|---|---|---|
 | v0.05 | 流式输出 | [05-streaming.md](05-streaming.md) |
 | v0.06 | 并发 tool_calls | [06-concurrent-tool-calls.md](06-concurrent-tool-calls.md) |
 | v0.07 | 系统提示词工程化 | [07-system-prompt.md](07-system-prompt.md) |
 | v0.08 | 文件操作补全 | [08-file-operations.md](08-file-operations.md) |
 | v0.09 | 权限系统升级 | [09-permission-upgrade.md](09-permission-upgrade.md) |
 | v0.10 | shell 执行 | [10-shell-execution.md](10-shell-execution.md) |
-| v0.011 | 上下文管理 | 11-context-management.md（待落地） |
-| v0.012 | plan 引导 | 12-plan-guidance.md（待落地） |
-| ... | ... | ...（按需追加） |
+
+完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑，但它仍然缺少长上下文管理、任务规划、失败恢复和安全隔离等进阶能力。
+
+### 阶段四：进阶能力（规划中）
+
+这一阶段继续沿用版本教程，但学习重点从“增加一个工具”转向“让 Agent 能够稳定完成更长、更复杂的任务”。
+
+| 版本 | 主题 | 状态 |
+|---|---|---|
+| v0.011 | 上下文管理 | 待落地 |
+| v0.012 | plan 引导 | 待落地 |
+| 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
+
+## 版本与 Git tag
+
+每个已完成版本仍然对应一个 Git tag。阶段是学习导航，版本是代码快照；两者互不替代。
+
+```bash
+git tag                    # 看所有版本
+git checkout v0.01         # 切到指定版本
+git diff v0.01..v0.02      # 查看两个版本之间的变化
+```
+
+学习某个版本时，先 checkout 对应 tag，再阅读同名课程中的“使用指导”和“核心概念”。
 
 ## 环境准备（一次性）
 
@@ -39,12 +82,15 @@
 
 ```bash
 git tag                    # 看所有版本
-git checkout v0.01          # 切到第一版
-# 读 01-minimal-loop.md
-# 跑"使用指导"里的命令
-git checkout v0.02          # 看差异，读 02-first-tool.md
-# ...依次到最新版
+git checkout v0.01         # 切到第一版
+# 读 01-minimal-loop.md，跑其中的"使用指导"
+git checkout v0.02         # 看差异，读 02-first-tool.md
+# 按上面的阶段和版本顺序继续学习
 ```
+
+## 阶段三实践任务
+
+完成 `v0.10` 后，可以让 Agent 完成一个完整的小任务：检查一个失败的测试，定位原因，修改代码，运行测试，并总结结果。这个任务可以验证它是否已经具备 Mini Agent 的基本工作闭环。
 
 ## 完整使用手册
 

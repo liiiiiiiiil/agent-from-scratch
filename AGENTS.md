@@ -4,7 +4,7 @@
 
 `agent-from-scratch`（Python 包名 `mini_agent`）是一个**逐步生长的编程 agent**：从最小可用的 agent loop 起步，按需增加工具与能力，目标是能独立完成基础的编程任务（读写改文件、跑命令、跑测试、简单多步任务）。
 
-> 本仓库为多阶段教学仓库，按 git tag `v0.01` → `v0.X` 顺序学习（持续迭代，不设上限），见 `docs/tutorials/`。
+> 本仓库为多阶段教学仓库，教程入口按能力阶段组织，具体实现按 git tag `v0.01` → `v0.X` 顺序学习（持续迭代，不设上限），见 `docs/tutorials/`。
 
 设计原则：
 - **零第三方依赖**（仅 Python 标准库），保持自包含、易部署。
@@ -44,7 +44,7 @@ mini_agent/
     ├── plans/               # 计划文档：路线图、功能计划、任务拆解
     ├── operation/          # 操作文档：运行手册、使用指南
     │   └── manual.md       # 操作手册
-    └── tutorials/          # 教学文档：按版本切片的教程
+    └── tutorials/          # 教学文档：按阶段导航、按版本切片的教程
         ├── README.md       # 教学路径索引
         ├── 01-minimal-loop.md
         ├── 02-first-tool.md
@@ -54,7 +54,8 @@ mini_agent/
         ├── 06-concurrent-tool-calls.md
         ├── 07-system-prompt.md
         ├── 08-file-operations.md
-        └── 09-permission-upgrade.md
+        ├── 09-permission-upgrade.md
+        └── 10-shell-execution.md
 ```
 
 - LLM 调用：`http.client` 流式，OpenAI function calling 协议（`tools` 参数）。
@@ -69,7 +70,7 @@ mini_agent/
 
 ## 路线图
 
-持续迭代，每次加一个概念，直到达到轻量编程 agent 的能力集：
+实现路线持续迭代，每次加一个概念，直到达到轻量编程 agent 的能力集。教程入口按阶段组织，版本表保留代码演进顺序：
 
 - [x] **v0.01 最简 agent loop**：`call_llm`（非流式）+ `agent_loop`（无工具纯对话）+ `__main__` + `config.py`
 - [x] **v0.02 第一个工具**：`Tool`/`ToolRegistry`/`ToolExecutor` + `calculate` + function calling 协议
@@ -86,6 +87,8 @@ mini_agent/
 - [ ] **...**（持续迭代，按需追加）
 
 > 每加一项，在此打勾并在"当前架构"更新对应模块说明。详细方案见 `docs/plans/teaching-repo-plan.md`。
+
+> 教学阶段：阶段一为 Agent Loop（v0.01）；阶段二为工具与安全（v0.02–v0.04）；阶段三为 Mini Agent 里程碑（v0.05–v0.10）；阶段四为 v0.011 及以后的进阶能力。
 
 ## 运行
 

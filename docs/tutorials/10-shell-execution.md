@@ -1,6 +1,6 @@
 # 第 10 课：shell 执行
 
-> 版本 v0.10 | [上一课](09-permission-upgrade.md) | [下一课](11-context-management.md)
+> 版本 v0.10 | [上一课](09-permission-upgrade.md) | [返回教程总览](README.md)
 
 ## 本课目标
 

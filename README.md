@@ -17,7 +17,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 
 ---
 
-> **这是什么**：一个按 git tag 切片的教学仓库。从最小可用的 agent loop（v0.01，无工具纯对话）起步，每个版本**只引入一个新概念**，一路长到能读写文件、跑命令、跑测试的编程 agent（持续迭代，不设上限）。
+> **这是什么**：一个按 git tag 切片、按能力阶段组织的教学仓库。从最小可用的 agent loop（v0.01，无工具纯对话）起步，每个版本**只引入一个新概念**，一路长到能读写文件、跑命令、跑测试的 Mini Agent（持续迭代，不设上限）。
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
@@ -26,8 +26,8 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 - **零第三方依赖** —— 全程只用 Python 标准库（`http.client` / `json` / `concurrent.futures`），不装 LangChain、不装 requests。代码自包含，每一行都能读懂。
 - **版本切片，每版只加一个概念** —— `git diff v0.01..v0.02` 就是"加一个工具"的全部改动，diff 可读，学习负担低。版本持续递增，不设上限。
 - **真实可跑的 agent** —— 不是玩具 demo：支持 function calling、流式输出、权限闸门、并发工具调用，能真的读写文件、跑命令。
-- **配套中文教程** —— 每个版本一份教学文档（`docs/tutorials/`），讲清"为什么这么设计"，不只是贴代码。
-- **渐进式生长的设计哲学** —— 演示一个 agent 项目如何从 50 行长到生产可用，每一步的取舍都有据可查。
+- **配套中文教程** —— 教程按学习阶段导航，每个版本一份教学文档（`docs/tutorials/`），讲清"为什么这么设计"，不只是贴代码。
+- **渐进式生长的设计哲学** —— 演示一个 agent 项目如何从最小 loop 长到可工作的 Mini Agent，每一步的取舍都有据可查。
 
 ## 快速开始
 
@@ -53,33 +53,58 @@ python -m mini_agent             # 或交互式输入
 
 ## 学习路径
 
-按 `v0.01 → v0.X` 顺序 checkout，每版配套一份教程。**这是本仓库的核心**。
+教程按能力阶段组织，版本仍然是代码演进和 Git tag 的基本单位。建议从阶段一开始，按顺序学习到阶段三；完成 `v0.10` 后即可得到一个能完成基础编程任务的 Mini Agent。**这是本仓库的核心学习路径**。
 
-| 版本 | 主题 | 每版只加一个概念 | 教程 |
+### 阶段一：理解 Agent Loop
+
+目标：理解 LLM 调用、`messages`、循环和结束条件。
+
+| 版本 | 主题 | 本版新增 | 教程 |
 |---|---|---|---|
 | **v0.01** | 最简 agent loop | `call_llm` + `agent_loop`（无工具纯对话） | [01-minimal-loop.md](./docs/tutorials/01-minimal-loop.md) |
+
+### 阶段二：工具与安全
+
+目标：让 Agent 能调用工具，并控制文件修改等副作用。
+
+| 版本 | 主题 | 本版新增 | 教程 |
+|---|---|---|---|
 | **v0.02** | 第一个工具 | `Tool`/`ToolRegistry` + `calculate` + function calling | [02-first-tool.md](./docs/tutorials/02-first-tool.md) |
 | **v0.03** | 文件读写工具 | `read_file` / `write_file` | [03-file-tools.md](./docs/tutorials/03-file-tools.md) |
 | **v0.04** | 权限闸门 | `permission.py`（allow/deny/ask 三态） | [04-permission-gate.md](./docs/tutorials/04-permission-gate.md) |
+
+### 阶段三：Mini Agent 里程碑
+
+目标：补齐交互、文件操作和命令执行能力，形成一个能完成基础编程任务的 Mini Agent。
+
+| 版本 | 主题 | 本版新增 | 教程 |
+|---|---|---|---|
 | **v0.05** | 流式输出 | `call_llm` 改流式 + 打字机效果 | [05-streaming.md](./docs/tutorials/05-streaming.md) |
 | **v0.06** | 并发 tool_calls | `ThreadPoolExecutor` 并发执行 | [06-concurrent-tool-calls.md](./docs/tutorials/06-concurrent-tool-calls.md) |
 | **v0.07** | 系统提示词工程化 | system prompt 从一行扩到完整规范 | [07-system-prompt.md](./docs/tutorials/07-system-prompt.md) |
 | **v0.08** | 文件操作补全 | `list_dir` / `edit_file` / `grep` | [08-file-operations.md](./docs/tutorials/08-file-operations.md) |
 | **v0.09** | 权限系统升级 | 二维权限 (tool_name, pattern) + fnmatch 通配符匹配 | [09-permission-upgrade.md](./docs/tutorials/09-permission-upgrade.md) |
 | **v0.10** | shell 执行 | `run_shell` 工具 + subprocess + 超时 + 输出截断 + 二维命令模式权限 | [10-shell-execution.md](./docs/tutorials/10-shell-execution.md) |
-| v0.011 | 上下文管理 | message 裁剪/摘要 + `MAX_ITERATIONS` 调大 | _待落地_ |
-| v0.012 | plan 引导 | 规划模式引导 | _待落地_ |
-| ... | ... | ...（持续迭代，按需追加） | ... |
+
+完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑。
+
+### 阶段四：进阶能力（规划中）
+
+| 版本 | 主题 | 状态 |
+|---|---|---|
+| v0.011 | 上下文管理 | 待落地 |
+| v0.012 | plan 引导 | 待落地 |
+| 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 **如何切版本学习：**
 
 ```bash
 git tag                    # 看所有版本
 git checkout v0.01          # 切到第一版
-# 读 docs/tutorials/01-minimal-loop.md
-# 跑教程里的命令
+# 先读 docs/tutorials/README.md，再读 01-minimal-loop.md
+# 跑课程"使用指导"里的命令
 git checkout v0.02          # 看差异：git diff v0.01..v0.02
-# 读 02-first-tool.md ... 依次到最新版
+# 按教程总览中的阶段和版本顺序继续学习
 ```
 
 ## 项目结构
@@ -98,7 +123,7 @@ mini_agent/
 │       └── shell.py        # run_shell 工具
 ├── tests/                  # smoke tests
 ├── docs/
-│   ├── tutorials/          # 按版本切片的教程（核心）
+│   ├── tutorials/          # 按阶段导航、按版本切片的教程（核心）
 │   ├── plans/              # 路线图、功能计划
 │   ├── operation/          # 运行手册、使用指南
 │   └── governance/         # 治理文档、决策记录
@@ -115,7 +140,7 @@ mini_agent/
 
 - [教学路径索引](./docs/tutorials/README.md) —— **从这里开始学**
 - [完整使用手册](./docs/operation/manual.md) —— 最新版全量用法、配置、FAQ
-- [路线图与计划](./docs/plans/teaching-repo-plan.md) —— 版本切分方案
+- [路线图与计划](./docs/plans/teaching-repo-plan.md) —— 阶段导航与版本切分方案
 - [AGENTS.md](./AGENTS.md) —— 项目架构与约束备忘
 
 ## 贡献

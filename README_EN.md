@@ -17,7 +17,7 @@
 
 ---
 
-> **What this is**: A tutorial repo sliced by git tags. Starting from a minimal agent loop (v0.01, no tools, pure conversation), each version **introduces exactly one new concept**, growing all the way to a coding agent that can read/write files, run commands, and run tests (incremental versions, no fixed endpoint).
+> **What this is**: A tutorial repo sliced by git tags and organized by capability stages. Starting from a minimal agent loop (v0.01, no tools, pure conversation), each version **introduces exactly one new concept**, growing all the way to a Mini Agent that can read/write files, run commands, and run tests (incremental versions, no fixed endpoint).
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
@@ -26,8 +26,8 @@
 - **Zero third-party dependencies** — Pure Python standard library throughout (`http.client` / `json` / `concurrent.futures`). No LangChain, no requests. Self-contained, every line is readable.
 - **Version slices, one concept per version** — `git diff v0.01..v0.02` is the entire change for "add a tool". Diffs are readable, cognitive load is low. Versions keep incrementing with no fixed cap.
 - **A real, runnable agent** — Not a toy demo: supports function calling, streaming output, a permission gate, concurrent tool calls. It can actually read/write files and run commands.
-- **Companion tutorials** — Each version ships a tutorial doc (`docs/tutorials/`) explaining *why* it's designed this way, not just pasting code.
-- **Progressive-growth philosophy** — Watch an agent project grow from 50 lines to production-ready, with every trade-off documented.
+- **Companion tutorials** — Tutorials are organized by learning stage, with one tutorial doc per version (`docs/tutorials/`) explaining *why* it's designed this way, not just pasting code.
+- **Progressive-growth philosophy** — Watch an agent project grow from a minimal loop to a working Mini Agent, with every trade-off documented.
 
 ## Quick Start
 
@@ -53,33 +53,58 @@ python -m mini_agent             # or interactive input
 
 ## Learning Path
 
-Checkout versions in order `v0.01 → v0.X`, each with a companion tutorial. **This is the core of the repo.**
+Tutorials are organized by capability stage, while versions remain the basic units of code evolution and Git tags. Start at Stage 1 and continue through Stage 3; after `v0.10`, you have a Mini Agent that can handle basic coding tasks. **This is the core learning path.**
 
-| Version | Topic | One new concept per version | Tutorial |
+### Stage 1: Understand the Agent Loop
+
+Goal: understand LLM calls, `messages`, the loop, and completion conditions.
+
+| Version | Topic | What this version adds | Tutorial |
 |---|---|---|---|
 | **v0.01** | Minimal agent loop | `call_llm` + `agent_loop` (no tools) | [01-minimal-loop.md](./docs/tutorials/01-minimal-loop.md) |
+
+### Stage 2: Tools and Safety
+
+Goal: let the Agent call tools while controlling file-modifying side effects.
+
+| Version | Topic | What this version adds | Tutorial |
+|---|---|---|---|
 | **v0.02** | First tool | `Tool`/`ToolRegistry` + `calculate` + function calling | [02-first-tool.md](./docs/tutorials/02-first-tool.md) |
 | **v0.03** | File read/write tools | `read_file` / `write_file` | [03-file-tools.md](./docs/tutorials/03-file-tools.md) |
 | **v0.04** | Permission gate | `permission.py` (allow/deny/ask) | [04-permission-gate.md](./docs/tutorials/04-permission-gate.md) |
+
+### Stage 3: Mini Agent Milestone
+
+Goal: add interaction, file operations, and command execution so the Agent can handle basic coding tasks.
+
+| Version | Topic | What this version adds | Tutorial |
+|---|---|---|---|
 | **v0.05** | Streaming output | streaming `call_llm` + typewriter effect | [05-streaming.md](./docs/tutorials/05-streaming.md) |
 | **v0.06** | Concurrent tool_calls | `ThreadPoolExecutor` concurrency | [06-concurrent-tool-calls.md](./docs/tutorials/06-concurrent-tool-calls.md) |
-| **v0.07** | System prompt engineering | expand system prompt to full spec | [07-system-prompt.md](./docs/tutorials/07-system-prompt.md) |
+| **v0.07** | System prompt engineering | expand system prompt to a full specification | [07-system-prompt.md](./docs/tutorials/07-system-prompt.md) |
 | **v0.08** | File operations complete | `list_dir` / `edit_file` / `grep` | [08-file-operations.md](./docs/tutorials/08-file-operations.md) |
 | **v0.09** | Permission system upgrade | 2D permission (tool_name, pattern) + fnmatch | [09-permission-upgrade.md](./docs/tutorials/09-permission-upgrade.md) |
 | **v0.10** | Shell execution | `run_shell` tool + subprocess + timeout + output truncation + 2D command pattern permission | [10-shell-execution.md](./docs/tutorials/10-shell-execution.md) |
-| v0.011 | Context management | message trimming/summary + `MAX_ITERATIONS` increase | _coming soon_ |
-| v0.012 | Plan guidance | planning mode guidance | _coming soon_ |
-| ... | ... | ... (incremental, add as needed) | ... |
+
+After `v0.10`, the Agent can inspect a project, search and modify files, run commands, run tests, and control high-risk operations through permissions. This is the repo's first stage milestone.
+
+### Stage 4: Advanced Capabilities (planned)
+
+| Version | Topic | Status |
+|---|---|---|
+| v0.011 | Context management | coming soon |
+| v0.012 | Plan guidance | coming soon |
+| Later versions | Failure recovery, verification loops, observability, memory, sandboxing, and more | as needed |
 
 **How to learn by version:**
 
 ```bash
 git tag                    # list all versions
 git checkout v0.01          # switch to v0.01
-# read docs/tutorials/01-minimal-loop.md
-# run the commands in the tutorial
+# first read docs/tutorials/README.md, then 01-minimal-loop.md
+# run the commands in the tutorial's "Usage Guide"
 git checkout v0.02          # see the diff: git diff v0.01..v0.02
-# read 02-first-tool.md ... continue to the latest version
+# continue by the stage and version order in the tutorial overview
 ```
 
 ## Project Structure
@@ -98,7 +123,7 @@ mini_agent/
 │       └── shell.py        # run_shell tool
 ├── tests/                  # smoke tests
 ├── docs/
-│   ├── tutorials/          # version-sliced tutorials (core)
+│   ├── tutorials/          # stage navigation, version-sliced tutorials (core)
 │   ├── plans/              # roadmap, feature plans
 │   ├── operation/          # runbook, usage guide
 │   └── governance/         # governance docs, decision records
@@ -115,7 +140,7 @@ mini_agent/
 
 - [Tutorial path index](./docs/tutorials/README.md) — **start here**
 - [Full usage manual](./docs/operation/manual.md) — complete usage, config, FAQ for the latest version
-- [Roadmap & plans](./docs/plans/teaching-repo-plan.md) — version slicing plan
+- [Roadmap & plans](./docs/plans/teaching-repo-plan.md) — stage navigation and version slicing plan
 - [AGENTS.md](./AGENTS.md) — project architecture & constraints memo
 
 ## Contributing
