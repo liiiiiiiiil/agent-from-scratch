@@ -5,6 +5,7 @@
 ## 索引
 - `AGENTS.md` 的"路线图"章节是总纲，此目录放细化方案。
 - [`teaching-repo-plan.md`](teaching-repo-plan.md) — 把仓库改造成多阶段教学仓库的完整方案（版本切片、目录结构、文档模板、git 操作清单、验收标准）。
+- [`context-management-plan.md`](context-management-plan.md) — 阶段四 Context Management 实施计划（v0.11 架构 / v0.12 预算裁剪 / v0.13 压缩）。
 
 ## 文档约定
 - 文件名用小写 + 连字符，如 `add-shell-tool.md`。

@@ -233,12 +233,15 @@ def test_run_shell():
 
 def test_run_shell_exit_code():
     """run_shell 返回非零退出码时带 [exit=N] 前缀"""
+    # false/python 不在默认 allow 清单（落到 ask 会交互式提问），用放行策略绕过
+    gate = PermissionGate(PermissionPolicy({"run_shell": ALLOW}))
+    exec_allow = ToolExecutor(registry, gate=gate)
     # Windows 和 Linux 的 false 命令不同
     if sys.platform == "win32":
         cmd = "python -c \"exit(1)\""
     else:
         cmd = "false"
-    result = executor.execute("run_shell", {"command": cmd})
+    result = exec_allow.execute("run_shell", {"command": cmd})
     assert "[exit=1]" in result, result
     print("PASS: run_shell 非零退出码带前缀")
 

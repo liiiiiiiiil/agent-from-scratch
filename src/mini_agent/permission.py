@@ -11,6 +11,8 @@ v0.09 版：从一维 (tool_name -> action) 升级为二维 (tool_name, pattern)
 去掉事件总线、pending 队列、持久化、CorrectedError——CLI 同步交互不需要。
 """
 
+from __future__ import annotations
+
 import fnmatch
 import threading
 

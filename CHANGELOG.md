@@ -1,5 +1,28 @@
 # Changelog
 
+## [v0.11] - 上下文架构
+
+### Added
+- `src/mini_agent/state.py`：`AgentState` 数据类（task/current_goal/tool_history/files_changed/errors/status）+ `record_tool` 执行记录接口 + `snapshot` 线程安全快照
+- `src/mini_agent/context.py`：`ContextManager`，`prepare_messages()` 作为 LLM 调用前统一入口（本版恒等返回，只立边界）
+- `tests/test_state.py`：State 单测（10 个：记录/派生字段/深拷贝隔离/并发安全）
+- `tests/test_context.py`：ContextManager 单测（5 个：引用保持/恒等返回/State 不被注入）
+- `tests/test_executor.py`：Executor 回调单测（14 个：三路径回调/回调异常不影响执行/brief 截断/并发回调）
+- `docs/tutorials/11-context-architecture.md`：第十一课教学文档
+
+### Changed
+- `src/mini_agent/agent.py`：`agent_loop(messages)` 改为 `agent_loop(context_manager, tool_executor)`，经 `cm.prepare_messages()` 调 LLM；消除 v0.10 的"MAX_ITERATIONS 半截状态"契约（每轮 tool results 全部回灌后才进下一轮或返回）
+- `src/mini_agent/tools/base.py`：`ToolExecutor` 加 `on_result` 结果回调（权限拒绝/handler 异常/执行成功三路径都通知，brief 截断 200 字符，回调异常只打印不影响执行）
+- `src/mini_agent/__main__.py`：组装 AgentState + ContextManager 注入 loop，`run_task` 统一 argv/交互两条路径并维护 `state.status`
+- `tests/test_tools.py`：修复 `test_run_shell_exit_code` 在 pytest 下读 stdin 挂掉的问题（放行策略绕过 ASK 交互）
+
+### Why
+- **Agent State ≠ LLM Context**（D1）：messages 是易耗品（迟早裁剪/压缩），State 是压缩后不失忆的锚。v0.09 的 PermissionGate always 状态已验证"运行时状态独立于 messages"可行。
+- **纯重构版**：外部行为与 v0.10 完全一致，不裁剪、不压缩、不估算 token——先把"谁能碰 messages"（只有 ContextManager）、"状态放哪"（AgentState）立好边界，v0.12/v0.13 的工程实现才有落点。
+- **State 由 Executor 结果回调更新，loop 不感知**（D5）：否则 State 会变成第二个无人维护的 messages。回调把记录收敛到 Executor 一处，且是观察者不是参与者（异常不影响执行结果）。
+- **线程安全**：v0.06 起同一轮 tool_calls 并发执行，回调来自线程池工作线程，`record_tool` 加 Lock、读取走 `snapshot()` 深拷贝。
+- **半截状态消除**：v0.10 文档已警告 messages 可能停在"有 tool_calls 无 tool 结果"的协议非法状态，本版从代码上根治——这也为 v0.12 按轮次原子裁剪铺路（轮次完整性从此有保证）。
+
 ## [v0.10] - shell 执行
 
 ### Added

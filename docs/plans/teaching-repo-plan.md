@@ -5,6 +5,7 @@
 > 更新：教学文档模板加入"使用指导"章节，随版本演进
 > 更新：改为持续迭代模式，不设固定版本上限，每次加一个功能，直到达到轻量编程 agent 的能力集
 > 更新：教程入口按阶段组织，具体课程仍按版本放在 `docs/tutorials/` 根目录，不新增阶段子目录
+> 更新：v0.011 拆为 v0.11–v0.13"阶段四：Context Management"三个版本（tag 命名弃用 v0.011），plan 引导顺移至 v0.14，详见 `context-management-plan.md`
 
 ## 1. 目标
 
@@ -28,8 +29,10 @@
 | v0.08 | 文件操作补全 | `list_dir`/`edit_file`（精准替换）/`grep` | 精准编辑而非整文件重写 |
 | v0.09 | 权限系统升级 | 二维权限 (tool_name, pattern) + once/always 回复区分 + fnmatch 通配符匹配 | 从一维到二维；命令模式粒度控制 |
 | v0.10 | shell 执行 | `run_shell` 工具 + subprocess 超时 + 输出截断 + 二维命令模式权限 | 跑测试/跑脚本；shell 权限从严 |
-| v0.011 | 上下文管理 | message 裁剪/摘要 + `MAX_ITERATIONS` 调大 | 长任务不爆上下文 |
-| v0.012 | plan 引导 | 规划模式引导 | 规划与执行分离 |
+| v0.11 | 上下文架构 | `AgentState`（状态独立于 messages）+ `ContextManager`（LLM 调用前统一入口） | Agent State ≠ LLM Context；上下文构建与 loop 解耦 |
+| v0.12 | 预算与裁剪 | token 估算 + Context Budget + 按轮次原子 trimming | Context 是有限资源；超限优先删低价值信息而非崩溃 |
+| v0.13 | 上下文压缩 | 老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大 | 压缩不失忆；State 是锚，Summary 允许有损 |
+| v0.14 | plan 引导 | 规划模式引导 | 规划与执行分离 |
 | ... | ... | ...（持续迭代，按需追加行） | ... |
 
 > 切分原则：每版只引入一个新概念，代码差异控制在"一个文件或一个新模块"量级，让 `git diff v0.(X-1)..v0.X` 可读。
@@ -64,8 +67,10 @@ mini_agent/
         ├── 08-file-operations.md
         ├── 09-permission-upgrade.md
         ├── 10-shell-execution.md
-        ├── 11-context-management.md
-        ├── 12-plan-guidance.md
+        ├── 11-context-architecture.md
+        ├── 12-token-budget-trimming.md
+        ├── 13-context-compaction.md
+        ├── 14-plan-guidance.md
         └── ...（持续迭代，按需追加，仍放在此目录）
 ```
 
@@ -146,8 +151,10 @@ mini_agent/
 | v0.08 | `edit_file` 精准替换示例；`grep` 搜索示例；`list_dir` 列目录 |
 | v0.09 | 观察二维权限：按命令模式询问；`git *` 批准后同类免问；对比 v0.04 的一维权限差异 |
 | v0.10 | `run_shell` 跑 `python tests/test_tools.py`；观察二维命令模式权限；试 "跑一下测试" |
-| v0.011 | 长任务验证 `MAX_ITERATIONS` 调大后能跑完；观察上下文裁剪日志 |
-| v0.012 | plan 模式引导示例；观察规划与执行的分离 |
+| v0.11 | 对比 v0.10：loop 不再直接拼 messages；演示"同一 State 构建不同 Context" |
+| v0.12 | 构造长任务观察预算检查与裁剪日志；验证裁剪后 agent 不崩、消息协议合法 |
+| v0.13 | 长任务验证多次压缩后仍能继续原任务；观察 summary 与 Structured State 注入 |
+| v0.14 | plan 模式引导示例；观察规划与执行的分离 |
 
 ### 5.1 与 `docs/operation/manual.md` 的分工
 
@@ -173,8 +180,11 @@ v0.02 → v0.04
 ## 阶段三：Mini Agent 里程碑
 v0.05 → v0.10
 
-## 阶段四：进阶能力（规划中）
-v0.011 及以后
+## 阶段四：Context Management
+v0.11 → v0.13
+
+## 阶段五：进阶能力（规划中）
+v0.14 及以后
 
 ## 环境准备（一次性）
 保留 Python、配置和安装说明。
@@ -334,9 +344,11 @@ def agent_loop(messages):
 - **v0.08**：新增 `tools/file.py`；`tools/__init__.py` 注册；tests 加 read_file/write_file
 - **v0.09**：`permission.py` 升级（`check()` 二维匹配 + `fnmatch` + `approve()` 存 pattern）；`tools/base.py` 的 `PermissionGate.guard()` 从 args 提取 pattern；`PERMISSION_RULES` 支持 dict 格式
 - **v0.10**：新增 `tools/shell.py`（`run_shell` + `subprocess` 超时 + 输出截断）；`tools/__init__.py` 注册；`permission.py` 加 `run_shell` 二维权限规则 + `_from_config` 排序修复（`*` 排最前）；`prompt.py` 更新能力描述
-- **v0.011**：`agent.py` 加 message 裁剪/摘要逻辑；`config.py` 调大 `MAX_ITERATIONS`
-- **v0.012**：`prompt.py` 加 plan 引导；`__main__.py` 加 plan 模式入口
-- **v0.013+**：按需追加
+- **v0.11**：新增 `state.py`（AgentState）+ `context.py`（ContextManager 统一入口）；`agent.py` 改经 `prepare_messages()` 调 LLM；`tools/base.py` Executor 加结果回调更新 State。纯重构，行为与 v0.10 一致
+- **v0.12**：`context.py` 加 `count_tokens`（`len//3` 启发式）+ `ContextBudget`（比例配置）+ `TrimPolicy`（按轮次原子裁剪，无孤儿 tool result）；`config.py` 加 `CONTEXT_WINDOW`
+- **v0.13**：`context.py` 加 `compact()`（LLM 摘要 + Structured State 注入 + 失败降级 trimming）；`config.py` 调大 `MAX_ITERATIONS`
+- **v0.14**：`prompt.py` 加 plan 引导；`__main__.py` 加 plan 模式入口
+- **v0.15+**：按需追加。Context Management 细化方案见 `context-management-plan.md`
 
 ## 11. AGENTS.md 更新要点
 
@@ -362,8 +374,8 @@ def agent_loop(messages):
 
 1. **先落地 v0.01 全套**：重置 main + v0.01 代码 + 01 文档 + CHANGELOG + tag
 2. **v0.02 → v0.06**：复用 backup 分支现有代码，按版本顺序重新提交 + 写文档（工作量在文档）
-3. **v0.07 → v0.012**：需新写代码（system prompt 扩写、list_dir/edit_file/grep、权限升级、run_shell、上下文管理、plan 引导），工作量较大
-4. **v0.013+**：持续迭代，按需追加新功能
+3. **v0.07 → v0.14**：需新写代码（system prompt 扩写、list_dir/edit_file/grep、权限升级、run_shell、上下文管理三版、plan 引导），工作量较大
+4. **v0.15+**：持续迭代，按需追加新功能
 5. **每版完成后**：跑 tests、更新 AGENTS.md 路线图打勾、打 tag
 
 > v0.02-v0.06 的代码已存在于 backup-pre-teaching 分支，落地主要是拆分提交节奏 + 写文档。

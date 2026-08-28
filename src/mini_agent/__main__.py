@@ -1,22 +1,36 @@
 import sys
 from mini_agent.agent import agent_loop
+from mini_agent.context import ContextManager
 from mini_agent.prompt import build_system_prompt
+from mini_agent.state import AgentState
+from mini_agent.tools import registry
+from mini_agent.tools.base import ToolExecutor
 
-if __name__ == "__main__":
+
+def main():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
-    # messages 列表跨轮复用：agent_loop 以副作用方式向其追加
-    # assistant / tool 消息，调用方无需手动 append assistant 回复。
-    # 详见 agent.agent_loop 的 docstring 契约。
-    # system prompt 分层组装（身份 + 行为规范 + 环境信息），见 prompt.py
-    messages = [{"role": "system", "content": build_system_prompt()}]
+    state = AgentState()
+    history = [{"role": "system", "content": build_system_prompt()}]
+    context = ContextManager(state, history)
+    tool_executor = ToolExecutor(registry, on_result=state.record_tool)
+
+    def run_task(user_input):
+        state.status = "running"
+        state.task = user_input
+        context.history.append({"role": "user", "content": user_input})
+        try:
+            result = agent_loop(context, tool_executor)
+        except Exception:
+            state.status = "failed"
+            raise
+        state.status = "failed" if result == "达到最大迭代次数" else "done"
 
     # 命令行首条任务（可选）：与交互循环走同一套路径，
-    # 保证 argv 分支后 messages 状态完整，后续追问上下文不丢。
+    # 保证 argv 分支后 history 状态完整，后续追问上下文不丢。
     if len(sys.argv) > 1:
-        messages.append({"role": "user", "content": sys.argv[1]})
-        agent_loop(messages)
+        run_task(sys.argv[1])
 
     while True:
         try:
@@ -25,5 +39,8 @@ if __name__ == "__main__":
             break
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
-        messages.append({"role": "user", "content": user_input})
-        agent_loop(messages)
+        run_task(user_input)
+
+
+if __name__ == "__main__":
+    main()

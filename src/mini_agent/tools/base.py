@@ -4,6 +4,8 @@ v0.04 版：ToolExecutor 加权限闸门（PermissionGate）。
 Executor 先过闸门再调 handler，异常捕获返回错误信息给 LLM。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -84,6 +86,11 @@ class ToolRegistry:
 # 3. Tool Executor
 # ============================================================
 
+RESULT_BRIEF_MAX_LENGTH = 200
+RESULT_BRIEF_FALLBACK = "<unavailable>"
+ResultCallback = Callable[[str, dict[str, Any], bool, str], None]
+
+
 class ToolExecutor:
     """
     Tool 执行器。
@@ -92,11 +99,40 @@ class ToolExecutor:
     Executor 负责"执行 Tool"（先过权限闸门）
     """
 
-    def __init__(self, registry: ToolRegistry, gate: PermissionGate | None = None):
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        gate: PermissionGate | None = None,
+        on_result: ResultCallback | None = None,
+    ):
         self.registry = registry
         self.gate = gate or PermissionGate()
+        self.on_result: ResultCallback | None = on_result
 
-    def execute(self, name: str, arguments: dict):
+    def _notify_result(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        ok: bool,
+        result: Any,
+    ) -> None:
+        if self.on_result is None:
+            return
+
+        try:
+            try:
+                brief = str(result)[:RESULT_BRIEF_MAX_LENGTH]
+            except Exception:
+                brief = RESULT_BRIEF_FALLBACK[:RESULT_BRIEF_MAX_LENGTH]
+            self.on_result(name, arguments, ok, brief)
+        except Exception as error:
+            # Result callbacks are observational and must not affect execution.
+            try:
+                print(f"[Executor] 结果回调失败: {type(error).__name__}")
+            except Exception:
+                pass
+
+    def execute(self, name: str, arguments: dict[str, Any]) -> Any:
         """根据 Tool 名称和参数执行 Tool。"""
         tool = self.registry.get(name)
 
@@ -104,6 +140,7 @@ class ToolExecutor:
         denied = self.gate.guard(name, arguments)
         if denied:
             print(f"[Permission] {denied}")
+            self._notify_result(name, arguments, False, denied)
             return denied
 
         print(f"[Executor] 执行 Tool: {name}")
@@ -112,6 +149,9 @@ class ToolExecutor:
         try:
             result = tool.handler(**arguments)
         except Exception as e:
-            return f"Tool 执行失败: {e}"
+            result = f"Tool 执行失败: {e}"
+            self._notify_result(name, arguments, False, result)
+            return result
 
+        self._notify_result(name, arguments, True, result)
         return result
