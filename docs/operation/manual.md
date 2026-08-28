@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.10**（shell 执行）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.11**（上下文架构）。
 
 ## 1. 环境准备
 
@@ -60,11 +60,34 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.10）
+## 3. 当前能力（v0.11）
 
-v0.10 新增 `run_shell` 工具，agent 能跑命令（跑测试、跑脚本）。v0.09 的二维权限系统为 `run_shell` 提供命令模式权限控制。v0.08 的文件操作能力和 v0.07 的系统提示词工程化仍然生效。
+v0.11 在 v0.10 的工具、权限、流式输出和并发调用能力之上，引入了独立的 `AgentState` 与 `ContextManager`。本版是纯重构：不裁剪、不压缩、不估算 token，外部行为与 v0.10 保持一致。
 
-### 3.1 System Prompt
+### 3.1 上下文架构
+
+`AgentState` 保存任务执行事实，独立于会被 LLM 消费的 `messages`：
+
+| State 字段 | 内容 |
+|---|---|
+| `task` / `current_goal` | 当前任务与目标 |
+| `tool_history` | 工具名、参数、成功状态、结果摘要 |
+| `files_changed` | 成功写入或编辑过的文件路径 |
+| `errors` | 权限拒绝或工具失败记录 |
+| `status` | `running` / `done` / `failed` |
+
+所有 LLM 请求都经 `ContextManager.prepare_messages()`，本版直接返回完整 history。后续版本会在此入口加入预算检查、裁剪和压缩。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
+
+```python
+state = AgentState()
+history = [{"role": "system", "content": build_system_prompt()}]
+context = ContextManager(state, history)
+tool_executor = ToolExecutor(registry, on_result=state.record_tool)
+```
+
+每轮带 `tool_calls` 的 assistant 消息，都会在进入下一轮或返回前追加全部对应的 `role=tool` 消息，避免达到迭代上限时留下协议不完整的消息序列。
+
+### 3.2 System Prompt
 
 启动时由 `prompt.py` 的 `build_system_prompt()` 组装 `messages[0]`，分三层：
 
@@ -79,7 +102,7 @@ v0.10 新增 `run_shell` 工具，agent 能跑命令（跑测试、跑脚本）�
 $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
 
-### 3.2 工具
+### 3.3 工具
 
 | 工具 | 参数 | 权限 | 说明 |
 |---|---|---|---|
@@ -91,7 +114,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
 
-### 3.3 权限交互
+### 3.4 权限交互
 
 v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。
 
@@ -136,13 +159,13 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 
 > 二维权限示例：配置 `{"read_file": {"*": "allow", "*.env": "deny"}}` 后，读取 `.env` 文件会被拒绝，其他文件正常放行。
 
-### 3.4 工具调用流程
+### 3.5 工具调用流程
 1. LLM 返回 `tool_calls`（一轮可含多个，代码用线程池并发执行）
 2. `ToolExecutor` 先过权限闸门（`PermissionGate.guard`）
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
-4. 结果作为 `role=tool` 消息回灌，进入下一轮
+4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
 
-### 3.5 相对路径约定
+### 3.6 相对路径约定
 工具的相对路径（如 `examples/input.txt`）从**项目根目录** `mini_agent/` 起算：
 ```bash
 # 在 mini_agent/ 目录下运行
@@ -174,8 +197,8 @@ python -c "from mini_agent.tools import registry; print([t.name for t in registr
 ## 5. 常见问题
 
 ### Q1：运行报 502 / 连接网关失败
-确认 `config_local.py` 的 `BASE_URL` 和 `API_KEY` 正确，且网络可达 `your-gateway-host`。
-> 注意：必须用 `http.client`（代码已如此），不能用 requests/urllib——网关对 `Accept-Encoding: gzip` 响应异常。`call_llm` 已显式设 `Accept-Encoding: identity` 绕过。
+确认 `config_local.py` 的 `BASE_URL` 和 `API_KEY` 正确，且网络可达配置的网关。
+> 注意：必须用 `http.client`（代码已如此），不能用 requests/urllib——网关对 `Accept-Encoding: gzip` 响应异常。`call_llm` 已显式设 `Accept-Encoding: identity` 绕过，并按 `BASE_URL` 的 scheme 选择 HTTP 或 HTTPS 连接。
 
 ### Q2：任务没完成就停了
 可能触发 `MAX_ITERATIONS=10` 上限，agent 返回 `"达到最大迭代次数"`。改 `config_local.py` 调高即可，但注意长对话会累积上下文。

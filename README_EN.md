@@ -53,7 +53,7 @@ python -m mini_agent             # or interactive input
 
 ## Learning Path
 
-Tutorials are organized by capability stage, while versions remain the basic units of code evolution and Git tags. Start at Stage 1 and continue through Stage 3; after `v0.10`, you have a Mini Agent that can handle basic coding tasks. **This is the core learning path.**
+Tutorials are organized by capability stage, while versions remain the basic units of code evolution and Git tags. Start at Stage 1 and continue through Stage 3; after `v0.10`, you have a Mini Agent that can handle basic coding tasks. Continue with Stage 4 to learn context management. **This is the core learning path.**
 
 ### Stage 1: Understand the Agent Loop
 
@@ -88,12 +88,21 @@ Goal: add interaction, file operations, and command execution so the Agent can h
 
 After `v0.10`, the Agent can inspect a project, search and modify files, run commands, run tests, and control high-risk operations through permissions. This is the repo's first stage milestone.
 
-### Stage 4: Advanced Capabilities (planned)
+### Stage 4: Context Management
+
+Goal: let the Agent keep executing complex tasks reliably within a finite context window by separating state from context, managing budget, trimming history, and compacting old history.
+
+| Version | Topic | What this version adds | Tutorial |
+|---|---|---|---|
+| **v0.11** | Context architecture | `AgentState` + `ContextManager` + Executor result callback | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
+| v0.12 | Budget and trimming | token estimation + atomic round trimming | coming soon |
+| v0.13 | Context compaction | LLM summary + Structured State anchor | coming soon |
+
+### Stage 5: Advanced Capabilities (planned)
 
 | Version | Topic | Status |
 |---|---|---|
-| v0.011 | Context management | coming soon |
-| v0.012 | Plan guidance | coming soon |
+| v0.14 | Plan guidance | coming soon |
 | Later versions | Failure recovery, verification loops, observability, memory, sandboxing, and more | as needed |
 
 **How to learn by version:**
@@ -115,11 +124,13 @@ mini_agent/
 │   ├── agent.py            # agent loop: call_llm + agent_loop
 │   ├── config.py           # config placeholder + auto-loads config_local.py
 │   ├── config_example.py   # config template (copy to config_local.py)
+│   ├── context.py           # ContextManager: unified pre-LLM entry point
+│   ├── state.py             # AgentState: execution state separate from messages
 │   ├── permission.py       # permission gate: allow/deny/ask
 │   └── tools/
-│       ├── base.py         # Tool / ToolRegistry / ToolExecutor
+│       ├── base.py         # Tool / ToolRegistry / ToolExecutor (with result callback)
 │       ├── calc.py         # calculate tool
-│       ├── file.py         # read_file / write_file tools
+│       ├── file.py         # read_file / write_file / edit_file / list_dir / grep tools
 │       └── shell.py        # run_shell tool
 ├── tests/                  # smoke tests
 ├── docs/

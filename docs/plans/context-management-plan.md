@@ -1,6 +1,6 @@
 # 阶段四：Context Management 实施计划
 
-> 状态：计划已评审确认，待实施
+> 状态：v0.11 已实施并验收；v0.12/v0.13 待实施
 > 评审结论：原六 Phase 方案依赖顺序正确、原则正确、粒度偏细，合并为三个版本落地；修正项见"关键架构决策"
 > 版本映射：v0.11 / v0.12 / v0.13（tag 命名弃用 v0.011，理由见 D8）
 > 关联文档：`teaching-repo-plan.md`（版本切片表已同步）、`AGENTS.md` 路线图
@@ -81,20 +81,20 @@ class ContextManager:
 
 ### 任务拆解
 
-1. `state.py` + `test_state.py`
-2. `context.py` 骨架 + `test_context.py`（本版 `prepare_messages` 恒等返回）
-3. Executor 结果回调 → `state.record_tool` / `files_changed` / `errors`（D5）
-4. `agent_loop` 改造：`call_llm(cm.prepare_messages())`；顺带消除 agent.py 中"MAX_ITERATIONS 半截状态"注释对应的调用方契约
-5. 手工回归：跑 v0.10 的典型任务，行为不变
-6. 教程 `11-context-architecture.md` + CHANGELOG + AGENTS.md 打勾 + tag `v0.11`
+1. `state.py` + `test_state.py`（已完成）
+2. `context.py` 骨架 + `test_context.py`（本版 `prepare_messages` 恒等返回，已完成）
+3. Executor 结果回调 → `state.record_tool` / `files_changed` / `errors`（D5，已完成）
+4. `agent_loop` 改造：`call_llm(cm.prepare_messages())`；顺带消除 agent.py 中"MAX_ITERATIONS 半截状态"注释对应的调用方契约（已完成）
+5. 手工回归：跑 v0.10 的典型任务，行为不变（已完成，真实 LLM 回归通过）
+6. 教程 `11-context-architecture.md` + CHANGELOG + AGENTS.md 打勾 + tag `v0.11`（已完成）
 
 ### 验收标准
 
-- [ ] AgentState 独立对象，不进 messages、不被 loop 直接操作
-- [ ] 所有 LLM 请求经 ContextManager 构建，loop 不再直接拼接 context
-- [ ] System / Task / History / Tool Result 的边界有明确代码位置
-- [ ] 行为与 v0.10 一致（现有 tests 全绿 + 手工任务回归）
-- [ ] `git diff v0.10..v0.11 --stat` 在"两个新文件 + 三四个文件小改"量级
+- [x] AgentState 独立对象，不进 messages、不被 loop 直接操作
+- [x] 所有 LLM 请求经 ContextManager 构建，loop 不再直接拼接 context
+- [x] System / Task / History / Tool Result 的边界有明确代码位置
+- [x] 行为与 v0.10 一致（现有 tests 全绿 + 手工任务回归）
+- [x] `git diff v0.10..v0.11 --stat` 在"两个新文件 + 三四个文件小改"量级
 
 ## 4. v0.12 预算与裁剪（4.2）
 

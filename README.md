@@ -53,7 +53,7 @@ python -m mini_agent             # 或交互式输入
 
 ## 学习路径
 
-教程按能力阶段组织，版本仍然是代码演进和 Git tag 的基本单位。建议从阶段一开始，按顺序学习到阶段三；完成 `v0.10` 后即可得到一个能完成基础编程任务的 Mini Agent。**这是本仓库的核心学习路径**。
+教程按能力阶段组织，版本仍然是代码演进和 Git tag 的基本单位。建议从阶段一开始，按顺序学习到阶段三；完成 `v0.10` 后即可得到一个能完成基础编程任务的 Mini Agent，再继续学习阶段四的上下文管理。**这是本仓库的核心学习路径**。
 
 ### 阶段一：理解 Agent Loop
 
@@ -88,12 +88,21 @@ python -m mini_agent             # 或交互式输入
 
 完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑。
 
-### 阶段四：进阶能力（规划中）
+### 阶段四：Context Management
+
+目标：让 Agent 在有限 Context Window 下持续稳定执行复杂任务——状态与上下文分离、预算感知、超限裁剪、历史压缩。
+
+| 版本 | 主题 | 本版新增 | 教程 |
+|---|---|---|---|
+| **v0.11** | 上下文架构 | `AgentState` + `ContextManager` + Executor 结果回调 | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
+| v0.12 | 预算与裁剪 | token 估算 + 按轮次原子 trimming | 待落地 |
+| v0.13 | 上下文压缩 | LLM 摘要 + Structured State 锚定 | 待落地 |
+
+### 阶段五：进阶能力（规划中）
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| v0.011 | 上下文管理 | 待落地 |
-| v0.012 | plan 引导 | 待落地 |
+| v0.14 | plan 引导 | 待落地 |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 **如何切版本学习：**
@@ -115,11 +124,13 @@ mini_agent/
 │   ├── agent.py            # agent loop：call_llm + agent_loop
 │   ├── config.py           # 配置占位 + 自动加载 config_local.py
 │   ├── config_example.py   # 配置模板（复制为 config_local.py 使用）
+│   ├── context.py          # ContextManager：LLM 调用前统一入口
+│   ├── state.py            # AgentState：独立于 messages 的执行状态
 │   ├── permission.py       # 权限闸门：allow/deny/ask 三态
 │   └── tools/
-│       ├── base.py         # Tool / ToolRegistry / ToolExecutor
+│       ├── base.py         # Tool / ToolRegistry / ToolExecutor（含结果回调）
 │       ├── calc.py         # calculate 工具
-│       ├── file.py         # read_file / write_file 工具
+│       ├── file.py         # read_file / write_file / edit_file / list_dir / grep 工具
 │       └── shell.py        # run_shell 工具
 ├── tests/                  # smoke tests
 ├── docs/

@@ -98,7 +98,7 @@ findLast 从后往前找，先碰具体模式（如 `echo *`），匹配就返�
 
 ### 为什么超时 30s？
 
-跑测试够用。长任务（如 `npm install`）可能超时，后续 v0.011 上下文管理再调。超时后返回错误信息，不杀 agent loop。
+跑测试够用。长任务（如 `npm install`）可能超时，后续 Context Management 版本再调。超时后返回错误信息，不杀 agent loop。
 
 ### 为什么输出截断 2000 字符？
 
