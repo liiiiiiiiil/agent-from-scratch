@@ -1,4 +1,12 @@
 import sys
+
+# Enable terminal line editing (including reliable Backspace handling) when
+# the platform provides Python's readline support.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 from mini_agent.agent import agent_loop
 from mini_agent.context import ContextManager
 from mini_agent.prompt import build_system_prompt
