@@ -23,10 +23,14 @@ def call_llm(messages):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
+    按 BASE_URL 的 scheme 选 HTTP/HTTPSConnection（https 网关如 api.deepseek.com）。
     content 边收边 print（打字机效果），tool_calls 的 arguments 跨 chunk 拼接。
     """
     p = urlparse(BASE_URL)
-    conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=120)
+    if p.scheme == "https":
+        conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=120)
+    else:
+        conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=120)
     body = json.dumps(
         {"model": MODEL, "messages": messages, "stream": True, "tools": registry.schemas()},
         ensure_ascii=False,

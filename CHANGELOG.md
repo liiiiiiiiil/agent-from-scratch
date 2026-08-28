@@ -14,6 +14,7 @@
 - `src/mini_agent/agent.py`：`agent_loop(messages)` 改为 `agent_loop(context_manager, tool_executor)`，经 `cm.prepare_messages()` 调 LLM；消除 v0.10 的"MAX_ITERATIONS 半截状态"契约（每轮 tool results 全部回灌后才进下一轮或返回）
 - `src/mini_agent/tools/base.py`：`ToolExecutor` 加 `on_result` 结果回调（权限拒绝/handler 异常/执行成功三路径都通知，brief 截断 200 字符，回调异常只打印不影响执行）
 - `src/mini_agent/__main__.py`：组装 AgentState + ContextManager 注入 loop，`run_task` 统一 argv/交互两条路径并维护 `state.status`
+- `src/mini_agent/agent.py`：`call_llm` 按 `BASE_URL` 的 scheme 选 `HTTPConnection`/`HTTPSConnection`（此前明文 HTTP 打 https 网关会收到 302，LLM 回复为空）
 - `tests/test_tools.py`：修复 `test_run_shell_exit_code` 在 pytest 下读 stdin 挂掉的问题（放行策略绕过 ASK 交互）
 
 ### Why

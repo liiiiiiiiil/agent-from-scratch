@@ -529,7 +529,8 @@ def test_call_llm_preserves_malformed_streaming_tool_delta_for_loop():
         def close(self):
             self.closed = True
 
-    with patch("mini_agent.agent.http.client.HTTPConnection", FakeConnection):
+    with patch("mini_agent.agent.http.client.HTTPConnection", FakeConnection), \
+         patch("mini_agent.agent.http.client.HTTPSConnection", FakeConnection):
         malformed_message = call_llm([])
 
     raw_tool_calls = malformed_message["tool_calls"]
