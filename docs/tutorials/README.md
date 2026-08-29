@@ -50,7 +50,7 @@
 | 版本 | 主题 | 文档 |
 |---|---|---|
 | v0.11 | 上下文架构（AgentState + ContextManager） | [11-context-architecture.md](11-context-architecture.md) |
-| v0.12 | 预算与裁剪（token 估算 + 按轮次原子 trimming） | 待落地 |
+| v0.12 | 预算与裁剪（token 估算 + 按轮次原子 trimming） | [12-token-budget-trimming.md](12-token-budget-trimming.md) |
 | v0.13 | 上下文压缩（LLM 摘要 + State 锚定） | 待落地 |
 
 ### 阶段五：进阶能力（规划中）

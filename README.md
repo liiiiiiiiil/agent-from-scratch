@@ -95,7 +95,7 @@ python -m mini_agent             # 或交互式输入
 | 版本 | 主题 | 本版新增 | 教程 |
 |---|---|---|---|
 | **v0.11** | 上下文架构 | `AgentState` + `ContextManager` + Executor 结果回调 | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
-| v0.12 | 预算与裁剪 | token 估算 + 按轮次原子 trimming | 待落地 |
+| **v0.12** | 预算与裁剪 | token 估算 + Context Budget + 按轮次原子 trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
 | v0.13 | 上下文压缩 | LLM 摘要 + Structured State 锚定 | 待落地 |
 
 ### 阶段五：进阶能力（规划中）

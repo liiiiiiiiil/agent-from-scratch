@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.12] - 预算与裁剪
+
+### Added
+- `src/mini_agent/context.py`：`count_tokens`（`len(text) // 3` 启发式）、`ContextBudget`（窗口、输出预留和历史比例）与 `TrimPolicy`
+- `CONTEXT_WINDOW = 128_000`：写入 `config.py` 与 `config_example.py`，可由 `config_local.py` 覆盖
+- `docs/tutorials/12-token-budget-trimming.md`：第十二课教学文档
+- `tests/test_context.py`：token 估算、预算、轮次原子性、tool result 截断、保底消息与预算收敛测试
+
+### Changed
+- `ContextManager.prepare_messages()` 从完整 history 构建独立副本：超限时先截断旧 tool result，仍超限时从最老轮次删除
+- system 消息和首条 user task 不参与裁剪；带 `tool_calls` 的 assistant 消息与其连续 tool results 作为不可拆分轮次处理
+
+### Why
+- 上下文是有限资源，长任务不应因 token 累积而直接失败。
+- OpenAI tool calling 要求 tool result 紧跟相应 tool call；按轮次原子删除避免产生会导致 400 的孤儿 `role=tool` 消息。
+- 原始 history 与 AgentState 都不被裁剪，给 v0.13 历史摘要和 Structured State 锚定保留正确边界。
+
 ## [v0.11] - 上下文架构
 
 ### Added

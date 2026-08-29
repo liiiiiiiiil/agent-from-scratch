@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.11**（上下文架构）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.12**（预算与裁剪）。
 
 ## 1. 环境准备
 
@@ -39,6 +39,7 @@ PYTHONPATH=src python -m mini_agent
 | `API_KEY` | `sk-YOUR_API_KEY_HERE` | 网关密钥 |
 | `MODEL` | `EB-GLM-5.2` | 模型名 |
 | `MAX_ITERATIONS` | `10` | agent loop 最大轮数 |
+| `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 
 > 真实配置写进 `config_local.py`（不进 git）；无 `config_local.py` 时回退到 `config.py` 占位值。
 
@@ -60,9 +61,9 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.11）
+## 3. 当前能力（v0.12）
 
-v0.11 在 v0.10 的工具、权限、流式输出和并发调用能力之上，引入了独立的 `AgentState` 与 `ContextManager`。本版是纯重构：不裁剪、不压缩、不估算 token，外部行为与 v0.10 保持一致。
+v0.12 在 v0.11 的 `AgentState` 与 `ContextManager` 边界之上加入上下文预算与裁剪。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。
 
 ### 3.1 上下文架构
 
@@ -76,7 +77,7 @@ v0.11 在 v0.10 的工具、权限、流式输出和并发调用能力之上，�
 | `errors` | 权限拒绝或工具失败记录 |
 | `status` | `running` / `done` / `failed` |
 
-所有 LLM 请求都经 `ContextManager.prepare_messages()`，本版直接返回完整 history。后续版本会在此入口加入预算检查、裁剪和压缩。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
+所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 
 ```python
 state = AgentState()
@@ -87,7 +88,19 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 每轮带 `tool_calls` 的 assistant 消息，都会在进入下一轮或返回前追加全部对应的 `role=tool` 消息，避免达到迭代上限时留下协议不完整的消息序列。
 
-### 3.2 System Prompt
+### 3.2 上下文预算与裁剪
+
+`CONTEXT_WINDOW` 可在 `config_local.py` 中按模型窗口覆盖。`ContextBudget` 默认保留 15% 给模型输出，历史层最多使用窗口的 45%；system 消息和首条 user task 是保底内容，永不删除。
+
+裁剪顺序固定如下：
+
+1. 旧 tool result 保留首尾并标记省略内容。
+2. 仍超限时，从最老的完整轮次开始删除。
+3. 一轮中的 `assistant(tool_calls)` 与所有对应 `role=tool` 结果始终成组，绝不拆散。
+
+终端会输出 `[Context]` 日志，展示超限、截断和轮次删除的估算 token 节省量。保底内容本身超过预算时，agent 保留它们并继续请求，不会因裁剪逻辑崩溃。
+
+### 3.3 System Prompt
 
 启动时由 `prompt.py` 的 `build_system_prompt()` 组装 `messages[0]`，分三层：
 
@@ -102,7 +115,7 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
 
-### 3.3 工具
+### 3.4 工具
 
 | 工具 | 参数 | 权限 | 说明 |
 |---|---|---|---|
@@ -114,7 +127,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
 
-### 3.4 权限交互
+### 3.5 权限交互
 
 v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。
 

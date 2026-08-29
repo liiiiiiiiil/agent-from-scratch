@@ -1,4 +1,4 @@
-"""Unit tests for the v0.11 ContextManager.
+"""Unit tests for v0.12 context budgeting and trimming.
 
 可独立运行：PYTHONPATH=src python tests/test_context.py
 """
@@ -9,7 +9,13 @@ from typing import get_type_hints
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mini_agent.context import ContextManager, Message
+from mini_agent.context import (
+    ContextBudget,
+    ContextManager,
+    Message,
+    _split_rounds,
+    count_tokens,
+)
 from mini_agent.state import AgentState
 
 
@@ -23,11 +29,15 @@ def test_constructor_preserves_references():
     assert context.history is history
 
 
-def test_prepare_messages_returns_same_history_list():
+def test_prepare_messages_returns_a_copy_when_within_budget():
     history = [{"role": "user", "content": "calculate 1 + 1"}]
     context = ContextManager(AgentState(), history)
 
-    assert context.prepare_messages() is history
+    prepared = context.prepare_messages()
+
+    assert prepared == history
+    assert prepared is not history
+    assert prepared[0] is not history[0]
 
 
 def test_message_type_annotations_are_explicit():
@@ -52,9 +62,11 @@ def test_prepare_messages_preserves_order_and_content():
     ]
     context = ContextManager(AgentState(), history)
 
-    assert context.prepare_messages() == history
-    assert context.prepare_messages()[0] is history[0]
-    assert context.prepare_messages()[3] is history[3]
+    prepared = context.prepare_messages()
+
+    assert prepared == history
+    assert prepared[0] is not history[0]
+    assert prepared[3] is not history[3]
 
 
 def test_state_is_not_injected_or_changed():
@@ -66,15 +78,131 @@ def test_state_is_not_injected_or_changed():
 
     prepared = context.prepare_messages()
 
-    assert prepared is history
     assert prepared == [{"role": "user", "content": "update the app"}]
     assert state.snapshot() == state_before
 
 
+def test_count_tokens_uses_the_documented_heuristic():
+    assert count_tokens("abcdef") == 2
+    assert count_tokens(None) == 0
+    assert count_tokens({"content": "abcdef", "role": "user"}) == 3
+    assert count_tokens([{"content": "abcdef"}, {"content": "xyz"}]) == 3
+
+
+def test_context_budget_reserves_output_and_limits_history():
+    budget = ContextBudget(window=100, output_reserve_ratio=0.2, history_ratio=0.4)
+
+    assert budget.input_limit == 80
+    assert budget.history_limit == 40
+    assert budget.message_limit(10) == 50
+    assert budget.message_limit(90) == 90
+
+
+def test_split_rounds_keeps_tool_calls_and_results_together():
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call-1"}],
+    }
+    first_tool = {"role": "tool", "tool_call_id": "call-1", "content": "one"}
+    second_tool = {"role": "tool", "tool_call_id": "call-2", "content": "two"}
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        assistant,
+        first_tool,
+        second_tool,
+        {"role": "assistant", "content": "done"},
+    ]
+
+    prefix, rounds = _split_rounds(history)
+
+    assert prefix == history[:2]
+    assert rounds == [[assistant, first_tool, second_tool], [history[-1]]]
+
+
+def test_trim_truncates_old_tool_result_without_mutating_history():
+    tool_content = "begin-" + "x" * 900 + "-end"
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": tool_content},
+    ]
+    context = ContextManager(AgentState(), history, ContextBudget(window=250, output_reserve_ratio=0, history_ratio=0.8))
+
+    prepared = context.prepare_messages()
+
+    assert prepared[-1]["content"] != tool_content
+    assert prepared[-1]["content"].startswith("begin-")
+    assert prepared[-1]["content"].endswith("-end")
+    assert history[-1]["content"] == tool_content
+    assert [message["role"] for message in prepared] == ["system", "user", "assistant", "tool"]
+
+
+def test_trim_removes_oldest_complete_round_without_orphan_tool_results():
+    first_assistant = {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]}
+    second_assistant = {"role": "assistant", "content": None, "tool_calls": [{"id": "call-2"}]}
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        first_assistant,
+        {"role": "tool", "tool_call_id": "call-1", "content": "a" * 100},
+        second_assistant,
+        {"role": "tool", "tool_call_id": "call-2", "content": "b" * 100},
+    ]
+    context = ContextManager(AgentState(), history, ContextBudget(window=100, output_reserve_ratio=0, history_ratio=0.5))
+
+    prepared = context.prepare_messages()
+
+    assert prepared[:2] == history[:2]
+    assert second_assistant in prepared
+    assert first_assistant not in prepared
+    call_ids = {call["id"] for message in prepared if message.get("role") == "assistant" for call in message.get("tool_calls", [])}
+    assert all(
+        message.get("role") != "tool" or message["tool_call_id"] in call_ids
+        for message in prepared
+    )
+
+
+def test_protected_messages_remain_when_they_exceed_budget():
+    history = [
+        {"role": "system", "content": "s" * 300},
+        {"role": "user", "content": "u" * 300},
+        {"role": "assistant", "content": "old reply"},
+    ]
+    context = ContextManager(AgentState(), history, ContextBudget(window=30, output_reserve_ratio=0, history_ratio=0.1))
+
+    prepared = context.prepare_messages()
+
+    assert prepared == history[:2]
+
+
+def test_invalid_budget_is_rejected():
+    for kwargs in (
+        {"window": 0},
+        {"output_reserve_ratio": 1},
+        {"history_ratio": -0.1},
+    ):
+        try:
+            ContextBudget(**kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {kwargs}")
+
+
 if __name__ == "__main__":
     test_constructor_preserves_references()
-    test_prepare_messages_returns_same_history_list()
+    test_prepare_messages_returns_a_copy_when_within_budget()
     test_message_type_annotations_are_explicit()
     test_prepare_messages_preserves_order_and_content()
     test_state_is_not_injected_or_changed()
+    test_count_tokens_uses_the_documented_heuristic()
+    test_context_budget_reserves_output_and_limits_history()
+    test_split_rounds_keeps_tool_calls_and_results_together()
+    test_trim_truncates_old_tool_result_without_mutating_history()
+    test_trim_removes_oldest_complete_round_without_orphan_tool_results()
+    test_protected_messages_remain_when_they_exceed_budget()
+    test_invalid_budget_is_rejected()
     print("\n全部 context test 通过")
