@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.13] - 上下文压缩
+
+### Added
+- `ContextManager.compact()`：老轮次摘要、近期轮次保留和 Structured State 注入
+- 摘要请求复用 `http.client`，不携带工具 schema；摘要失败自动降级为 trimming
+- `docs/tutorials/13-context-compaction.md` 与压缩流程单测
+
+### Changed
+- `MAX_ITERATIONS` 从 10 调整为 50
+- `prepare_messages()` 在预算超限且存在老轮次时自动触发 compaction
+
 ## [v0.12] - 预算与裁剪
 
 ### Added

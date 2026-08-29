@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from mini_agent.config import CONTEXT_WINDOW
 from mini_agent.state import AgentState
@@ -169,12 +170,100 @@ class ContextManager:
         history: list[Message],
         budget: ContextBudget | None = None,
         trim_policy: TrimPolicy | None = None,
+        summarizer: Callable[[list[Message]], str] | None = None,
+        keep_rounds: int = 6,
     ) -> None:
         self.state = state
         self.history = history
         self.budget = budget or ContextBudget()
         self.trim_policy = trim_policy or TrimPolicy()
+        if summarizer is None:
+            def summarizer(messages: list[Message]) -> str:
+                from mini_agent.agent import summarize_messages
+                return summarize_messages(messages)
+        self.summarizer = summarizer
+        self.keep_rounds = keep_rounds
+        self._summary = ""
+        self._compacted = False
+        self._summarized_rounds = 0
+
+    def _render_state(self) -> Message:
+        snapshot = self.state.snapshot()
+        return {
+            "role": "system",
+            "content": (
+                "[Structured State]\n"
+                f"Task: {snapshot['task']}\n"
+                f"Current goal: {snapshot['current_goal']}\n"
+                f"Files changed: {', '.join(snapshot['files_changed']) or '(none)'}\n"
+                f"Errors: {', '.join(snapshot['errors']) or '(none)'}\n"
+                f"Status: {snapshot['status']}\n"
+                f"Tools executed: {len(snapshot['tool_history'])}\n"
+                "Recent completed tools (do not repeat): "
+                + ("; ".join(
+                    f"{item['tool']}({item['args']}) -> {item['brief']}"
+                    for item in snapshot['tool_history'][-4:]
+                ) or "(none)")
+            ),
+        }
+
+    def _build_messages(self) -> list[Message]:
+        if not self._compacted:
+            return [dict(message) for message in self.history]
+        prefix, rounds = _split_rounds([dict(message) for message in self.history])
+        recent = rounds[-self.keep_rounds:] if self.keep_rounds else []
+        messages = prefix[:1] + [self._render_state()]
+        if self._summary:
+            messages.append({"role": "system", "content": "[Historical Summary]\n" + self._summary})
+        if len(prefix) > 1:
+            messages.extend(prefix[1:])
+        messages.extend(message for round_messages in recent for message in round_messages)
+        return messages
+
+    def compact(self, keep_rounds: int | None = None) -> bool:
+        """Summarize old complete rounds and retain recent raw messages."""
+        keep = self.keep_rounds if keep_rounds is None else keep_rounds
+        if keep < 0:
+            raise ValueError("keep_rounds 必须大于等于 0")
+        prefix, rounds = _split_rounds([dict(message) for message in self.history])
+        if len(rounds) <= keep:
+            return False
+        eligible_end = len(rounds) - keep if keep else len(rounds)
+        start = min(self._summarized_rounds, eligible_end)
+        if eligible_end <= start:
+            return False
+        old_rounds = rounds[start:eligible_end]
+        old_messages = [message for round_messages in old_rounds for message in round_messages]
+        if self.summarizer is None:
+            return False
+        prompt = [{"role": "user", "content": (
+            "请总结以下历史消息，严格按任务、已完成步骤、最后一次成功工具调用、"
+            "已修改文件、错误、当前进度、下一步组织。禁止虚构事实，"
+            "不要重复已经完成的工具调用，也不要把旧命令当作下一步。\n" +
+            ("已有摘要：\n" + self._summary + "\n" if self._summary else "") +
+            "历史：\n" + "\n".join(str(message) for message in old_messages)
+        )}]
+        try:
+            summary = self.summarizer(prompt)
+            if not isinstance(summary, str) or not summary.strip():
+                return False
+        except Exception:
+            print("[Context] compaction failed; falling back to trimming")
+            return False
+        self._summary = summary.strip()
+        self.keep_rounds = keep
+        self._compacted = True
+        self._summarized_rounds = eligible_end
+        print(f"[Context] compacted {len(old_rounds)} old rounds")
+        return True
 
     def prepare_messages(self) -> list[Message]:
         """Build the LLM request context without mutating ``history``."""
-        return self.trim_policy.trim(self.history, self.budget)
+        messages = self._build_messages()
+        prefix, _ = _split_rounds(messages)
+        target = self.budget.message_limit(count_tokens(prefix))
+        over_budget = count_tokens(messages) > target
+        trimmed = self.trim_policy.trim(messages, self.budget)
+        if over_budget and self.compact():
+            trimmed = self.trim_policy.trim(self._build_messages(), self.budget)
+        return trimmed

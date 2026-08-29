@@ -192,6 +192,112 @@ def test_invalid_budget_is_rejected():
             raise AssertionError(f"expected ValueError for {kwargs}")
 
 
+def _tool_round(number):
+    call_id = f"call-{number}"
+    return [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": call_id}]},
+        {"role": "tool", "tool_call_id": call_id, "content": f"result {number}"},
+    ]
+
+
+def test_compact_injects_summary_and_structured_state():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(8):
+        history.extend(_tool_round(number))
+    state = AgentState(task="task")
+    state.record_tool("write_file", {"path": "main.py"}, True, "written")
+    context = ContextManager(state, history, summarizer=lambda prompt: "done: summary", keep_rounds=3)
+
+    assert context.compact()
+    prepared = context.prepare_messages()
+    assert any(message.get("content", "").startswith("[Structured State]") for message in prepared)
+    assert any(message.get("content", "").startswith("[Historical Summary]") for message in prepared)
+    assert sum(message.get("role") == "tool" for message in prepared) == 3
+    call_ids = {call["id"] for message in prepared if message.get("role") == "assistant" for call in message.get("tool_calls", [])}
+    assert all(message.get("role") != "tool" or message["tool_call_id"] in call_ids for message in prepared)
+
+
+def test_compact_failure_falls_back_without_mutating_history():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(4):
+        history.extend(_tool_round(number))
+    original = list(history)
+    context = ContextManager(AgentState(), history, summarizer=lambda prompt: (_ for _ in ()).throw(RuntimeError()))
+
+    assert context.compact(keep_rounds=2) is False
+    assert history == original
+
+
+def test_prepare_messages_automatically_compacts_when_over_budget():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(8):
+        history.extend(_tool_round(number))
+    calls = []
+    context = ContextManager(
+        AgentState(task="task"), history,
+        ContextBudget(window=120, output_reserve_ratio=0, history_ratio=0.5),
+        summarizer=lambda prompt: calls.append(prompt) or "automatic summary",
+        keep_rounds=2,
+    )
+
+    prepared = context.prepare_messages()
+
+    assert calls
+    assert any(message.get("content", "").startswith("[Historical Summary]") for message in prepared)
+    assert sum(message.get("role") == "tool" for message in prepared) <= 2
+
+
+def test_multiple_compactions_refresh_structured_state():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(8):
+        history.extend(_tool_round(number))
+    state = AgentState(task="task")
+    summaries = []
+    context = ContextManager(
+        state, history, summarizer=lambda prompt: summaries.append(prompt) or f"summary {len(summaries)}", keep_rounds=2
+    )
+
+    assert context.compact()
+    state.record_tool("write_file", {"path": "after-first.py"}, True, "written")
+    for number in range(8, 14):
+        context.history.extend(_tool_round(number))
+    assert context.compact()
+    prepared = context.prepare_messages()
+
+    assert len(summaries) == 2
+    state_message = next(message for message in prepared if message.get("content", "").startswith("[Structured State]"))
+    assert "after-first.py" in state_message["content"]
+
+
+def test_structured_state_includes_recent_completed_tools():
+    state = AgentState(task="task")
+    state.record_tool("run_shell", {"command": "echo round-11"}, True, "round-11")
+    context = ContextManager(state, [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}])
+
+    rendered = context._render_state()["content"]
+
+    assert "echo round-11" in rendered
+    assert "do not repeat" in rendered
+
+
+def test_repeated_prepare_does_not_resummarize_same_rounds():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(8):
+        history.extend(_tool_round(number))
+    calls = []
+    context = ContextManager(
+        AgentState(task="task"), history,
+        ContextBudget(window=120, output_reserve_ratio=0, history_ratio=0.5),
+        summarizer=lambda prompt: calls.append(prompt) or "stable summary",
+        keep_rounds=2,
+    )
+
+    context.prepare_messages()
+    context.prepare_messages()
+
+    assert len(calls) == 1
+
+
 if __name__ == "__main__":
     test_constructor_preserves_references()
     test_prepare_messages_returns_a_copy_when_within_budget()

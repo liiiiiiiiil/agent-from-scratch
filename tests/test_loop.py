@@ -18,6 +18,7 @@ from mini_agent.agent import call_llm, agent_loop
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS
 from mini_agent import __main__ as cli
 from mini_agent.state import AgentState
+from mini_agent.context import ContextBudget, ContextManager
 
 
 def test_import():
@@ -160,6 +161,37 @@ def test_agent_loop_context_and_executor_integration():
     assert all("state" not in message for message in context.history)
     assert context.state.snapshot() == state_before
     print("PASS: agent loop 使用 ContextManager/注入 Executor 并保持消息顺序")
+
+
+def test_agent_loop_completes_after_more_than_twenty_tool_rounds_with_compaction():
+    state = AgentState(task="long task")
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "long task"}]
+    context = ContextManager(
+        state,
+        history,
+        ContextBudget(window=180, output_reserve_ratio=0, history_ratio=0.5),
+        summarizer=lambda prompt: "long task summary",
+        keep_rounds=2,
+    )
+
+    class Executor:
+        def execute(self, name, arguments):
+            return "x" * 100
+
+    responses = [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": f"call-{index}", "type": "function",
+            "function": {"name": "fake_tool", "arguments": "{}"},
+        }]}
+        for index in range(21)
+    ] + [{"role": "assistant", "content": "long task complete"}]
+
+    with patch("mini_agent.agent.call_llm", side_effect=responses) as mocked_call:
+        result = agent_loop(context, Executor())
+
+    assert result == "long task complete"
+    assert mocked_call.call_count == 22
+    assert context._compacted is True
 
 
 def test_agent_loop_tool_call_errors_keep_protocol_and_continue():

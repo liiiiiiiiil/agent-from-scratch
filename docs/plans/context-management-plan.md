@@ -1,6 +1,6 @@
 # 阶段四：Context Management 实施计划
 
-> 状态：v0.11 已实施并验收；v0.12/v0.13 待实施
+> 状态：v0.11/v0.12/v0.13 已实施并验收
 > 评审结论：原六 Phase 方案依赖顺序正确、原则正确、粒度偏细，合并为三个版本落地；修正项见"关键架构决策"
 > 版本映射：v0.11 / v0.12 / v0.13（tag 命名弃用 v0.011，理由见 D8）
 > 关联文档：`teaching-repo-plan.md`（版本切片表已同步）、`AGENTS.md` 路线图
@@ -139,13 +139,13 @@ class TrimPolicy:
 
 ### 验收标准
 
-- [ ] LLM 调用前检查 token 预算，超限自动进入裁剪流程
-- [ ] tool result 支持截断；history 支持按轮次删除
-- [ ] System / 首条 user task 在任何情况下不被删（单测断言）
-- [ ] 裁剪后消息序列协议合法：无孤儿 tool result（单测断言，D3 正确性红线）
-- [ ] 预算可配置（window 与比例）
-- [ ] 超限时 agent 不崩，能继续任务
-- [ ] 裁剪有明确优先级且日志可观察
+- [x] LLM 调用前检查 token 预算，超限自动进入裁剪流程
+- [x] tool result 支持截断；history 支持按轮次删除
+- [x] System / 首条 user task 在任何情况下不被删（单测断言）
+- [x] 裁剪后消息序列协议合法：无孤儿 tool result（单测断言，D3 正确性红线）
+- [x] 预算可配置（window 与比例）
+- [x] 超限时 agent 不崩，能继续任务
+- [x] 裁剪有明确优先级且日志可观察
 
 ## 5. v0.13 上下文压缩（4.3）
 
@@ -190,12 +190,12 @@ def compact(self, keep_rounds: int = 6) -> None:
 
 ### 验收标准
 
-- [ ] 老历史可自动摘要，压缩后 agent 能继续原任务
-- [ ] Structured State 始终在 context 中，且由真实执行记录维护（非 summary 转述）
-- [ ] Recent history 保留原文
-- [ ] 摘要失败时降级为 trimming，agent 不崩
-- [ ] 支持多次 compaction：连续触发 2+ 次后 State 字段仍准确（单测，D7）
-- [ ] 长任务（>10 轮工具调用）不因 MAX_ITERATIONS 静默截断
+- [x] 老历史可自动摘要，压缩后 agent 能继续原任务
+- [x] Structured State 始终在压缩 context 中，且由真实执行记录维护（非 summary 转述）
+- [x] Recent history 保留原文
+- [x] 摘要失败时降级为 trimming，agent 不崩
+- [x] 支持多次 compaction：连续触发 2+ 次后 State 字段仍准确（单测，D7）
+- [x] 长任务（>10 轮工具调用）不因 MAX_ITERATIONS 静默截断
 
 ## 6. 测试与验证总表
 

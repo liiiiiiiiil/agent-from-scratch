@@ -19,7 +19,7 @@ def _safe_print(*args, **kwargs):
         pass
 
 
-def call_llm(messages):
+def call_llm(messages, include_tools=True, stream_output=True):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
@@ -31,10 +31,10 @@ def call_llm(messages):
         conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=120)
     else:
         conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=120)
-    body = json.dumps(
-        {"model": MODEL, "messages": messages, "stream": True, "tools": registry.schemas()},
-        ensure_ascii=False,
-    ).encode()
+    request_body = {"model": MODEL, "messages": messages, "stream": True}
+    if include_tools:
+        request_body["tools"] = registry.schemas()
+    body = json.dumps(request_body, ensure_ascii=False).encode()
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
@@ -62,7 +62,8 @@ def call_llm(messages):
         # content 边收边打印（打字机效果）
         if delta.get("content"):
             content_parts.append(delta["content"])
-            _safe_print(delta["content"], end="", flush=True)
+            if stream_output:
+                _safe_print(delta["content"], end="", flush=True)
 
         # tool_calls 的 arguments 跨 chunk 拼接
         for tc in delta.get("tool_calls") or []:
@@ -117,6 +118,11 @@ def call_llm(messages):
             tool_calls_acc[i] for i in sorted(tool_calls_acc)
         ]
     return message
+
+
+def summarize_messages(messages):
+    """Summarize context without tool schemas or terminal streaming."""
+    return call_llm(messages, include_tools=False, stream_output=False).get("content", "") or ""
 
 
 def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
