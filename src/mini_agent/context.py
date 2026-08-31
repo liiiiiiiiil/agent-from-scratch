@@ -332,6 +332,7 @@ class ContextManager:
                     f"{item['command']} => {item['outcome']} ({item['exit_code']})"
                     for item in snapshot.get("verification_evidence", [])
                 ) if snapshot.get("verification_evidence") else "")
+                + ("\nVerification required: true" if snapshot.get("verification_required") else "")
             ),
         }
 
@@ -403,10 +404,17 @@ class ContextManager:
 
     def prepare_messages(self) -> list[Message]:
         """Build the LLM request context without mutating ``history``."""
-        messages = self._build_messages()
-        if self._runtime_notice:
-            messages.insert(0, {"role": "system", "content": "[Runtime Notice]\n" + self._runtime_notice})
-            self._runtime_notice = None
+        # Keep the notice local until the final message view is built.  A
+        # compaction rebuilds messages, so consuming it before that rebuild
+        # would silently drop the correction reminder.
+        notice = self._runtime_notice
+
+        def with_notice(source: list[Message]) -> list[Message]:
+            if notice:
+                source.insert(0, {"role": "system", "content": "[Runtime Notice]\n" + notice})
+            return source
+
+        messages = with_notice(self._build_messages())
         prefix, _ = _split_rounds(messages)
         target = self.budget.message_limit(count_tokens(prefix))
         over_budget = count_tokens(messages) > target
@@ -414,8 +422,11 @@ class ContextManager:
         trimmed = self.trim_policy.trim(messages, self.budget, observer=trim_observer)
         if over_budget and self.compact():
             trimmed = self.trim_policy.trim(
-                self._build_messages(), self.budget, observer=trim_observer
+                with_notice(self._build_messages()), self.budget, observer=trim_observer
             )
         self.last_stats = self._stats(trimmed)
         self._emit("prepared", {}, self.last_stats)
+        # Consume only after the final context was successfully constructed.
+        if notice == self._runtime_notice:
+            self._runtime_notice = None
         return trimmed

@@ -76,6 +76,26 @@ def test_runtime_notice_is_one_shot_and_not_history():
     assert not any("Runtime Notice" in str(m.get("content")) for m in second)
 
 
+def test_runtime_notice_survives_compaction_and_fallback_trim():
+    history = [{"role": "user", "content": "task"}]
+    for index in range(8):
+        round_messages = _tool_round(index)
+        round_messages[-1]["content"] = "x" * 200
+        history.extend(round_messages)
+
+    for summarizer in (lambda _: "summary", lambda _: (_ for _ in ()).throw(RuntimeError("boom"))):
+        context = ContextManager(
+            AgentState(task="task"), history,
+            budget=ContextBudget(window=300, output_reserve_ratio=0, history_ratio=0.5),
+            summarizer=summarizer,
+            keep_rounds=1,
+        )
+        context.set_runtime_notice("continue")
+        prepared = context.prepare_messages()
+        assert sum("[Runtime Notice]" in str(m.get("content")) for m in prepared) == 1
+        assert sum("[Runtime Notice]" in str(m.get("content")) for m in context.prepare_messages()) == 0
+
+
 def test_message_type_annotations_are_explicit():
     init_hints = get_type_hints(ContextManager.__init__)
     prepare_hints = get_type_hints(ContextManager.prepare_messages)

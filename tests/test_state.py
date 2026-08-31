@@ -81,6 +81,32 @@ def test_verification_evidence_generation_and_purpose():
     state = AgentState()
     state.record_tool("run_shell", {"command": "make", "purpose": "execution"}, True, "[exit=0] ok")
     assert not state.has_verification_evidence()
+
+
+def test_execution_shell_invalidates_evidence_even_without_file_changes():
+    state = AgentState()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=0] passed")
+    assert state.has_verification_evidence()
+    state.record_tool("run_shell", {"command": "echo ok", "purpose": "execution"}, True, "[exit=0] ok")
+    assert not state.has_verification_evidence()
+    assert state.completion_reminder()["verification_required"] is True
+
+
+def test_execution_failure_invalidates_but_permission_rejection_does_not():
+    state = AgentState()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=0] passed")
+    state.record_tool("run_shell", {"command": "false", "purpose": "execution"}, False, "[exit=1] failed")
+    assert not state.has_verification_evidence()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=0] passed")
+    state.record_tool("run_shell", {"command": "rm *", "purpose": "execution"}, False, "权限拒绝: 用户拒绝执行 run_shell")
+    assert state.has_verification_evidence()
+
+
+def test_failed_verification_requires_retry():
+    state = AgentState()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, False, "[exit=1] failed")
+    reminder = state.completion_reminder()
+    assert reminder is not None and reminder["verification_required"] is True
     state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=0] passed")
     assert state.has_verification_evidence()
     state.record_tool("write_file", {"path": "a.py"}, True, "written")

@@ -37,6 +37,7 @@ class AgentState:
     verification_evidence: list[VerificationEvidence] = field(default_factory=list)
     _verification_generation: int = field(default=0, init=False, repr=False)
     _last_verified_generation: int = field(default=-1, init=False, repr=False)
+    _verification_required: bool = field(default=False, init=False, repr=False)
     _lock: Any = field(
         default_factory=Lock,
         init=False,
@@ -71,8 +72,15 @@ class AgentState:
                 path: Any = args_copy.get("path")
                 if isinstance(path, str) and path not in self.files_changed:
                     self.files_changed.append(path)
-                self._verification_generation += 1
-                self.verification_evidence.clear()
+                self._invalidate_verification()
+
+            # An execution shell is potentially mutating even when its
+            # command looks read-only or exits non-zero.  Permission
+            # rejection means the handler never ran and therefore cannot
+            # invalidate evidence.
+            if name == "run_shell" and args_copy.get("purpose", "execution") == "execution":
+                if "权限拒绝" not in brief:
+                    self._invalidate_verification()
 
             if name == "run_shell" and args_copy.get("purpose", "execution") == "verification":
                 text = str(brief)
@@ -87,7 +95,12 @@ class AgentState:
                     output=text,
                 )
                 self.verification_evidence.append(evidence)
-                self._last_verified_generation = self._verification_generation if passed else -1
+                if passed:
+                    self._last_verified_generation = self._verification_generation
+                    self._verification_required = False
+                else:
+                    self._last_verified_generation = -1
+                    self._verification_required = True
 
             if not ok:
                 self.errors.append(f"{name}: {brief}")
@@ -100,7 +113,15 @@ class AgentState:
             self.todos.clear(); self.verification_evidence.clear()
             self._verification_generation += 1
             self._last_verified_generation = -1
+            self._verification_required = False
             self.status = "running"
+
+    def _invalidate_verification(self) -> None:
+        """Invalidate evidence after an operation that may change the environment."""
+        self._verification_generation += 1
+        self.verification_evidence.clear()
+        self._last_verified_generation = -1
+        self._verification_required = True
 
     def unfinished_todos(self) -> list[dict[str, str]]:
         with self._lock:
@@ -113,7 +134,7 @@ class AgentState:
     def completion_reminder(self) -> dict[str, object] | None:
         with self._lock:
             missing = [t.content for t in self.todos if t.status != "completed"]
-            needs_verify = bool(self.files_changed) and not (self.verification_evidence and self._last_verified_generation == self._verification_generation and self.verification_evidence[-1].outcome == "passed")
+            needs_verify = self._verification_required
             if not missing and not needs_verify:
                 return None
             return {"unfinished_todos": missing, "verification_required": needs_verify, "message": "任务尚未满足完成条件，请继续执行并验证。"}
@@ -169,5 +190,6 @@ class AgentState:
                     {"command": e.command, "outcome": e.outcome, "exit_code": e.exit_code, "output": e.output}
                     for e in self.verification_evidence
                 ],
+                "verification_required": self._verification_required,
             }
             return snapshot

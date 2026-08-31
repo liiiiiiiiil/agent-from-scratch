@@ -28,7 +28,7 @@ git diff --stat v0.15
 
 ## 为什么需要本版
 
-Todo 不是证据；一次成功写入后，旧测试结果也不再可信。每次成功 `write_file`/`edit_file` 递增 generation 并清空旧证据。只有 `run_shell` 的 `purpose="verification"`、明确解析到 `[exit=0]` 的结果，才满足当前 generation 的验证条件；execution 命令、非零退出和超时都不能满足。
+Todo 不是证据；一次成功写入后，旧测试结果也不再可信。每次成功 `write_file`/`edit_file` 以及所有实际进入执行阶段的 `run_shell(purpose="execution")` 都递增 generation 并清空旧证据，即使命令最终非零退出或超时也一样。只有 `run_shell` 的 `purpose="verification"`、明确解析到 `[exit=0]` 的结果，才满足当前 generation 的验证条件；建议把最终测试或检查作为最后一个 verification 调用。这是在零第三方依赖下的保守正确性选择。
 
 ## 关键流程
 
@@ -44,7 +44,7 @@ begin_task -> Plan(update_todo) -> Execute(tools) -> Observe(state)
 
 正常 shell 命令始终带 `[exit=N]`；超时只带 `[timeout]`。`purpose` 默认 `execution`，旧调用兼容。验证证据记录 command、outcome、exit_code 和 output。
 
-`completion_reminder()` 只在存在未完成 Todo 或写入后缺少验证时返回提醒。Runtime Notice 只注入下一次请求，不写入 history，最多纠正一次；第二次仍有缺口就 blocked，不无限循环。
+`completion_reminder()` 只在存在未完成 Todo 或可能改变环境的操作后缺少验证时返回提醒。Runtime Notice 只注入下一次请求（即使该请求触发自动 compaction 也会保留），不写入 history，最多纠正一次；第二次仍有缺口就 blocked，不无限循环。
 
 ## 设计选择与边界
 
