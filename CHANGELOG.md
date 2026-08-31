@@ -9,6 +9,7 @@
 
 - Added verification evidence, task reset, completion reminders, and blocked/failed task states.
 - Added `run_shell` purpose enum with unified exit status output.
+- Added stage-five end-to-end acceptance coverage for project instructions, Todo replanning, context compaction, and verification closure.
 
 ## [v0.15] - Todo / Task State
 

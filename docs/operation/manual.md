@@ -89,7 +89,9 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目指令作为受保�
 | `tool_history` | 工具名、参数、成功状态、结果摘要 |
 | `files_changed` | 成功写入或编辑过的文件路径 |
 | `errors` | 权限拒绝或工具失败记录 |
-| `status` | `running` / `done` / `failed` |
+| `status` | `running` / `done` / `blocked` / `failed` |
+| `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
+| `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 

@@ -1,6 +1,6 @@
 # 阶段五：Project-Aware Task Orchestration 实施计划
 
-> 状态：方案待确认；阶段四 v0.13 完成后开始实施
+> 状态：已完成（v0.14–v0.16 已实现并验收）
 > 版本映射：v0.14 / v0.15 / v0.16
 > 前置阶段：`context-management-plan.md`（v0.11–v0.13）
 > 关联文档：`teaching-repo-plan.md`、`AGENTS.md` 路线图
@@ -373,6 +373,7 @@ class AgentState:
 | v0.14 | 指令发现顺序 / 缺失降级 / protected context / 长度上限 | 在含 `AGENTS.md` 的仓库启动，确认 Agent 遵守一条仓库特定规则 |
 | v0.15 | Todo 原子更新 / 状态不变量 / State 渲染 / 多次 compaction | 执行三步任务，观察 Todo 跨长上下文持续更新 |
 | v0.16 | 简单任务直达 / 失败调整 / 验证步骤 / 单次完成提醒 | 修复一个失败测试，首次修复失败后调整计划并最终通过 |
+| 阶段 E2E | `tests/test_stage5_e2e.py`：规则加载、Todo、失败重规划、compaction、协议完整性与最终验证 | 临时 Git 项目中脚本化模型响应驱动完整闭环 |
 
 阶段级端到端验收任务：
 
@@ -447,12 +448,12 @@ v0.16 Plan-driven Execution
 
 阶段五只有同时满足以下条件才算完成：
 
-- [ ] v0.14、v0.15、v0.16 三个版本分别有可读的增量 diff 和对应 git tag
-- [ ] 三篇教程均按仓库模板包含目标、核心概念、设计理由和使用指导
-- [ ] Project Instructions、Task State、Execution State、Context 四者边界在代码与文档中一致
-- [ ] 默认测试套件全部通过且无第三方依赖
-- [ ] 阶段级端到端任务完成，包含一次失败后的计划调整和最终验证
-- [ ] 阶段四的 trimming/compaction 与 OpenAI tool calling 协议没有回归
-- [ ] 路线图、README、操作手册、教程索引和 CHANGELOG 全部同步
+- [x] v0.14、v0.15、v0.16 三个版本分别有可读的增量 diff 和对应 git tag
+- [x] 三篇教程均按仓库模板包含目标、核心概念、设计理由和使用指导
+- [x] Project Instructions、Task State、Execution State、Context 四者边界在代码与文档中一致
+- [x] 默认测试套件全部通过且无第三方依赖
+- [x] 阶段级端到端任务完成，包含一次失败后的计划调整和最终验证
+- [x] 阶段四的 trimming/compaction 与 OpenAI tool calling 协议没有回归
+- [x] 路线图、README、操作手册、教程索引和 CHANGELOG 全部同步
 
 完成阶段五后，mini_agent 将具备一个轻量编程 agent 的关键工作闭环：**理解项目规则、维护显式计划、执行真实操作、根据结果调整，并在验证后完成任务。** 后续阶段再根据实际使用中的主要失败模式，选择独立 Plan Mode、失败恢复、持久化记忆、安全隔离或多 agent，而不是在本阶段预先设计。

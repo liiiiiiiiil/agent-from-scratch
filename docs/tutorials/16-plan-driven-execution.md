@@ -1,6 +1,6 @@
 # 第 16 课：Plan-driven Execution（v0.16）
 
-> 当前开发版本 v0.16（尚未创建 tag） | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
+> 稳定版本 v0.16 | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
 
 ## 本课目标
 
@@ -21,15 +21,15 @@ Plan -> Execute -> Observe -> Replan -> Verify -> done
 
 ## 前置条件与版本切换
 
-需要 Python 3.10+；运行时只有标准库。建议先阅读第 15 课，理解 Todo 的原子更新和 Structured State。v0.16 尚未创建 tag 时，在开发工作区查看差异：
+需要 Python 3.10+；运行时只有标准库。建议先阅读第 15 课，理解 Todo 的原子更新和 Structured State。在对应 tag 查看差异：
 
 ```bash
 git checkout v0.15
-git diff --stat v0.15..HEAD
-git diff v0.15..HEAD -- src/mini_agent/state.py src/mini_agent/agent.py src/mini_agent/context.py src/mini_agent/tools/shell.py
+git diff --stat v0.15..v0.16
+git diff v0.15..v0.16 -- src/mini_agent/state.py src/mini_agent/agent.py src/mini_agent/context.py src/mini_agent/tools/shell.py
 ```
 
-发布后，把范围替换为 `v0.15..v0.16`。切换回工作区版本后再运行本课示例。
+切换回工作区版本后再运行本课示例。
 
 ## 新增与改动文件
 
@@ -147,6 +147,14 @@ PY
 典型场景是：模型先建立 Todo，执行写入后看到 `verification_required`，再运行 verification 命令；若命令返回 `[exit=1]` 或 `[timeout]`，状态保持待验证，模型应据输出调整 Todo 并重试。
 
 ## 测试与验收
+
+### 阶段级 E2E 验收
+
+`tests/test_stage5_e2e.py` 在临时 Git 项目中直接组装 runtime，并用脚本化模型响应驱动完整的“加载 AGENTS.md → 建立 Todo → 调查 → 错误修改 → 验证失败 → 重排 Todo → 修正 → 验证通过”流程。测试预置带工具结果的历史以触发 compaction，记录每次 `prepare_messages()` 快照，断言项目指令和 Structured State 在压缩后仍存在、失败验证发生在第二次修改前、最终文件与 `[exit=0]` 证据一致，并检查每个 tool call 都有对应的 `role=tool` 结果。
+
+```bash
+PYTHONPATH=src python -m pytest -q tests/test_stage5_e2e.py
+```
 
 完整测试和本课核心测试均可直接运行：
 
