@@ -41,6 +41,8 @@
 | v0.09 | 权限系统升级 | [09-permission-upgrade.md](09-permission-upgrade.md) |
 | v0.10 | shell 执行 | [10-shell-execution.md](10-shell-execution.md) |
 
+> `v0.06.1` 是 v0.06 的协议状态修订，没有独立课程；需要复现该修订时可直接 `git checkout v0.06.1`。
+
 完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑，但它仍然缺少长上下文管理、任务规划、失败恢复和安全隔离等进阶能力。
 
 ### 阶段四：Context Management
@@ -80,7 +82,7 @@ git diff v0.01..v0.02      # 查看两个版本之间的变化
 2. **克隆仓库**：
    ```bash
    git clone <repo>
-   cd mini_agent
+   cd agent-from-scratch
    ```
 3. **配置 LLM 网关**：复制 `src/mini_agent/config_example.py` 为 `src/mini_agent/config_local.py`，填入你的 `BASE_URL`/`API_KEY`/`MODEL`（`config_local.py` 不进 git，由 `config.py` 自动加载）
 4. **选择运行方式**：

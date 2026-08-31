@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.12**（预算与裁剪）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.13**（上下文压缩）。
 
 ## 1. 环境准备
 
@@ -12,7 +12,7 @@
 
 **方式一：开发模式安装（推荐）**
 ```bash
-cd mini_agent
+cd agent-from-scratch
 pip install -e .
 ```
 安装后可从任意目录运行 `python -m mini_agent`。
@@ -38,7 +38,7 @@ PYTHONPATH=src python -m mini_agent
 | `BASE_URL` | `http://your-gateway-host/v3/openai/model` | LLM 网关地址 |
 | `API_KEY` | `sk-YOUR_API_KEY_HERE` | 网关密钥 |
 | `MODEL` | `EB-GLM-5.2` | 模型名 |
-| `MAX_ITERATIONS` | `10` | agent loop 最大轮数 |
+| `MAX_ITERATIONS` | `50` | agent loop 最大轮数 |
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 
 > 真实配置写进 `config_local.py`（不进 git）；无 `config_local.py` 时回退到 `config.py` 占位值。
@@ -61,9 +61,9 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.12）
+## 3. 当前能力（v0.13）
 
-v0.12 在 v0.11 的 `AgentState` 与 `ContextManager` 边界之上加入上下文预算与裁剪。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。
+v0.13 在 v0.12 的预算与裁剪之上加入历史压缩。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。
 
 ### 3.1 上下文架构
 
@@ -100,7 +100,13 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 终端会输出 `[Context]` 日志，展示超限、截断和轮次删除的估算 token 节省量。保底内容本身超过预算时，agent 保留它们并继续请求，不会因裁剪逻辑崩溃。
 
-### 3.3 System Prompt
+### 3.3 上下文压缩
+
+当预算超限且存在足够旧的历史轮次时，`ContextManager` 会调用一次不带工具 schema、也不向终端流式输出的摘要请求。摘要结果以 `[Historical Summary]` system 消息注入；近期轮次仍按完整 tool-calling 轮次保留。`AgentState.snapshot()` 每次重新渲染为 `[Structured State]`，用于锚定真实执行事实。
+
+摘要允许有损，State 不依赖摘要推断。摘要请求失败、返回空内容或没有可压缩的旧轮次时，ContextManager 自动退回 trimming；原始 `history` 始终不被修改。
+
+### 3.4 System Prompt
 
 启动时由 `prompt.py` 的 `build_system_prompt()` 组装 `messages[0]`，分三层：
 
@@ -115,7 +121,7 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
 
-### 3.4 工具
+### 3.5 工具
 
 | 工具 | 参数 | 权限 | 说明 |
 |---|---|---|---|
@@ -127,7 +133,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
 
-### 3.5 权限交互
+### 3.6 权限交互
 
 v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。
 
@@ -172,16 +178,16 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 
 > 二维权限示例：配置 `{"read_file": {"*": "allow", "*.env": "deny"}}` 后，读取 `.env` 文件会被拒绝，其他文件正常放行。
 
-### 3.5 工具调用流程
+### 3.7 工具调用流程
 1. LLM 返回 `tool_calls`（一轮可含多个，代码用线程池并发执行）
 2. `ToolExecutor` 先过权限闸门（`PermissionGate.guard`）
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
 
-### 3.6 相对路径约定
-工具的相对路径（如 `examples/input.txt`）从**项目根目录** `mini_agent/` 起算：
+### 3.8 相对路径约定
+工具的相对路径（如 `examples/input.txt`）按进程的**当前工作目录**解析，不会自动相对已安装的包目录。使用仓库示例时，建议先进入仓库根目录：
 ```bash
-# 在 mini_agent/ 目录下运行
+# 在 agent-from-scratch/ 目录下运行
 python -m mini_agent "读取 examples/input.txt"
 ```
 
@@ -195,8 +201,11 @@ python -m mini_agent "读取 examples/input.txt"
 $env:PYTHONPATH="src"; python tests/test_prompt.py   # system prompt
 $env:PYTHONPATH="src"; python tests/test_loop.py      # import 链路
 $env:PYTHONPATH="src"; python tests/test_tools.py     # 工具 + 权限
+$env:PYTHONPATH="src"; python tests/test_state.py      # AgentState
+$env:PYTHONPATH="src"; python tests/test_context.py    # 预算、裁剪与压缩
+$env:PYTHONPATH="src"; python tests/test_executor.py   # Executor 结果回调
 ```
-覆盖：system prompt 分层组装、import 链路、registry 注册、calculate 正常/非法输入、read_file 分段读取、读写文件、edit_file 精确替换/多匹配安全检查、list_dir、grep、run_shell 执行/退出码/二维权限、权限闸门。
+覆盖：system prompt 分层组装、import 链路、registry 注册、AgentState、ContextManager 预算/裁剪/压缩、Executor 结果回调、calculate 正常/非法输入、read_file 分段读取、读写文件、edit_file 精确替换/多匹配安全检查、list_dir、grep、run_shell 执行/退出码/二维权限、权限闸门。
 
 ### 4.2 快速验证 import 链路
 ```bash
@@ -214,13 +223,13 @@ python -c "from mini_agent.tools import registry; print([t.name for t in registr
 > 注意：必须用 `http.client`（代码已如此），不能用 requests/urllib——网关对 `Accept-Encoding: gzip` 响应异常。`call_llm` 已显式设 `Accept-Encoding: identity` 绕过，并按 `BASE_URL` 的 scheme 选择 HTTP 或 HTTPS 连接。
 
 ### Q2：任务没完成就停了
-可能触发 `MAX_ITERATIONS=10` 上限，agent 返回 `"达到最大迭代次数"`。改 `config_local.py` 调高即可，但注意长对话会累积上下文。
+可能触发 `MAX_ITERATIONS=50` 上限，agent 返回 `"达到最大迭代次数"`。可在 `config_local.py` 中调整，但注意长对话会累积上下文。
 
 ### Q3：工具失败直接报错退出
-这是有意为之——agent loop 不加 try/except 兜底，保持核心逻辑清晰。工具层（`ToolExecutor.execute`）会捕获 handler 异常并返回错误信息给 LLM，但 loop 本身的异常会向上抛。
+agent loop 不对 LLM 或 CLI 顶层异常做兜底；这是为了保持核心路径清晰。工具层（`ToolExecutor.execute`）会捕获 handler 异常并将错误结果回灌给 LLM，但 loop 本身的顶层异常仍会向上抛出。
 
 ### Q4：write_file 被拒绝
 检查权限交互的输入。选 `reject` 或输错字符会拒绝。重新运行即可。
 
-### Q3：中文乱码（Windows 控制台）
+### Q5：中文乱码（Windows 控制台）
 `__main__.py` 已对 win32 设 `sys.stdout.reconfigure(encoding="utf-8")`。若仍乱码，PowerShell 执行 `chcp 65001` 切到 UTF-8。

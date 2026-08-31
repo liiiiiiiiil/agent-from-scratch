@@ -7,7 +7,7 @@
 逐步生长的编程 Agent —— 持续迭代，从零构建一个能干活的 AI Agent。
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#)
+[![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#quick-start)
 [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#learning-path)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
 
@@ -20,6 +20,8 @@
 > **What this is**: A tutorial repo sliced by git tags and organized by capability stages. Starting from a minimal agent loop (v0.01, no tools, pure conversation), each version **introduces exactly one new concept**, growing all the way to a Mini Agent that can read/write files, run commands, and run tests (incremental versions, no fixed endpoint).
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
+
+> **Current status**: The code and tutorials are up to `v0.13` (context compaction); `v0.14` and later remain planned.
 
 ## Why learn agents with this repo
 
@@ -40,13 +42,25 @@ cd agent-from-scratch
 cp src/mini_agent/config_example.py src/mini_agent/config_local.py
 #    edit config_local.py with your BASE_URL / API_KEY / MODEL (this file is gitignored)
 
-# 3. Install (pick one)
-pip install -e .                 # dev mode, recommended
-$env:PYTHONPATH="src"           # no install, PowerShell; bash uses PYTHONPATH=src
+# 3. Install (recommended)
+pip install -e .
 
 # 4. Run
 python -m mini_agent "calculate 123 * 456"
 python -m mini_agent             # or interactive input
+```
+
+To run without installing, use this on Linux/macOS:
+
+```bash
+PYTHONPATH=src python -m mini_agent "calculate 123 * 456"
+```
+
+In PowerShell:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m mini_agent "calculate 123 * 456"
 ```
 
 > Requires Python 3.9+ (uses `dict[str, ...]` and other modern syntax).
@@ -86,6 +100,8 @@ Goal: add interaction, file operations, and command execution so the Agent can h
 | **v0.09** | Permission system upgrade | 2D permission (tool_name, pattern) + fnmatch | [09-permission-upgrade.md](./docs/tutorials/09-permission-upgrade.md) |
 | **v0.10** | Shell execution | `run_shell` tool + subprocess + timeout + output truncation + 2D command pattern permission | [10-shell-execution.md](./docs/tutorials/10-shell-execution.md) |
 
+> `v0.06.1` is a protocol-state fix for v0.06 and has no separate tutorial; use `git checkout v0.06.1` to reproduce it.
+
 After `v0.10`, the Agent can inspect a project, search and modify files, run commands, run tests, and control high-risk operations through permissions. This is the repo's first stage milestone.
 
 ### Stage 4: Context Management
@@ -95,8 +111,8 @@ Goal: let the Agent keep executing complex tasks reliably within a finite contex
 | Version | Topic | What this version adds | Tutorial |
 |---|---|---|---|
 | **v0.11** | Context architecture | `AgentState` + `ContextManager` + Executor result callback | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
-| v0.12 | Budget and trimming | token estimation + atomic round trimming | coming soon |
-| v0.13 | Context compaction | LLM summary + Structured State anchor | coming soon |
+| **v0.12** | Budget and trimming | token estimation + atomic round trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
+| **v0.13** | Context compaction | LLM summary + Structured State anchor | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
 
 ### Stage 5: Advanced Capabilities (planned)
 
@@ -119,14 +135,16 @@ git checkout v0.02          # see the diff: git diff v0.01..v0.02
 ## Project Structure
 
 ```
-mini_agent/
+agent-from-scratch/
 ├── src/mini_agent/
 │   ├── agent.py            # agent loop: call_llm + agent_loop
+│   ├── __main__.py         # CLI entry point
 │   ├── config.py           # config placeholder + auto-loads config_local.py
 │   ├── config_example.py   # config template (copy to config_local.py)
 │   ├── context.py           # ContextManager: unified pre-LLM entry point
 │   ├── state.py             # AgentState: execution state separate from messages
 │   ├── permission.py       # permission gate: allow/deny/ask
+│   ├── prompt.py            # layered system prompt builder
 │   └── tools/
 │       ├── base.py         # Tool / ToolRegistry / ToolExecutor (with result callback)
 │       ├── calc.py         # calculate tool
@@ -144,7 +162,7 @@ mini_agent/
 ## Design Philosophy
 
 - **Progressive growth**: Add just enough capability each step, avoid over-engineering. New features are first recorded as intent in `AGENTS.md`, then implemented.
-- **Keep the core loop clear**: The agent loop has no try/except fallbacks — tool failures throw and halt. This is intentional, keeping the main path readable. Complex fault tolerance is introduced at the tool layer as needed.
+- **Keep the core loop clear**: The agent loop does not catch top-level LLM or CLI exceptions; the tool layer catches handler failures and feeds error results back to the LLM. Complex fault tolerance is introduced at the tool layer as needed.
 - **Zero dependencies**: Standard library only, staying self-contained and easy to deploy. Switching HTTP clients reintroduces a known pitfall (see `AGENTS.md` key constraints).
 
 ## Documentation
@@ -153,6 +171,17 @@ mini_agent/
 - [Full usage manual](./docs/operation/manual.md) — complete usage, config, FAQ for the latest version
 - [Roadmap & plans](./docs/plans/teaching-repo-plan.md) — stage navigation and version slicing plan
 - [AGENTS.md](./AGENTS.md) — project architecture & constraints memo
+- [CHANGELOG.md](./CHANGELOG.md) — versioned change history
+
+## Tests
+
+With pytest installed in the development environment:
+
+```bash
+PYTHONPATH=src python -m pytest -q
+```
+
+Without pytest, run the standard-library smoke-test entry points listed in the [usage manual](./docs/operation/manual.md#4-测试).
 
 ## Contributing
 
@@ -160,7 +189,7 @@ Issues and PRs welcome. For new version slices, please read `docs/plans/teaching
 
 ## License
 
-MIT (LICENSE file to be added)
+MIT — see [LICENSE](./LICENSE)
 
 ---
 

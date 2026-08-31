@@ -1,6 +1,6 @@
 # 第 8 课：文件操作补全
 
-> 版本 v0.08 | [上一课](07-system-prompt.md) | [下一课](09-shell-execution.md)
+> 版本 v0.08 | [上一课](07-system-prompt.md) | [下一课](09-permission-upgrade.md)
 
 ## 本课目标
 
