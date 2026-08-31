@@ -139,12 +139,8 @@ class ToolExecutor:
         # ① 权限闸门：返回 None=放行，返回 str=拒绝原因
         denied = self.gate.guard(name, arguments)
         if denied:
-            print(f"[Permission] {denied}")
             self._notify_result(name, arguments, False, denied)
             return denied
-
-        print(f"[Executor] 执行 Tool: {name}")
-        print(f"[Executor] 参数: {arguments}")
 
         try:
             result = tool.handler(**arguments)

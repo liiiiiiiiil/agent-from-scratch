@@ -8,6 +8,8 @@
 import os
 import json
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
 from threading import Event, Lock
 from unittest.mock import patch
 
@@ -123,7 +125,8 @@ def test_agent_loop_context_and_executor_integration():
         assert messages is context.prepared_snapshots[-1]
         return responses.pop(0)
 
-    with patch("mini_agent.agent.call_llm", side_effect=fake_call_llm):
+    output = StringIO()
+    with patch("mini_agent.agent.call_llm", side_effect=fake_call_llm), redirect_stdout(output):
         result = agent_loop(context, tool_executor)
 
     assert result == "both tools completed"
@@ -160,6 +163,9 @@ def test_agent_loop_context_and_executor_integration():
     assert context.prepared_snapshots[1][3:5] == context.history[3:5]
     assert all("state" not in message for message in context.history)
     assert context.state.snapshot() == state_before
+    rendered = output.getvalue()
+    assert rendered.index("结果 [first_tool]") < rendered.index("结果 [second_tool]")
+    assert "[Executor]" not in rendered
     print("PASS: agent loop 使用 ContextManager/注入 Executor 并保持消息顺序")
 
 

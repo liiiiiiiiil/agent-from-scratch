@@ -11,6 +11,9 @@ from mini_agent.tools.base import ToolExecutor
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS
 
 
+DISPLAY_RESULT_MAX_LENGTH = 1200
+
+
 def _safe_print(*args, **kwargs):
     """Best-effort observation output that cannot break agent execution."""
     try:
@@ -19,7 +22,15 @@ def _safe_print(*args, **kwargs):
         pass
 
 
-def call_llm(messages, include_tools=True, stream_output=True):
+def _display_result(value):
+    """Keep terminal output readable without changing the tool result."""
+    text = str(value)
+    if len(text) > DISPLAY_RESULT_MAX_LENGTH:
+        text = text[:DISPLAY_RESULT_MAX_LENGTH] + "... [输出已截断]"
+    return text.replace("\n", "\n    ")
+
+
+def call_llm(messages, include_tools=True, stream_output=True, tool_registry=None):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
@@ -33,7 +44,9 @@ def call_llm(messages, include_tools=True, stream_output=True):
         conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=120)
     request_body = {"model": MODEL, "messages": messages, "stream": True}
     if include_tools:
-        request_body["tools"] = registry.schemas()
+        request_body["tools"] = (
+            tool_registry if tool_registry is not None else registry
+        ).schemas()
     body = json.dumps(request_body, ensure_ascii=False).encode()
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -135,8 +148,13 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
     for i in range(MAX_ITERATIONS):
-        _safe_print(f"\n=== [{i+1}] LLM 回复 ===")
-        msg = call_llm(context_manager.prepare_messages())
+        _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
+        prepared_messages = context_manager.prepare_messages()
+        run_registry = getattr(tool_executor, "registry", None)
+        if run_registry is None:
+            msg = call_llm(prepared_messages)
+        else:
+            msg = call_llm(prepared_messages, tool_registry=run_registry)
 
         tool_calls = msg.get("tool_calls", [])
         invalid_tool_call_ids = set()
@@ -216,15 +234,20 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         context_manager.history.append(msg)
 
-        # content 已在 call_llm 中流式打印，此处不再重复
+        # content 已在 call_llm 中流式打印；这里补齐换行，避免下一段粘连。
+        _safe_print()
+
         for tc in msg.get("tool_calls", []):
             function = tc.get("function", {}) if isinstance(tc, dict) else {}
             if not isinstance(function, dict):
                 function = {}
-            _safe_print(
-                f"  决策调用: {function.get('name', '<missing>')}"
-                f"({function.get('arguments', '<missing>')})"
-            )
+            name = function.get("name", "<missing>")
+            arguments = function.get("arguments", "<missing>")
+            try:
+                arguments = json.dumps(json.loads(arguments), ensure_ascii=False)
+            except (TypeError, json.JSONDecodeError):
+                arguments = str(arguments)
+            _safe_print(f"  工具: {name} {arguments}")
 
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
@@ -254,13 +277,18 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             try:
                 result = tool_executor.execute(name, args)
                 result_text = str(result)
-                _safe_print(f"  执行 {name} -> {result_text}")
                 return tool_call_id, result_text
             except Exception as error:
                 return tool_call_id, f"工具调用失败: {type(error).__name__}"
 
         with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
             results = list(pool.map(_run, tool_calls))
+
+        # Threads execute concurrently, but terminal output follows tool-call order.
+        for tc, (tool_call_id, content) in zip(tool_calls, results):
+            function = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = function.get("name", "<missing>") if isinstance(function, dict) else "<missing>"
+            _safe_print(f"  结果 [{name}]:\n    {_display_result(content)}")
 
         for tool_call_id, content in results:
             context_manager.history.append({
