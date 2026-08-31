@@ -1,8 +1,8 @@
 # 阶段四：Context Management 实施计划
 
-> 状态：v0.11/v0.12/v0.13 已实施并验收；v0.13.1 Context Observability 待实施
+> 状态：v0.11/v0.12/v0.13 已实施并验收；Context Observability 已并入 v0.13
 > 评审结论：原六 Phase 方案依赖顺序正确、原则正确、粒度偏细，合并为三个版本落地；修正项见"关键架构决策"
-> 版本映射：v0.11 / v0.12 / v0.13 / v0.13.1（tag 命名弃用 v0.011，理由见 D8）
+> 版本映射：v0.11 / v0.12 / v0.13（tag 命名弃用 v0.011，理由见 D8）
 > 关联文档：`teaching-repo-plan.md`（版本切片表已同步）、`AGENTS.md` 路线图
 
 ## 1. 目标与定位
@@ -203,17 +203,16 @@ def compact(self, keep_rounds: int = 6) -> None:
 |---|---|---|
 | v0.11 | State 记录更新 / prepare_messages 恒等构建 | v0.10 典型任务回归 |
 | v0.12 | 轮次划分无孤儿 / 保底不删 / 预算循环收敛 | 反复读大文件触发裁剪，观察日志 |
-| v0.13 | compact mock / 失败降级 / 多次压缩 State 准确 | 20+ 轮长任务跨压缩完成 |
-| v0.13.1 | ContextStats 分桶 / trim 与 compact 事件 / observer 隔离 | 观察一次长任务的 Context、Trim、Compact 日志 |
+| v0.13 | compact mock / 失败降级 / 多次压缩 State 准确 / ContextStats 分桶 / trim 与 compact 事件 / observer 隔离 | 20+ 轮长任务跨压缩完成，并观察 Context、Trim、Compact 日志 |
 
 测试原则：单测全部 mock LLM（零网络依赖），风格与现有 `tests/` 一致；协议合法性（无孤儿 tool result）是唯一红线断言。
 
-## 7. v0.13.1 Context Observability 增强
+## 7. Context Observability 增强
 
-`v0.13.1` 是 v0.13 的维护/增强版本，不新增教学小阶段，也不创建独立教程。它为每次 LLM 请求提供 Context token 统计，并记录 trimming/compaction 事件；详细说明追加在现有 `docs/tutorials/13-context-compaction.md`。
+该能力并入 v0.13，不单独占用教学版本。它为每次 LLM 请求提供 Context token 统计，并记录 trimming/compaction 事件；详细说明位于现有 `docs/tutorials/13-context-compaction.md`。
 
 - `ContextStats` 使用互斥的 `system` / `task` / `state` / `history` / `tool_result` 分桶，另列输出 `reserve`。
-- `ContextManager` 保留 `last_stats` / `stats_snapshot()`，并支持 observer 回调；默认终端输出可由 `CONTEXT_OBSERVABILITY = True` 关闭。
+- `ContextManager` 保留 `last_stats` / `stats_snapshot()`，并支持 observer 回调；默认终端输出可由 `CONTEXT_OBSERVABILITY = False` 关闭。
 - trim 事件包含截断或删除轮次及节省 token；compact 事件包含压缩轮次、摘要大小和 recent 轮次。
 - 观测逻辑不修改 history，不改变 tool calling 协议；observer 异常被吞掉。
 
@@ -223,7 +222,7 @@ def compact(self, keep_rounds: int = 6) -> None:
 2. 将 TrimPolicy 的截断/整轮删除改为可观察事件。
 3. 为 compaction 成功和失败降级发出事件。
 4. 增加 stats、事件、关闭开关和 observer 隔离测试。
-5. 在 v0.13 教程追加 v0.13.1 说明，更新 CHANGELOG、版本信息并创建 tag `v0.13.1`。
+5. 在 v0.13 教程补充 Context Observability 说明，并同步测试和操作手册。
 
 验收标准：
 
@@ -238,5 +237,5 @@ def compact(self, keep_rounds: int = 6) -> None:
 - `AGENTS.md`：路线图与教学阶段划分已同步；每版完成时打勾并更新"当前架构"
 - `docs/plans/README.md`：索引已加本文档
 - `docs/tutorials/README.md`：阶段四改为 Context Management 三版表
-- `docs/tutorials/13-context-compaction.md`：追加 v0.13.1 Context Observability 说明（不新增教程）
-- `CHANGELOG.md`、`README.md`、`README_EN.md`、`docs/operation/manual.md`、`AGENTS.md`、`pyproject.toml`：同步增强版本信息
+- `docs/tutorials/13-context-compaction.md`：补充 Context Observability 说明
+- `README.md`、`README_EN.md`、`docs/operation/manual.md`、`AGENTS.md`、`pyproject.toml`：将增强能力并入 v0.13 说明

@@ -4,7 +4,7 @@
 
 ## 本课目标
 
-v0.13.1 已经能压缩旧对话，但模型仍不知道当前项目的约束，例如测试命令、代码风格和禁止操作。本课加入一个边界清晰的输入源：启动 Agent 时读取适用的 `AGENTS.md`，将其作为受保护的项目指令注入每次 LLM 请求。
+v0.13 已经能压缩旧对话并观察上下文变化，但模型仍不知道当前项目的约束，例如测试命令、代码风格和禁止操作。本课加入一个边界清晰的输入源：启动 Agent 时读取适用的 `AGENTS.md`，将其作为受保护的项目指令注入每次 LLM 请求。
 
 读完本课后，你应能：
 
@@ -18,17 +18,13 @@ v0.13.1 已经能压缩旧对话，但模型仍不知道当前项目的约束，
 - Python 3.9+，仓库运行时仍然只有标准库依赖。
 - 已读 [第 13 课](13-context-compaction.md)，理解 `ContextManager`、`AgentState` 和历史压缩。
 
-v0.14 当前仍是开发版本，仓库尚未创建 `v0.14` tag。先从稳定基线查看本版差异：
-
 ```bash
-git checkout v0.13.1
-git diff --stat v0.13.1..HEAD
-git diff v0.13.1..HEAD -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_instructions.py tests/test_prompt.py tests/test_context.py
+git checkout v0.14
+git diff --stat v0.13..v0.14
+git diff v0.13..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_instructions.py tests/test_prompt.py tests/test_context.py
 ```
 
-发布 tag 后，再将第一条命令替换为 `git checkout v0.14`。
-
-## 本版新增与改动
+## 新增与改动文件
 
 | 文件 | 变化 | 作用 |
 |---|---|---|
@@ -39,7 +35,11 @@ git diff v0.13.1..HEAD -- src/mini_agent/instructions.py src/mini_agent/prompt.p
 | `tests/test_instructions.py` | 新增加载器测试 | 覆盖顺序、非 Git、读取和截断 |
 | `tests/test_prompt.py`、`tests/test_context.py` | 增加注入与保留测试 | 验证 prompt 区块和压缩后的存活性 |
 
-## 从发现到 LLM 请求
+## 为什么需要本版
+
+上下文管理只能保留模型已经知道的信息，不能让模型自动获得仓库约束。把项目规则混入普通 history 又会被裁剪或摘要，因此需要独立发现规则，并把它们放入受保护的 system context。
+
+## 关键流程
 
 ```text
 启动 cwd
@@ -53,7 +53,9 @@ git diff v0.13.1..HEAD -- src/mini_agent/instructions.py src/mini_agent/prompt.p
 
 `history` 仍只保存 user、assistant 和 tool 消息。ContextManager 构建请求时先复制受保护消息，再复制 history；进入压缩模式后，受保护消息仍位于消息前缀，Structured State、Historical Summary 和近期轮次接在其后。因此项目规则不会被 `TrimPolicy` 删除，也不会随旧轮次摘要消失。
 
-## InstructionLoader 的规则
+## 实现拆解
+
+### InstructionLoader 的规则
 
 `InstructionLoader(cwd, max_chars=12000)` 提供两个主要接口：`discover()` 返回路径，`load()` 返回带来源标记的文本。
 
@@ -65,7 +67,7 @@ git diff v0.13.1..HEAD -- src/mini_agent/instructions.py src/mini_agent/prompt.p
 
 首版刻意不做以下事情：不执行指令文件中的命令，不把自然语言规则转换成权限规则，不读取 `.cursorrules` 或 `CLAUDE.md`，也不根据工具后来访问的目录动态重新加载规则。作用域固定在**进程启动时的 cwd**；项目指令只能影响模型选择行为，文件写入和 shell 执行仍由 `PermissionGate` 决定。
 
-## CLI 与上下文边界
+### CLI 与上下文边界
 
 `__main__.py` 启动时执行一次：
 
@@ -76,7 +78,11 @@ context = ContextManager(state, history)
 context.protected_messages = [{"role": "system", "content": system_prompt}]
 ```
 
-没有 `AGENTS.md` 时，`project_instructions` 为空，生成的 prompt 和 v0.13.1 兼容。即使预算超限，受保护消息也会保留；代价是极端情况下可供 history 使用的空间变少，这是保护项目约束的明确取舍。
+没有 `AGENTS.md` 时，`project_instructions` 为空，生成的 prompt 和 v0.13 兼容。即使预算超限，受保护消息也会保留；代价是极端情况下可供 history 使用的空间变少，这是保护项目约束的明确取舍。
+
+## 设计选择与边界
+
+规则只在进程启动时加载一次，保证实现和作用域可解释；代价是运行期间新增或切换目录不会动态刷新。项目指令影响模型行为，但不改变 `PermissionGate` 的授权结果。读取失败会降级为来源标记，不阻断 Agent 启动。
 
 ## 最小无网络示例
 
@@ -125,7 +131,7 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 - 项目指令不在 `history` 中，并在 trimming/compaction 后仍存在；
 - 指令文本不会改变 `PermissionGate` 的 allow/deny/ask 结果。
 
-## 完整代码索引
+## 本版特性、下一课与代码索引
 
 - [instructions.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/instructions.py)
 - [prompt.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/prompt.py)
@@ -135,6 +141,6 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 - [test_prompt.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_prompt.py)
 - [test_context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_context.py)
 
-## 本版独有特性与下一课
+### 本版独有特性与下一课
 
 v0.14 的新增能力是“静态项目规则进入 Agent 上下文”，而不是任务计划、动态目录规则或权限升级。下一课 v0.15 将把动态 Todo / Task State 从自然语言中分离出来，并让它在压缩后仍可恢复。

@@ -55,8 +55,7 @@
 |---|---|---|
 | v0.11 | 上下文架构（AgentState + ContextManager） | [11-context-architecture.md](11-context-architecture.md) |
 | v0.12 | 预算与裁剪（token 估算 + 按轮次原子 trimming） | [12-token-budget-trimming.md](12-token-budget-trimming.md) |
-| v0.13 | 上下文压缩（LLM 摘要 + State 锚定） | [13-context-compaction.md](13-context-compaction.md) |
-| v0.13.1 | 上下文压缩增强（Context Observability） | [13-context-compaction.md](13-context-compaction.md)（同一教程） |
+| v0.13 | 上下文压缩（LLM 摘要 + State 锚定 + Context Observability） | [13-context-compaction.md](13-context-compaction.md) |
 
 ### 阶段五：项目感知与任务编排
 

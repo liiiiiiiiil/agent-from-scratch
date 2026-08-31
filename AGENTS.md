@@ -9,6 +9,7 @@
 设计原则：
 - **零第三方依赖**（仅 Python 标准库），保持自包含、易部署。
 - **渐进式生长**：每次只加刚好够用的能力，避免过度设计。新功能先在 `AGENTS.md` 记下意图，再落地代码。
+- **补丁版本收敛**：不引入新教学概念的 patch 版本不创建独立教程，也不进入 README 或教程索引；必要说明并入所属 minor 版本教程，发布记录仅在 CHANGELOG 中追溯。
 - **核心 loop 保持清晰**：agent loop 不对 LLM 或 CLI 顶层异常做兜底；工具执行异常由工具层/执行器转换为错误结果并回灌给 LLM。复杂容错按需在工具层或执行器层引入。
 
 ## 教程文档规则与标准
@@ -119,8 +120,7 @@ agent-from-scratch/
 - **v0.10 shell 执行**：新增 `tools/shell.py`（`run_shell` 工具，`subprocess.run` + `shell=True` + 超时 30s + 输出截断 2000 字符 + 退出码前缀）。`PERMISSION_RULES` 加 `run_shell` 二维权限（`git *`/`python *`/`pip *`/`ls *`/`cat *`/`echo *` → allow，`*` → ask）。`prompt.py` header 能力描述更新为"读写改文件、跑命令、做数学计算"。不做 BashArity 命令泛化——fnmatch 通配符已够用。
 - **v0.11 上下文架构**（纯重构，外部行为与 v0.10 一致）：新增 `state.py`（`AgentState`：task/current_goal/tool_history/files_changed/errors/status，`record_tool` 由 Executor 回调驱动，加锁 + `snapshot()` 深拷贝）与 `context.py`（`ContextManager.prepare_messages()` 作为 LLM 调用前统一入口）。`agent_loop` 签名改为 `(context_manager, tool_executor)`，`ToolExecutor` 加 `on_result` 回调（权限拒绝/异常/成功三路径都通知，State 更新 loop 不感知）。消除 v0.10"MAX_ITERATIONS 半截状态"契约：每轮 tool results 全部回灌后才进下一轮或返回。
 - **v0.12 预算与裁剪**：`context.py` 新增 `count_tokens`（`len(text) // 3` 启发式）、`ContextBudget`（`CONTEXT_WINDOW` 比例预算）与 `TrimPolicy`。`prepare_messages()` 每次基于完整 history 生成副本；超限时先截断最老 tool result，再按完整轮次原子删除，system 与首条 user task 永不删除，无孤儿 tool result。
-- **v0.13 上下文压缩**：老轮次通过无工具摘要请求压缩为 Historical Summary，近期轮次保留原文；`AgentState` 重新渲染为 Structured State 锚定事实，摘要失败降级为 trimming，`MAX_ITERATIONS = 50`。
-- **v0.13.1 Context Observability 增强**：`ContextManager` 提供 `ContextStats`/`stats_snapshot()` 与 `ContextEvent` observer；默认输出每次请求的互斥 token 分桶及 trimming/compaction 事件，可由 `CONTEXT_OBSERVABILITY` 关闭；不新增独立教程。
+- **v0.13 上下文压缩**：老轮次通过无工具摘要请求压缩为 Historical Summary，近期轮次保留原文；`AgentState` 重新渲染为 Structured State 锚定事实，摘要失败降级为 trimming，`MAX_ITERATIONS = 50`。`ContextManager` 同时提供 `ContextStats`/`stats_snapshot()` 与 `ContextEvent` observer；默认输出每次请求的互斥 token 分桶及 trimming/compaction 事件，可由 `CONTEXT_OBSERVABILITY` 关闭。
 - **v0.14 Project Instructions**：启动时按 root → cwd 加载 `AGENTS.md`，作为 protected context 注入每次请求；12,000 字符上限，不改变权限规则。
 - **v0.15 Todo / Task State**：`AgentState` 管理最多 50 项 Todo，`update_todo` 通过实例 registry 更新并由 Structured State 每轮渲染；不自动规划或持久化。
 - 迭代上限默认值为 `MAX_ITERATIONS = 50`，可由 `config_local.py` 覆盖；超限直接返回“达到最大迭代次数”。
@@ -142,8 +142,7 @@ agent-from-scratch/
 - [x] **v0.10 shell 执行**：`run_shell` 工具 + subprocess + 超时 + 输出截断 + 二维命令模式权限
 - [x] **v0.11 上下文架构**（阶段四 4.1）：`AgentState`（状态独立于 messages）+ `ContextManager`（LLM 调用前统一入口，分层构建）
 - [x] **v0.12 预算与裁剪**（阶段四 4.2）：token 启发式估算 + Context Budget（比例配置）+ 按轮次原子 trimming（无孤儿 tool result）
-- [x] **v0.13 上下文压缩**（阶段四 4.3）：老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大
-- [x] **v0.13.1 上下文可观测性增强**（阶段四维护版本）：ContextStats 分桶 + trimming/compaction 事件
+- [x] **v0.13 上下文压缩**（阶段四 4.3）：老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大 + Context 可观测性
 - [x] **v0.14 Project Instructions**：自动发现并注入受保护的 `AGENTS.md` 项目规则
 - [x] **v0.15 Todo / Task State**：显式动态任务状态与原子更新
 - [ ] **v0.16 Plan-driven Execution**：计划驱动执行与验证闭环

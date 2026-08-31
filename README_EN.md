@@ -112,8 +112,7 @@ Goal: let the Agent keep executing complex tasks reliably within a finite contex
 |---|---|---|---|
 | **v0.11** | Context architecture | `AgentState` + `ContextManager` + Executor result callback | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
 | **v0.12** | Budget and trimming | token estimation + atomic round trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
-| **v0.13** | Context compaction | LLM summary + Structured State anchor | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
-| **v0.13.1** | Context observability enhancement | ContextStats + trim/compact events | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) (same tutorial) |
+| **v0.13** | Context compaction | LLM summary + Structured State anchor + context observability | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
 
 ### Stage 5: Project-Aware Task Orchestration
 
