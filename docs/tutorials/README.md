@@ -63,7 +63,7 @@
 | 版本 | 主题 | 状态 |
 |---|---|---|
 | v0.14 | Project Instructions | [14-project-instructions.md](14-project-instructions.md) |
-| v0.15 | Todo / Task State | 规划中 |
+| v0.15 | Todo / Task State | [15-task-state.md](15-task-state.md) |
 | v0.16 | Plan-driven Execution | 规划中 |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
@@ -81,7 +81,7 @@ git diff v0.01..v0.02      # 查看两个版本之间的变化
 
 ## 环境准备（一次性）
 
-1. **Python 3.9+**（用了 `dict[str, ...]` 等新语法）
+1. **Python 3.10+**（当前主线统一使用 Python 3.10 及以上版本）
 2. **克隆仓库**：
    ```bash
    git clone <repo>

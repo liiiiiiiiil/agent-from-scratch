@@ -13,15 +13,18 @@ from mini_agent.context import ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.prompt import build_system_prompt
 from mini_agent.state import AgentState
-from mini_agent.tools import registry
+from mini_agent.tools import create_registry, registry
 from mini_agent.tools.base import ToolExecutor
 
 
 def main():
+    global registry
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
     state = AgentState()
+    run_registry = create_registry(state)
+    registry = run_registry
     instructions = InstructionLoader(os.getcwd()).load()
     history = []
     system_prompt = build_system_prompt(project_instructions=instructions) if instructions else build_system_prompt()
@@ -31,7 +34,7 @@ def main():
     }]
     context = ContextManager(state, history)
     context.protected_messages = protected_messages
-    tool_executor = ToolExecutor(registry, on_result=state.record_tool)
+    tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
 
     def run_task(user_input):
         state.status = "running"

@@ -22,6 +22,7 @@ def test_defaults_are_independent():
     assert first.files_changed == []
     assert first.errors == []
     assert first.status == "running"
+    assert first.todos == []
 
     first.tool_history.append({"tool": "calculate"})
     first.files_changed.append("first.py")
@@ -29,6 +30,36 @@ def test_defaults_are_independent():
     assert second.tool_history == []
     assert second.files_changed == []
     assert second.errors == []
+
+
+def test_todo_updates_are_atomic_and_derive_current_goal():
+    state = AgentState()
+    state.update_todos([
+        {"content": "  inspect code  "},
+        {"content": "run tests", "status": "in_progress"},
+    ])
+    assert state.snapshot()["todos"] == [
+        {"content": "inspect code", "status": "pending"},
+        {"content": "run tests", "status": "in_progress"},
+    ]
+    before = state.snapshot()
+    try:
+        state.update_todos([
+            {"content": "new", "status": "in_progress"},
+            {"content": "also new", "status": "in_progress"},
+        ])
+        assert False, "重复 in_progress 应拒绝"
+    except ValueError:
+        pass
+    assert state.snapshot() == before
+
+
+def test_todo_does_not_enter_execution_state():
+    state = AgentState()
+    state.record_tool("update_todo", {"todos": []}, True, "updated")
+    state.record_tool("update_todo", {"todos": []}, False, "failed")
+    assert state.snapshot()["tool_history"] == []
+    assert state.snapshot()["errors"] == []
 
 
 def test_record_success_and_failure():
@@ -148,4 +179,6 @@ if __name__ == "__main__":
     test_recorded_args_are_independent_copies()
     test_snapshot_is_consistent_and_independent()
     test_concurrent_record_tool_updates_are_safe()
+    test_todo_updates_are_atomic_and_derive_current_goal()
+    test_todo_does_not_enter_execution_state()
     print("\n全部 state test 通过")

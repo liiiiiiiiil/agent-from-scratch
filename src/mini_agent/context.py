@@ -313,6 +313,9 @@ class ContextManager:
                 "[Structured State]\n"
                 f"Task: {snapshot['task']}\n"
                 f"Current goal: {snapshot['current_goal']}\n"
+                "Todos: " + ("; ".join(
+                    f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]
+                ) or "(none)") + "\n"
                 f"Files changed: {', '.join(snapshot['files_changed']) or '(none)'}\n"
                 f"Errors: {', '.join(snapshot['errors']) or '(none)'}\n"
                 f"Status: {snapshot['status']}\n"
@@ -329,7 +332,8 @@ class ContextManager:
         source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])
         source.extend(dict(message) for message in self.history)
         if not self._compacted:
-            return source
+            first_user = next((i for i, m in enumerate(source) if m.get("role") == "user"), len(source))
+            return source[:first_user] + [self._render_state()] + source[first_user:]
         prefix, rounds = _split_rounds(source)
         recent = rounds[-self.keep_rounds:] if self.keep_rounds else []
         first_user = next(

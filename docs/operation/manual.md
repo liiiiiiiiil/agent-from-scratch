@@ -1,6 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.14**（Project Instructions）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.15**（Todo / Task State）。
+
+## v0.15 Todo 状态
+
+模型可调用 `update_todo` 提交完整任务列表。状态为 `pending`、`in_progress` 或 `completed`，最多一个进行中项；更新失败时旧状态不变。Todo 属于 AgentState，Execution State（工具历史、文件、错误）仍由执行器维护；每轮请求通过 Structured State 注入，压缩后也会恢复。v0.15 不自动规划、持久化或阻断完成。
 
 ## v0.14 项目指令
 
@@ -9,7 +13,7 @@
 ## 1. 环境准备
 
 ### 1.1 依赖
-- Python 3.9+（用了 `dict[str, ...]` 等新语法）
+- Python 3.10+（项目统一使用 Python 3.10 及以上版本）
 - 零第三方依赖，仅 Python 标准库
 
 ### 1.2 安装方式
@@ -65,7 +69,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.14）
+## 3. 当前能力（v0.15）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。
 

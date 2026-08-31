@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- Raised the current mainline minimum supported Python version from 3.9 to 3.10.
+- Recreated the recommended development environment with Python 3.10.
+
+## [v0.15] - Todo / Task State
+
+- Added state-bound `update_todo` with atomic validation and Structured State rendering.
+- Added per-run registries to isolate Todo state between AgentState instances.
+- v0.15 does not auto-plan, persist todos, or block completion.
+
 ## [v0.14] - Project Instructions
 
 ### Added

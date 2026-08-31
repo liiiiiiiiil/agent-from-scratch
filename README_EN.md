@@ -6,7 +6,7 @@
 
 逐步生长的编程 Agent —— 持续迭代，从零构建一个能干活的 AI Agent。
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#quick-start)
 [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#learning-path)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
@@ -21,7 +21,7 @@
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
-> **Current status**: The code and tutorials are up to `v0.14` (Project Instructions).
+> **Current status**: The code and tutorials are up to `v0.15` (Todo / Task State).
 
 ## Why learn agents with this repo
 
@@ -63,7 +63,7 @@ $env:PYTHONPATH="src"
 python -m mini_agent "calculate 123 * 456"
 ```
 
-> Requires Python 3.9+ (uses `dict[str, ...]` and other modern syntax).
+> Requires Python 3.10+ (the project standardizes on Python 3.10 and newer).
 
 ## Learning Path
 
@@ -120,7 +120,7 @@ Goal: let the Agent keep executing complex tasks reliably within a finite contex
 | Version | Topic | Status |
 |---|---|---|
 | v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
-| v0.15 | Todo / Task State | planned |
+| v0.15 | Todo / Task State | [15-task-state.md](./docs/tutorials/15-task-state.md) |
 | v0.16 | Plan-driven Execution | planned |
 | Later versions | Failure recovery, verification loops, observability, memory, sandboxing, and more | as needed |
 

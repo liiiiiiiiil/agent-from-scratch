@@ -10,7 +10,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mini_agent.tools import registry, executor
+from mini_agent.tools import create_registry, registry, executor
+from mini_agent.state import AgentState
 from mini_agent.tools.base import Tool, ToolRegistry, ToolExecutor
 from mini_agent.permission import PermissionGate, PermissionPolicy, ALLOW, DENY, ASK
 
@@ -20,6 +21,17 @@ def test_registry():
     expected = ["calculate", "read_file", "write_file", "edit_file", "list_dir", "grep", "run_shell"]
     assert names == expected, names
     print(f"PASS: registry 包含 {len(expected)} 个工具")
+
+
+def test_state_registry_todo_isolation():
+    first_state, second_state = AgentState(), AgentState()
+    first = ToolExecutor(create_registry(first_state), gate=PermissionGate(PermissionPolicy({"update_todo": ALLOW})))
+    second = ToolExecutor(create_registry(second_state), gate=PermissionGate(PermissionPolicy({"update_todo": ALLOW})))
+    first.execute("update_todo", {"todos": [{"content": "first"}]})
+    assert first_state.snapshot()["todos"] == [{"content": "first", "status": "pending"}]
+    assert second_state.snapshot()["todos"] == []
+    assert first_state.snapshot()["tool_history"] == []
+    print("PASS: Todo registry 与执行状态按 AgentState 隔离")
 
 
 def test_calculate():
@@ -262,6 +274,7 @@ def test_run_shell_permission():
 
 if __name__ == "__main__":
     test_registry()
+    test_state_registry_todo_isolation()
     test_calculate()
     test_calculate_invalid()
     test_read_file()

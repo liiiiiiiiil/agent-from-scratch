@@ -48,10 +48,10 @@
 ## 版本状态
 
 - **稳定基线**：`v0.13`（已创建 Git tag，可按教程复现）。
-- **当前开发版本**：`v0.14`（Project Instructions）。
+- **当前开发版本**：`v0.15`（Todo / Task State）。
 - 进行中的版本不要在稳定版手册中标为已发布；创建 tag 前应完成本文件、README、中英文教程索引、操作手册和 CHANGELOG 的一致性检查。
 
-## 当前架构（v0.13.1）
+## 当前架构（v0.15）
 
 标准 Python `src/` 包布局：
 
@@ -122,6 +122,7 @@ agent-from-scratch/
 - **v0.13 上下文压缩**：老轮次通过无工具摘要请求压缩为 Historical Summary，近期轮次保留原文；`AgentState` 重新渲染为 Structured State 锚定事实，摘要失败降级为 trimming，`MAX_ITERATIONS = 50`。
 - **v0.13.1 Context Observability 增强**：`ContextManager` 提供 `ContextStats`/`stats_snapshot()` 与 `ContextEvent` observer；默认输出每次请求的互斥 token 分桶及 trimming/compaction 事件，可由 `CONTEXT_OBSERVABILITY` 关闭；不新增独立教程。
 - **v0.14 Project Instructions**：启动时按 root → cwd 加载 `AGENTS.md`，作为 protected context 注入每次请求；12,000 字符上限，不改变权限规则。
+- **v0.15 Todo / Task State**：`AgentState` 管理最多 50 项 Todo，`update_todo` 通过实例 registry 更新并由 Structured State 每轮渲染；不自动规划或持久化。
 - 迭代上限默认值为 `MAX_ITERATIONS = 50`，可由 `config_local.py` 覆盖；超限直接返回“达到最大迭代次数”。
 - 包未 pip install 时需 `PYTHONPATH=src`；`pip install -e .` 后可免。
 
@@ -144,7 +145,7 @@ agent-from-scratch/
 - [x] **v0.13 上下文压缩**（阶段四 4.3）：老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大
 - [x] **v0.13.1 上下文可观测性增强**（阶段四维护版本）：ContextStats 分桶 + trimming/compaction 事件
 - [x] **v0.14 Project Instructions**：自动发现并注入受保护的 `AGENTS.md` 项目规则
-- [ ] **v0.15 Todo / Task State**：显式动态任务状态
+- [x] **v0.15 Todo / Task State**：显式动态任务状态与原子更新
 - [ ] **v0.16 Plan-driven Execution**：计划驱动执行与验证闭环
 - [ ] **...**（持续迭代，按需追加）
 

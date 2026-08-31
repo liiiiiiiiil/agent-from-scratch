@@ -37,7 +37,8 @@ def test_prepare_messages_returns_a_copy_when_within_budget():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history
+    assert prepared[1:] == history
+    assert prepared[0]["content"].startswith("[Structured State]")
     assert prepared is not history
     assert prepared[0] is not history[0]
 
@@ -76,9 +77,11 @@ def test_prepare_messages_preserves_order_and_content():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history
+    assert prepared[0] == history[0]
+    assert prepared[1]["content"].startswith("[Structured State]")
+    assert prepared[2:] == history[1:]
     assert prepared[0] is not history[0]
-    assert prepared[3] is not history[3]
+    assert prepared[4] is not history[3]
 
 
 def test_state_is_not_injected_or_changed():
@@ -90,7 +93,8 @@ def test_state_is_not_injected_or_changed():
 
     prepared = context.prepare_messages()
 
-    assert prepared == [{"role": "user", "content": "update the app"}]
+    assert prepared[0]["content"].startswith("[Structured State]")
+    assert prepared[1:] == [{"role": "user", "content": "update the app"}]
     assert state.snapshot() == state_before
 
 
@@ -149,7 +153,7 @@ def test_trim_truncates_old_tool_result_without_mutating_history():
     assert prepared[-1]["content"].startswith("begin-")
     assert prepared[-1]["content"].endswith("-end")
     assert history[-1]["content"] == tool_content
-    assert [message["role"] for message in prepared] == ["system", "user", "assistant", "tool"]
+    assert [message["role"] for message in prepared] == ["system", "system", "user", "assistant", "tool"]
 
 
 def test_trim_removes_oldest_complete_round_without_orphan_tool_results():
@@ -163,11 +167,13 @@ def test_trim_removes_oldest_complete_round_without_orphan_tool_results():
         second_assistant,
         {"role": "tool", "tool_call_id": "call-2", "content": "b" * 100},
     ]
-    context = ContextManager(AgentState(), history, ContextBudget(window=100, output_reserve_ratio=0, history_ratio=0.5))
+    context = ContextManager(AgentState(), history, ContextBudget(window=110, output_reserve_ratio=0, history_ratio=0.5))
 
     prepared = context.prepare_messages()
 
-    assert prepared[:2] == history[:2]
+    assert prepared[0] == history[0]
+    assert prepared[1]["content"].startswith("[Structured State]")
+    assert prepared[2] == history[1]
     assert second_assistant in prepared
     assert first_assistant not in prepared
     call_ids = {call["id"] for message in prepared if message.get("role") == "assistant" for call in message.get("tool_calls", [])}
@@ -187,7 +193,9 @@ def test_protected_messages_remain_when_they_exceed_budget():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history[:2]
+    assert prepared[0] == history[0]
+    assert prepared[1]["content"].startswith("[Structured State]")
+    assert prepared[2] == history[1]
 
 
 def test_invalid_budget_is_rejected():

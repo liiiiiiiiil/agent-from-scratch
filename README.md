@@ -6,7 +6,7 @@
 
 A step-by-step tutorial for building a coding agent from scratch — in incremental versions (v0.01 → ongoing).
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#快速开始)
 [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#学习路径)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
@@ -21,7 +21,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
-> **当前状态**：最新代码和教程已到 `v0.14`（Project Instructions）。
+> **当前状态**：最新代码和教程已到 `v0.15`（Todo / Task State）。
 
 ## 为什么用这个仓库学 Agent
 
@@ -63,7 +63,7 @@ $env:PYTHONPATH="src"
 python -m mini_agent "帮我算一下 123 * 456"
 ```
 
-> 需要 Python 3.9+（用了 `dict[str, ...]` 等新语法）。
+> 需要 Python 3.10+（项目统一使用 Python 3.10 及以上版本）。
 
 ## 学习路径
 
@@ -120,7 +120,7 @@ python -m mini_agent "帮我算一下 123 * 456"
 | 版本 | 主题 | 状态 |
 |---|---|---|
 | v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
-| v0.15 | Todo / Task State | 规划中 |
+| v0.15 | Todo / Task State | [15-task-state.md](./docs/tutorials/15-task-state.md) |
 | v0.16 | Plan-driven Execution | 规划中 |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
