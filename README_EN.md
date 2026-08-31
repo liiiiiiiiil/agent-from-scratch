@@ -99,8 +99,6 @@ Tutorials are organized by capability stage, while versions remain the basic uni
   </tbody>
 </table>
 
-> `v0.06.1` is a protocol-state fix for v0.06 and has no separate tutorial; use `git checkout v0.06.1` to reproduce it.
-
 After `v0.10`, the Agent can inspect a project, search and modify files, run commands, run tests, and control high-risk operations through permissions. This is the repo's first stage milestone.
 
 **How to learn by version:**
