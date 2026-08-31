@@ -116,12 +116,12 @@ python -m mini_agent "帮我算一下 123 * 456"
 
 ### 阶段五：项目感知与任务编排
 
-| 版本 | 主题 | 状态 |
-|---|---|---|
-| v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
-| v0.15 | Todo / Task State | [15-task-state.md](./docs/tutorials/15-task-state.md) |
-| v0.16 | Plan-driven Execution | 规划中 |
-| 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
+| 版本 | 主题 | 本版新增 | 教程 |
+|---|---|---|---|
+| **v0.14** | Project Instructions | 自动发现并注入项目级 `AGENTS.md` 指令 | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
+| **v0.15** | Todo / Task State | 显式 Todo 任务状态与 Structured State 注入 | [15-task-state.md](./docs/tutorials/15-task-state.md) |
+| **v0.16** | Plan-driven Execution | 计划驱动执行、验证证据与 blocked/failed 状态 | [16-plan-driven-execution.md](./docs/tutorials/16-plan-driven-execution.md) |
+| 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 | — |
 
 **如何切版本学习：**
 
