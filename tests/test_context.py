@@ -42,6 +42,16 @@ def test_prepare_messages_returns_a_copy_when_within_budget():
     assert prepared[0] is not history[0]
 
 
+def test_protected_messages_are_not_history_and_survive_compaction():
+    history = [{"role": "user", "content": "task"}]
+    protected = [{"role": "system", "content": "<project_instructions>\nrule\n</project_instructions>"}]
+    context = ContextManager(AgentState(task="task"), history, protected_messages=protected)
+    prepared = context.prepare_messages()
+    assert prepared[0] == protected[0]
+    assert protected[0] not in history
+    assert context.history == history
+
+
 def test_message_type_annotations_are_explicit():
     init_hints = get_type_hints(ContextManager.__init__)
     prepare_hints = get_type_hints(ContextManager.prepare_messages)

@@ -24,27 +24,29 @@
 ```text
 发现并加载项目规则
         ↓
-建立符合规则的 Todo
+Plan：建立符合规则的动态 Todo
         ↓
-执行工具，记录真实结果
+Execute：执行工具
         ↓
-推进或调整 Todo
+Observe：读取工具结果、错误和环境变化
         ↓
-验证结果并完成任务
+Replan：根据事实推进或调整 Todo
+        ↓
+Verify：执行验证并记录完成证据
 ```
 
-这三个版本不是三个独立功能：Project Instructions 是规划的约束输入，Todo 是规划的运行时表示，Plan-driven Execution 则让 Todo 真正参与任务生命周期。
+这三个版本不是三个独立功能：Project Instructions 是规划的约束输入，Todo 是 Agent 的动态工作计划，Execution State 是 Runtime 的事实，Verification 是任务完成的证据；Plan-driven Execution 让它们共同参与任务生命周期。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
 - 自动发现并注入适用于当前工作目录的 `AGENTS.md`
-- 区分 Project Instructions、Task State、Execution State 和 LLM Context
-- 用显式 Todo 表示复杂任务的当前计划
+- 区分 Project Instructions、Task State、Execution State、Verification 和 LLM Context
+- 用显式 Todo 表示复杂任务的动态工作计划
 - 由模型通过受控工具更新 Todo，而不是从自然语言中猜测进度
 - 在 Context compaction 后重新注入准确的项目规则与任务状态
-- 建立“规划 → 执行 → 调整 → 验证 → 完成”的最小闭环
+- 建立“Plan → Execute → Observe → Replan → Verify”的最小闭环
 
 ### 2.2 本阶段不做
 
@@ -72,9 +74,10 @@
 | D6 | **Execution State 由 Executor 回调维护；Task State 由模型通过 Todo 工具维护** | 事实来自真实执行，计划来自模型意图，两者来源可审计 |
 | D7 | **Todo 是复杂任务的工作机制，不强迫简单任务先规划** | 保持简单任务的最短路径，避免为一次读取或计算增加无意义调用 |
 | D8 | **同一时刻最多一个 `in_progress` Todo** | 当前工作焦点唯一，渲染和状态转换都更容易理解 |
-| D9 | **compaction 可压缩计划讨论，但不能压缩 Project Instructions 或当前 Task State** | Summary 允许有损，当前约束和任务进度必须准确 |
-| D10 | **工具执行事实优先于计划声明** | Todo 标记完成不代表任务真实完成；文件改动、命令结果和验证结果仍以 Execution State 为准 |
-| D11 | **v0.16 先做单 agent 的计划驱动执行，不引入独立 Plan Mode** | 先验证显式 Todo 是否足够，再决定是否值得增加 agent 角色与交接协议 |
+| D9 | **compaction 可以重新渲染或结构化压缩 Task State，但必须语义保真** | 当前目标、Todo 内容与状态、阻塞原因不能像 Conversation History 一样被有损摘要丢失 |
+| D10 | **Todo 是 Agent 的意图，Execution State 是 Runtime 的事实，Verification 是完成的证据** | 三者来源不同且可审计；计划声明不能替代执行事实或验证证据 |
+| D11 | **工具执行事实优先于计划声明，验证证据优先于“看起来已完成”** | Todo 标记完成不代表任务真实完成；文件改动、命令结果和测试结果必须分别记录 |
+| D12 | **v0.16 先做单 agent 的计划驱动执行，不引入独立 Plan Mode** | 先验证显式 Todo 是否足够，再决定是否值得增加 agent 角色与交接协议 |
 
 ## 4. 上下文与状态模型
 
@@ -86,22 +89,24 @@ System Identity + Core Rules
 + Project Instructions       # 静态约束，受保护
 + Current Task
 + Structured State
-  ├── Task State             # current_goal + todos
-  └── Execution State        # files_changed + errors + 必要的工具事实
+  ├── Task State             # current_goal + dynamic todos
+  ├── Execution State        # files_changed + errors + runtime facts
+  └── Verification           # test/build/check evidence
 + Historical Summary
 + Recent Messages
 ```
 
-四类信息的职责边界：
+五类信息的职责边界：
 
 | 信息 | 来源 | 谁维护 | 是否可被压缩 |
 |---|---|---|---|
 | Project Instructions | `AGENTS.md` | `InstructionLoader` | 否 |
-| Task State | Todo / 当前目标 | LLM 经 Todo 工具 | 否 |
-| Execution State | 工具结果 / 文件改动 / 错误 | Executor 回调 | 否 |
+| Task State | Todo / 当前目标 / 阻塞原因 | LLM 经 Todo 工具 | 可重渲染或无损结构化压缩，必须语义保真 |
+| Execution State | 工具结果 / 文件改动 / 错误 | Executor 回调 | 否，事实不可由摘要替代 |
+| Verification | 测试、构建、检查等完成证据 | 工具结果记录，ContextManager 渲染 | 否，证据内容必须准确 |
 | Conversation History | user / assistant / tool messages | agent loop | 是 |
 
-`AgentState` 是运行时事实与任务进度的容器，但不能整体开放给模型修改。Todo 工具只允许更新 Task State 字段，Executor 仍独占 Execution State 字段。
+`AgentState` 是运行时事实、任务进度和验证证据的容器，但不能整体开放给模型修改。Todo 工具只允许更新 Task State 字段，Executor 仍独占 Execution State 与 Verification 的原始执行记录；compaction 只负责重新渲染这些结构化信息。
 
 ## 5. v0.14 Project Instructions（5.1）
 
@@ -180,7 +185,7 @@ Source: /repo/subdir/AGENTS.md
 
 ### 6.1 目标
 
-一句话：**把模型脑中的计划变成独立于 messages、可验证且可在 compaction 后恢复的 Task State。**
+一句话：**把模型脑中的动态工作计划变成独立于 messages、可验证且可在 compaction 后恢复的 Task State。**
 
 ### 6.2 数据模型
 
@@ -265,28 +270,29 @@ Todo 工具是内存状态工具，不应触发文件写入权限；它也不能
 
 ### 7.1 目标
 
-一句话：**让 Todo 从可见状态升级为工作协议，使复杂任务按“规划、执行、调整、验证、完成”的生命周期推进。**
+一句话：**让 Todo 从静态 checklist 升级为动态工作协议，使复杂任务按“Plan → Execute → Observe → Replan → Verify”循环推进。**
 
 v0.15 解决“计划存在哪里”，v0.16 解决“什么时候建计划、如何维护，以及何时算完成”。本版仍是单 agent，不增加新的 agent 角色。
 
-### 7.2 最小任务生命周期
+### 7.2 动态任务生命周期
 
 ```text
 收到任务
   ├── 简单任务 → 直接执行 → 验证（如适用）→ 回复
-  └── 复杂任务 → 建立 Todo
+  └── 复杂任务 → Plan：建立或更新 Todo
                    ↓
-                标记当前项 in_progress
+                Execute：标记当前项并执行工具
                    ↓
-                执行工具并观察事实
+                Observe：读取结果、错误和环境变化
                    ↓
-          成功 → 完成当前项 → 推进下一项
-          失败 → 保留错误事实 → 调整 Todo
+             Replan：推进、重排、删除或新增 Todo
                    ↓
-                执行验证步骤
-                   ↓
-                Todo 全部完成 → 最终回复
+                Verify：运行测试/构建/检查并记录证据
+                   ├── 未通过 → 回到 Replan
+                   └── 通过且无未完成项 → 最终回复
 ```
+
+Todo 是动态工作计划，不是一次性 checklist。执行结果可能使步骤完成、失败、重排、删除或产生新的必要步骤；模型必须根据 Observe 阶段的事实重新规划，而不是机械地按初始顺序逐项勾选。
 
 ### 7.3 复杂任务判断
 
@@ -306,20 +312,22 @@ v0.15 解决“计划存在哪里”，v0.16 解决“什么时候建计划、�
 - 执行某一步前将其设为唯一 `in_progress`
 - 工具成功不自动完成 Todo，由模型结合结果判断
 - 工具失败后先更新或重写计划，避免无变化地重复相同调用
-- 新发现的必要工作可以加入 Todo，已完成项保留用于展示进度
+- 新发现的必要工作可以加入 Todo；已完成项可以保留用于展示进度，也可以在计划重排时移除
 - “修改代码”与“验证修改”通常是两个步骤
-- 最终回复前，Todo 应全部完成；无法完成时必须保留未完成状态并如实说明原因
+- 验证步骤必须产生可引用的完成证据；Todo 全部 completed 但没有必要的验证证据时，不得将任务表述为已验证完成
+- 最终回复前，Todo 应全部完成且验证证据足够；无法完成时必须保留未完成/阻塞状态并如实说明原因
 
 ### 7.5 完成检查
 
 本版采用**轻量运行时提醒，不做无限硬阻断**：当模型准备给最终文本回复但仍有 `pending` 或 `in_progress` Todo 时，loop 最多追加一次结构化提醒，让模型选择继续执行，或说明阻塞并显式结束任务。
 
-建议将判断封装在 Task State 层，而不是把 Todo 细节散落到 loop：
+建议将判断封装在 Task State 与 Verification 层，而不是把 Todo 细节散落到 loop：
 
 ```python
 class AgentState:
     def unfinished_todos(self) -> list[TodoItem]: ...
     def completion_reminder(self) -> str | None: ...
+    def has_verification_evidence(self) -> bool: ...
 ```
 
 只提醒一次的原因：Todo 是模型维护的意图，不能因状态忘记更新而让 agent 永远无法返回。是否允许显式结束、如何标记阻塞，可根据 v0.16 实施时的真实模型表现选择最小协议并写入教程。
@@ -352,10 +360,11 @@ class AgentState:
 - [ ] 复杂任务会建立并持续维护 Todo，简单任务保持短路径
 - [ ] 任一时刻最多一个步骤进行中，执行焦点清晰
 - [ ] 工具失败能促使计划调整，而不是把失败当完成
-- [ ] 修改任务包含独立验证步骤，验证结果进入真实 Execution State
+- [ ] 修改任务包含独立验证步骤，验证结果作为真实 Verification 证据记录
+- [ ] Todo 完成状态不能替代验证证据；最终收口以 Verification 为依据
 - [ ] 未完成 Todo 的最终回复最多触发一次提醒，不会无限循环
 - [ ] 无法完成时能保留未完成状态并如实收口
-- [ ] Project Instructions、Task State 和 Execution State 经 compaction 后仍准确
+- [ ] Project Instructions、Task State、Execution State 和 Verification 经 compaction 后仍准确
 
 ## 8. 测试与验证总表
 
@@ -372,8 +381,9 @@ class AgentState:
 最终断言：
 
 - 修改符合 Project Instructions
-- Todo 在多轮执行和 compaction 后保持准确
+- Todo 在多轮执行和 compaction 后保持准确，且作为动态计划可被重排或扩展
 - `files_changed`、`errors`、`tool_history` 与实际执行一致
+- Verification 记录包含实际测试/构建/检查结果，能够支撑完成结论
 - 失败会改变后续计划
 - 最终完成前发生过明确验证
 - 消息序列仍满足 OpenAI tool calling 协议，无孤儿 tool result

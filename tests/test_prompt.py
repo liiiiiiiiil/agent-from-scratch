@@ -47,9 +47,17 @@ def test_environment_fields():
     print("PASS: environment 包含四项字段（工作目录/git/平台/日期）")
 
 
+def test_project_instructions_section():
+    prompt = build_system_prompt(project_instructions="Source: /tmp/AGENTS.md\nrule")
+    assert "<project_instructions>" in prompt
+    assert "rule" in prompt
+    assert "<project_instructions>" not in build_system_prompt()
+
+
 if __name__ == "__main__":
     test_build_system_prompt()
     test_header_build()
     test_header_unknown_fallback()
     test_environment_fields()
+    test_project_instructions_section()
     print("\n全部 smoke test 通过")

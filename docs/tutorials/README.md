@@ -56,13 +56,15 @@
 | v0.13 | 上下文压缩（LLM 摘要 + State 锚定） | [13-context-compaction.md](13-context-compaction.md) |
 | v0.13.1 | 上下文压缩增强（Context Observability） | [13-context-compaction.md](13-context-compaction.md)（同一教程） |
 
-### 阶段五：进阶能力（规划中）
+### 阶段五：项目感知与任务编排
 
 这一阶段继续沿用版本教程，学习重点回到"让 Agent 能够稳定完成更长、更复杂的任务"。
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| v0.14 | plan 引导 | 待落地 |
+| v0.14 | Project Instructions | [14-project-instructions.md](14-project-instructions.md) |
+| v0.15 | Todo / Task State | 规划中 |
+| v0.16 | Plan-driven Execution | 规划中 |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 ## 版本与 Git tag

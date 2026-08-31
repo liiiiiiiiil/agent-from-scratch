@@ -245,9 +245,11 @@ class ContextManager:
         keep_rounds: int = 6,
         observability: bool = CONTEXT_OBSERVABILITY,
         observer: Observer | None = None,
+        protected_messages: list[Message] | None = None,
     ) -> None:
         self.state = state
         self.history = history
+        self.protected_messages = protected_messages
         self.budget = budget or ContextBudget()
         self.trim_policy = trim_policy or TrimPolicy()
         if summarizer is None:
@@ -324,15 +326,22 @@ class ContextManager:
         }
 
     def _build_messages(self) -> list[Message]:
+        source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])
+        source.extend(dict(message) for message in self.history)
         if not self._compacted:
-            return [dict(message) for message in self.history]
-        prefix, rounds = _split_rounds([dict(message) for message in self.history])
+            return source
+        prefix, rounds = _split_rounds(source)
         recent = rounds[-self.keep_rounds:] if self.keep_rounds else []
-        messages = prefix[:1] + [self._render_state()]
+        first_user = next(
+            (index for index, message in enumerate(prefix) if message.get("role") == "user"),
+            len(prefix),
+        )
+        protected = prefix[:first_user]
+        task_prefix = prefix[first_user:]
+        messages = protected + [self._render_state()]
         if self._summary:
             messages.append({"role": "system", "content": "[Historical Summary]\n" + self._summary})
-        if len(prefix) > 1:
-            messages.extend(prefix[1:])
+        messages.extend(task_prefix)
         messages.extend(message for round_messages in recent for message in round_messages)
         return messages
 
@@ -341,7 +350,9 @@ class ContextManager:
         keep = self.keep_rounds if keep_rounds is None else keep_rounds
         if keep < 0:
             raise ValueError("keep_rounds 必须大于等于 0")
-        prefix, rounds = _split_rounds([dict(message) for message in self.history])
+        source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])
+        source.extend(dict(message) for message in self.history)
+        prefix, rounds = _split_rounds(source)
         if len(rounds) <= keep:
             return False
         eligible_end = len(rounds) - keep if keep else len(rounds)

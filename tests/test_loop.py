@@ -724,7 +724,6 @@ def test_cli_reuses_context_and_executor_for_argv_and_interactive_tasks():
     ]
     assert [call["status"] for call in loop_calls] == ["running", "running"]
     assert context.history == [
-        {"role": "system", "content": "system"},
         {"role": "user", "content": "argv task"},
         {"role": "user", "content": "interactive task"},
     ]

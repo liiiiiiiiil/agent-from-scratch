@@ -21,7 +21,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
-> **当前状态**：最新代码和教程已到 `v0.13.1`（上下文压缩 + Context Observability 增强）；`v0.14` 及以后仍在规划中。
+> **当前状态**：最新代码和教程已到 `v0.14`（Project Instructions）。
 
 ## 为什么用这个仓库学 Agent
 
@@ -115,11 +115,13 @@ python -m mini_agent "帮我算一下 123 * 456"
 | **v0.13** | 上下文压缩 | LLM 摘要 + Structured State 锚定 | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
 | **v0.13.1** | 上下文压缩增强 | ContextStats + trimming/compaction 可观测性 | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md)（同一教程） |
 
-### 阶段五：进阶能力（规划中）
+### 阶段五：项目感知与任务编排
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| v0.14 | plan 引导 | 待落地 |
+| v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
+| v0.15 | Todo / Task State | 规划中 |
+| v0.16 | Plan-driven Execution | 规划中 |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 **如何切版本学习：**

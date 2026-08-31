@@ -1,3 +1,4 @@
+import os
 import sys
 
 # Enable terminal line editing (including reliable Backspace handling) when
@@ -9,6 +10,7 @@ except ImportError:
 
 from mini_agent.agent import agent_loop
 from mini_agent.context import ContextManager
+from mini_agent.instructions import InstructionLoader
 from mini_agent.prompt import build_system_prompt
 from mini_agent.state import AgentState
 from mini_agent.tools import registry
@@ -20,8 +22,15 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
 
     state = AgentState()
-    history = [{"role": "system", "content": build_system_prompt()}]
+    instructions = InstructionLoader(os.getcwd()).load()
+    history = []
+    system_prompt = build_system_prompt(project_instructions=instructions) if instructions else build_system_prompt()
+    protected_messages = [{
+        "role": "system",
+        "content": system_prompt,
+    }]
     context = ContextManager(state, history)
+    context.protected_messages = protected_messages
     tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
     def run_task(user_input):

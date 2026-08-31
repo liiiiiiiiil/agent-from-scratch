@@ -48,7 +48,7 @@
 ## 版本状态
 
 - **稳定基线**：`v0.13`（已创建 Git tag，可按教程复现）。
-- **当前开发版本**：`v0.14`（plan 引导，规划中）。
+- **当前开发版本**：`v0.14`（Project Instructions）。
 - 进行中的版本不要在稳定版手册中标为已发布；创建 tag 前应完成本文件、README、中英文教程索引、操作手册和 CHANGELOG 的一致性检查。
 
 ## 当前架构（v0.13.1）
@@ -71,7 +71,8 @@ agent-from-scratch/
 │   ├── context.py          # ContextManager：预算裁剪 + 历史摘要压缩 + Structured State 注入
 │   ├── state.py            # AgentState：独立于 messages 的执行状态 + record_tool
 │   ├── permission.py       # 权限闸门：二维权限 (tool_name, pattern) + allow/deny/ask 三态 + fnmatch 通配符匹配
-│   ├── prompt.py           # system prompt 分层组装：header + core_rules + environment
+│   ├── prompt.py           # system prompt 分层组装：header + core_rules + environment + project instructions
+│   ├── instructions.py     # InstructionLoader：发现并合并 AGENTS.md
 │   └── tools/
 │       ├── __init__.py     # registry + executor 实例
 │       ├── base.py         # Tool / ToolRegistry / ToolExecutor（含 on_result 回调）
@@ -120,6 +121,7 @@ agent-from-scratch/
 - **v0.12 预算与裁剪**：`context.py` 新增 `count_tokens`（`len(text) // 3` 启发式）、`ContextBudget`（`CONTEXT_WINDOW` 比例预算）与 `TrimPolicy`。`prepare_messages()` 每次基于完整 history 生成副本；超限时先截断最老 tool result，再按完整轮次原子删除，system 与首条 user task 永不删除，无孤儿 tool result。
 - **v0.13 上下文压缩**：老轮次通过无工具摘要请求压缩为 Historical Summary，近期轮次保留原文；`AgentState` 重新渲染为 Structured State 锚定事实，摘要失败降级为 trimming，`MAX_ITERATIONS = 50`。
 - **v0.13.1 Context Observability 增强**：`ContextManager` 提供 `ContextStats`/`stats_snapshot()` 与 `ContextEvent` observer；默认输出每次请求的互斥 token 分桶及 trimming/compaction 事件，可由 `CONTEXT_OBSERVABILITY` 关闭；不新增独立教程。
+- **v0.14 Project Instructions**：启动时按 root → cwd 加载 `AGENTS.md`，作为 protected context 注入每次请求；12,000 字符上限，不改变权限规则。
 - 迭代上限默认值为 `MAX_ITERATIONS = 50`，可由 `config_local.py` 覆盖；超限直接返回“达到最大迭代次数”。
 - 包未 pip install 时需 `PYTHONPATH=src`；`pip install -e .` 后可免。
 
@@ -141,7 +143,9 @@ agent-from-scratch/
 - [x] **v0.12 预算与裁剪**（阶段四 4.2）：token 启发式估算 + Context Budget（比例配置）+ 按轮次原子 trimming（无孤儿 tool result）
 - [x] **v0.13 上下文压缩**（阶段四 4.3）：老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大
 - [x] **v0.13.1 上下文可观测性增强**（阶段四维护版本）：ContextStats 分桶 + trimming/compaction 事件
-- [ ] **v0.14 plan 引导**：规划模式引导
+- [x] **v0.14 Project Instructions**：自动发现并注入受保护的 `AGENTS.md` 项目规则
+- [ ] **v0.15 Todo / Task State**：显式动态任务状态
+- [ ] **v0.16 Plan-driven Execution**：计划驱动执行与验证闭环
 - [ ] **...**（持续迭代，按需追加）
 
 > 每加一项，在此打勾并在"当前架构"更新对应模块说明。详细方案见 `docs/plans/teaching-repo-plan.md`；阶段四细化方案见 `docs/plans/context-management-plan.md`。

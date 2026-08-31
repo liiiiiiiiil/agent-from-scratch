@@ -1,6 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.13**（上下文压缩）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.14**（Project Instructions）。
+
+## v0.14 项目指令
+
+启动时 Agent 会从 Git 根目录到当前工作目录按顺序读取 `AGENTS.md`，并将带来源标记的内容作为受保护 system context 注入每次请求。非 Git 目录只检查当前目录；总长度上限为 12,000 字符。项目指令不会放宽权限，也不会因 trimming 或 compaction 消失。
 
 ## 1. 环境准备
 
@@ -61,11 +65,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.13.1）
+## 3. 当前能力（v0.14）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。
 
 v0.13.1 增加 Context Observability：每次请求显示 token 分桶，并记录 trimming/compaction 事件。可在 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False` 关闭默认日志。
+
+v0.14 在启动时加载适用的 `AGENTS.md`，并将项目指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
 ### 3.1 上下文架构
 

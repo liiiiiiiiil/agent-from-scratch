@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.14] - Project Instructions
+
+### Added
+- `InstructionLoader`：发现并合并适用的 `AGENTS.md`，保留来源并限制长度。
+- protected context：项目规则在 trimming/compaction 后仍会重新注入。
+- `docs/tutorials/14-project-instructions.md` 与指令加载测试。
+
+### Changed
+- CLI 启动时加载项目指令；`build_system_prompt()` 支持 `<project_instructions>` 区块。
+- `ContextManager` 支持独立 protected messages，兼容旧 history 调用。
+
+### Why
+- 让 Agent 在执行任务前获得项目约束，同时避免把规则误当作可压缩的对话历史。
+
 ## [v0.13.1] - Context Observability 增强
 
 ### Added

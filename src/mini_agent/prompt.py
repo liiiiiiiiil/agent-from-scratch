@@ -2,7 +2,7 @@
 
 借鉴 OpenCode 的分层思路（header/environment/custom），按 mini_agent
 渐进生长原则做最小版：header（身份）+ core_rules（行为规范）+ environment（环境）。
-custom（AGENTS.md 加载）留到 v0.08 文件工具补全后。
+ 项目指令（AGENTS.md）由 v0.14 的 InstructionLoader 提供。
 """
 
 import os
@@ -104,13 +104,13 @@ _CORE_RULES = """<rules>
 # 4. build_system_prompt —— 组装入口
 # ============================================================
 
-def build_system_prompt(agent_name: str = "build") -> str:
-    """组装完整 system prompt：身份 + 行为规范 + 环境信息。
-
-    返回一个字符串，作为 messages[0] 的 content。
-    """
-    return "\n\n".join([
+def build_system_prompt(agent_name: str = "build", project_instructions: str = "") -> str:
+    """组装完整 system prompt，并可附加项目级指令。"""
+    sections = [
         header(agent_name),
         _CORE_RULES,
         environment(),
-    ])
+    ]
+    if project_instructions.strip():
+        sections.append("<project_instructions>\n" + project_instructions.strip() + "\n</project_instructions>")
+    return "\n\n".join(sections)
