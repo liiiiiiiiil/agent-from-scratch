@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-from-scratch"
-version = "0.15.0"
+version = "0.16.0"
 description = "从零构建编程 Agent 的实战教程 | A step-by-step tutorial for building a coding agent from scratch"
 requires-python = ">=3.10"
 

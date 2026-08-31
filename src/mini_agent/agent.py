@@ -147,6 +147,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
+    reminded = False
     for i in range(MAX_ITERATIONS):
         _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
         prepared_messages = context_manager.prepare_messages()
@@ -251,6 +252,15 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
+            state = getattr(context_manager, "state", None)
+            reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
+            if reminder and not reminded:
+                reminded = True
+                if hasattr(context_manager, "set_runtime_notice"):
+                    context_manager.set_runtime_notice(str(reminder.get("message", "请继续执行并验证。")))
+                continue
+            if reminder and state is not None:
+                state.status = "blocked"
             return msg.get("content", "")
 
         # 有 tool_calls：并发执行，结果按原顺序作为 role=tool 回灌
@@ -297,4 +307,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "content": content,
             })
 
+    state = getattr(context_manager, "state", None)
+    if state is not None:
+        state.status = "failed"
     return "达到最大迭代次数"

@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -36,10 +37,33 @@ def test_non_git_directory_only_checks_cwd():
 def test_missing_and_unreadable_files_are_non_fatal():
     with tempfile.TemporaryDirectory() as root:
         os.mkdir(os.path.join(root, ".git"))
+        assert InstructionLoader(root).discover() == []
         path = os.path.join(root, "AGENTS.md")
         open(path, "w", encoding="utf-8").write("rule")
         loader = InstructionLoader(root)
         assert "rule" in loader.load()
+
+def test_empty_file_keeps_source_marker():
+    with tempfile.TemporaryDirectory() as root:
+        os.mkdir(os.path.join(root, ".git"))
+        path = os.path.join(root, "AGENTS.md")
+        open(path, "w", encoding="utf-8").close()
+        loaded = InstructionLoader(root).load()
+        assert f"Source: {path}" in loaded
+
+def test_oserror_is_marked_and_does_not_abort():
+    with tempfile.TemporaryDirectory() as root:
+        os.mkdir(os.path.join(root, ".git"))
+        path = os.path.join(root, "AGENTS.md")
+        open(path, "w", encoding="utf-8").write("rule")
+        real_open = open
+        def failing_open(name, *args, **kwargs):
+            if name == path:
+                raise OSError("simulated read failure")
+            return real_open(name, *args, **kwargs)
+        with patch("builtins.open", side_effect=failing_open):
+            loaded = InstructionLoader(root).load()
+        assert "Source:" in loaded and "读取失败" in loaded
 
 
 def test_load_is_truncated_at_limit_with_marker():

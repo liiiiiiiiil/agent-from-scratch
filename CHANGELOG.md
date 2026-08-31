@@ -5,6 +5,11 @@
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
 
+## [v0.16] - Plan-driven Execution
+
+- Added verification evidence, task reset, completion reminders, and blocked/failed task states.
+- Added `run_shell` purpose enum with unified exit status output.
+
 ## [v0.15] - Todo / Task State
 
 - Added state-bound `update_todo` with atomic validation and Structured State rendering.

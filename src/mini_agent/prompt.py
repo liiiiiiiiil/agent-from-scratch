@@ -94,6 +94,9 @@ _CORE_RULES = """<rules>
 - 同一轮可发起多个无依赖的 tool_calls，它们会并发执行。
 - 涉及多个步骤、多个文件或需要验证的复杂任务，先用 update_todo 建立简短计划；简单任务无需创建 Todo。
 - update_todo 每次提交完整列表，最多一个 Todo 处于 in_progress；Todo 是计划意图，不代表任务已验证完成。
+- 复杂任务遵循 Plan -> Execute -> Observe -> Replan -> Verify：先调查，再执行，每次修改后用 run_shell(purpose="verification") 独立验证。
+- 验证失败时根据结果调整 Todo 并重试；不要把普通 execution 命令当作验证证据。
+- 只有所有 Todo 完成且最近一次修改后验证通过，任务才算完成。无法继续时明确说明阻塞原因。
 
 # Safety
 - 写文件前会被权限闸门拦截询问，这是预期行为。

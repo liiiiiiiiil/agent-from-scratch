@@ -1,6 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.15**（Todo / Task State）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.16**（Plan-driven Execution）。
+
+## v0.16 计划驱动执行
+
+复杂任务按 Plan → Execute → Observe → Replan → Verify 闭环执行。文件修改会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。
 
 ## v0.15 Todo 状态
 
@@ -69,7 +73,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.15）
+## 3. 当前能力（v0.16）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。每次请求默认显示 token 分桶，并记录 trimming/compaction 事件；可在 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False` 关闭日志。
 

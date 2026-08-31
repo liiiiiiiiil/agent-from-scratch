@@ -61,6 +61,46 @@ def test_todo_does_not_enter_execution_state():
     assert state.snapshot()["tool_history"] == []
     assert state.snapshot()["errors"] == []
 
+def test_invalid_todo_shapes_leave_snapshot_unchanged():
+    state = AgentState()
+    state.update_todos([{"content": "keep", "status": "in_progress"}])
+    before = state.snapshot()
+    invalid = [None, [{"content": ""}], [{"content": "x", "status": "bad"}],
+               [{"content": "x"}] * 51, [{"content": "x" * 241}],
+               [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "in_progress"}]]
+    for value in invalid:
+        try:
+            state.update_todos(value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError("非法 Todo 应拒绝")
+        assert state.snapshot() == before
+
+def test_verification_evidence_generation_and_purpose():
+    state = AgentState()
+    state.record_tool("run_shell", {"command": "make", "purpose": "execution"}, True, "[exit=0] ok")
+    assert not state.has_verification_evidence()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=0] passed")
+    assert state.has_verification_evidence()
+    state.record_tool("write_file", {"path": "a.py"}, True, "written")
+    assert not state.has_verification_evidence()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[exit=1] failed")
+    assert not state.has_verification_evidence()
+    state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[timeout] 命令超时")
+    assert not state.has_verification_evidence()
+
+def test_begin_task_resets_runtime_state_and_completion_reminder():
+    state = AgentState(task="old")
+    state.update_todos([{"content": "done", "status": "completed"}])
+    state.record_tool("write_file", {"path": "a"}, True, "written")
+    assert state.completion_reminder() is not None
+    state.begin_task("new")
+    assert state.snapshot()["task"] == "new"
+    assert state.snapshot()["todos"] == []
+    assert state.snapshot()["files_changed"] == []
+    assert state.completion_reminder() is None
+
 
 def test_record_success_and_failure():
     state = AgentState()
@@ -181,4 +221,7 @@ if __name__ == "__main__":
     test_concurrent_record_tool_updates_are_safe()
     test_todo_updates_are_atomic_and_derive_current_goal()
     test_todo_does_not_enter_execution_state()
+    test_invalid_todo_shapes_leave_snapshot_unchanged()
+    test_verification_evidence_generation_and_purpose()
+    test_begin_task_resets_runtime_state_and_completion_reminder()
     print("\n全部 state test 通过")

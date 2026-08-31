@@ -1,6 +1,6 @@
 # 第 14 课：Project Instructions
 
-> 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | 下一课：v0.15 Todo / Task State（规划中）
+> 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | [下一课：v0.15 Todo / Task State](15-task-state.md)
 
 ## 本课目标
 

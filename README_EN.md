@@ -21,7 +21,7 @@
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
-> **Current status**: The code and tutorials are up to `v0.15` (Todo / Task State).
+> **Current status**: The code and tutorials are up to `v0.16` (Plan-driven Execution).
 
 ## Why learn agents with this repo
 
@@ -120,7 +120,7 @@ Goal: let the Agent keep executing complex tasks reliably within a finite contex
 |---|---|---|
 | v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
 | v0.15 | Todo / Task State | [15-task-state.md](./docs/tutorials/15-task-state.md) |
-| v0.16 | Plan-driven Execution | planned |
+| v0.16 | Plan-driven Execution | [16-plan-driven-execution.md](./docs/tutorials/16-plan-driven-execution.md) |
 | Later versions | Failure recovery, verification loops, observability, memory, sandboxing, and more | as needed |
 
 **How to learn by version:**

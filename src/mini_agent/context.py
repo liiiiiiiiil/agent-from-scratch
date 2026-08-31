@@ -264,6 +264,10 @@ class ContextManager:
         self.observability = observability
         self.observer = observer or (_default_observer if observability else None)
         self.last_stats: ContextStats | None = None
+        self._runtime_notice: str | None = None
+
+    def set_runtime_notice(self, notice: str | None) -> None:
+        self._runtime_notice = notice
 
     def stats_snapshot(self) -> ContextStats | None:
         return self.last_stats
@@ -324,7 +328,10 @@ class ContextManager:
                 + ("; ".join(
                     f"{item['tool']}({item['args']}) -> {item['brief']}"
                     for item in snapshot['tool_history'][-4:]
-                ) or "(none)")
+                ) or "(none)") + ("\nVerification: " + "; ".join(
+                    f"{item['command']} => {item['outcome']} ({item['exit_code']})"
+                    for item in snapshot.get("verification_evidence", [])
+                ) if snapshot.get("verification_evidence") else "")
             ),
         }
 
@@ -397,6 +404,9 @@ class ContextManager:
     def prepare_messages(self) -> list[Message]:
         """Build the LLM request context without mutating ``history``."""
         messages = self._build_messages()
+        if self._runtime_notice:
+            messages.insert(0, {"role": "system", "content": "[Runtime Notice]\n" + self._runtime_notice})
+            self._runtime_notice = None
         prefix, _ = _split_rounds(messages)
         target = self.budget.message_limit(count_tokens(prefix))
         over_budget = count_tokens(messages) > target

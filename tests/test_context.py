@@ -52,6 +52,29 @@ def test_protected_messages_are_not_history_and_survive_compaction():
     assert protected[0] not in history
     assert context.history == history
 
+def test_todos_re_render_after_update_and_compaction():
+    state = AgentState(task="task")
+    state.update_todos([{"content": "first", "status": "in_progress"}])
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for n in range(5):
+        history.extend(_tool_round(n))
+    context = ContextManager(state, history, summarizer=lambda p: "summary", keep_rounds=1)
+    assert "first" in context.prepare_messages()[1]["content"]
+    state.update_todos([{"content": "second", "status": "completed"}])
+    context.compact()
+    rendered = next(m["content"] for m in context.prepare_messages() if m.get("content", "").startswith("[Structured State]"))
+    assert "second" in rendered and "first" not in rendered
+
+def test_runtime_notice_is_one_shot_and_not_history():
+    history = [{"role": "user", "content": "task"}]
+    context = ContextManager(AgentState(task="task"), history)
+    context.set_runtime_notice("continue")
+    first = context.prepare_messages()
+    assert first[0]["content"].startswith("[Runtime Notice]")
+    assert not any("Runtime Notice" in str(m.get("content")) for m in context.history)
+    second = context.prepare_messages()
+    assert not any("Runtime Notice" in str(m.get("content")) for m in second)
+
 
 def test_message_type_annotations_are_explicit():
     init_hints = get_type_hints(ContextManager.__init__)
@@ -386,4 +409,6 @@ if __name__ == "__main__":
     test_trim_removes_oldest_complete_round_without_orphan_tool_results()
     test_protected_messages_remain_when_they_exceed_budget()
     test_invalid_budget_is_rejected()
+    test_todos_re_render_after_update_and_compaction()
+    test_runtime_notice_is_one_shot_and_not_history()
     print("\n全部 context test 通过")

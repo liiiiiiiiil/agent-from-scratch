@@ -7,6 +7,8 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
+import subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -257,6 +259,15 @@ def test_run_shell_exit_code():
     assert "[exit=1]" in result, result
     print("PASS: run_shell 非零退出码带前缀")
 
+def test_run_shell_schema_and_timeout_format():
+    schema = next(t for t in registry.schemas() if t["function"]["name"] == "run_shell")
+    assert schema["function"]["parameters"]["properties"]["purpose"]["enum"] == ["execution", "verification"]
+    gate = PermissionGate(PermissionPolicy({"run_shell": ALLOW}))
+    exec_allow = ToolExecutor(registry, gate=gate)
+    with patch("mini_agent.tools.shell.subprocess.run", side_effect=subprocess.TimeoutExpired("sleep", 30)):
+        result = exec_allow.execute("run_shell", {"command": "sleep 60", "purpose": "verification"})
+    assert result.startswith("[timeout]") and "[exit=" not in result
+
 
 def test_run_shell_permission():
     """二维权限：git * allow，rm * deny"""
@@ -295,5 +306,6 @@ if __name__ == "__main__":
     test_executor_unknown()
     test_run_shell()
     test_run_shell_exit_code()
+    test_run_shell_schema_and_timeout_format()
     test_run_shell_permission()
     print("\n全部 smoke test 通过")

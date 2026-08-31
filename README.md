@@ -21,7 +21,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
-> **当前状态**：最新代码和教程已到 `v0.15`（Todo / Task State）。
+> **当前状态**：最新代码和教程已到 `v0.16`（Plan-driven Execution）。
 
 ## 为什么用这个仓库学 Agent
 

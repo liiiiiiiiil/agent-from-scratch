@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+import re
 from threading import Lock
 from typing import Any, Literal
 
@@ -10,6 +11,18 @@ from typing import Any, Literal
 class TodoItem:
     content: str
     status: Literal["pending", "in_progress", "completed"] = "pending"
+
+@dataclass(frozen=True)
+class VerificationEvidence:
+    command: str
+    outcome: str
+    exit_code: int | None
+    output: str
+
+    @property
+    def result(self) -> str:
+        """Compatibility alias for the captured (truncated) command result."""
+        return self.output
 
 
 @dataclass
@@ -21,6 +34,9 @@ class AgentState:
     errors: list[str] = field(default_factory=list)
     status: str = "running"
     todos: list[TodoItem] = field(default_factory=list)
+    verification_evidence: list[VerificationEvidence] = field(default_factory=list)
+    _verification_generation: int = field(default=0, init=False, repr=False)
+    _last_verified_generation: int = field(default=-1, init=False, repr=False)
     _lock: Any = field(
         default_factory=Lock,
         init=False,
@@ -55,9 +71,52 @@ class AgentState:
                 path: Any = args_copy.get("path")
                 if isinstance(path, str) and path not in self.files_changed:
                     self.files_changed.append(path)
+                self._verification_generation += 1
+                self.verification_evidence.clear()
+
+            if name == "run_shell" and args_copy.get("purpose", "execution") == "verification":
+                text = str(brief)
+                timeout = "[timeout]" in text or "超时" in text
+                match = re.search(r"\[exit=(-?\d+)\]", text)
+                code = int(match.group(1)) if match else (0 if ok and not timeout else None)
+                passed = bool(ok and not timeout and code == 0)
+                evidence = VerificationEvidence(
+                    command=str(args_copy.get("command", "")),
+                    outcome="passed" if passed else "failed",
+                    exit_code=code,
+                    output=text,
+                )
+                self.verification_evidence.append(evidence)
+                self._last_verified_generation = self._verification_generation if passed else -1
 
             if not ok:
                 self.errors.append(f"{name}: {brief}")
+
+    def begin_task(self, task: str) -> None:
+        with self._lock:
+            self.task = task
+            self.current_goal = ""
+            self.tool_history.clear(); self.files_changed.clear(); self.errors.clear()
+            self.todos.clear(); self.verification_evidence.clear()
+            self._verification_generation += 1
+            self._last_verified_generation = -1
+            self.status = "running"
+
+    def unfinished_todos(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [{"content": t.content, "status": t.status} for t in self.todos if t.status != "completed"]
+
+    def has_verification_evidence(self) -> bool:
+        with self._lock:
+            return bool(self.verification_evidence) and self._last_verified_generation == self._verification_generation and self.verification_evidence[-1].outcome == "passed"
+
+    def completion_reminder(self) -> dict[str, object] | None:
+        with self._lock:
+            missing = [t.content for t in self.todos if t.status != "completed"]
+            needs_verify = bool(self.files_changed) and not (self.verification_evidence and self._last_verified_generation == self._verification_generation and self.verification_evidence[-1].outcome == "passed")
+            if not missing and not needs_verify:
+                return None
+            return {"unfinished_todos": missing, "verification_required": needs_verify, "message": "任务尚未满足完成条件，请继续执行并验证。"}
 
     def update_todos(self, todos: list[dict[str, Any]]) -> None:
         """Validate and atomically replace the model-maintained todo list."""
@@ -105,6 +164,10 @@ class AgentState:
                 "todos": [
                     {"content": todo.content, "status": todo.status}
                     for todo in self.todos
+                ],
+                "verification_evidence": [
+                    {"command": e.command, "outcome": e.outcome, "exit_code": e.exit_code, "output": e.output}
+                    for e in self.verification_evidence
                 ],
             }
             return snapshot

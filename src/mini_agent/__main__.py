@@ -37,15 +37,21 @@ def main():
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
 
     def run_task(user_input):
-        state.status = "running"
-        state.task = user_input
+        if hasattr(state, "begin_task"):
+            state.begin_task(user_input)
+        else:
+            state.status = "running"
+            state.task = user_input
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
         except Exception:
             state.status = "failed"
             raise
-        state.status = "failed" if result == "达到最大迭代次数" else "done"
+        if result == "达到最大迭代次数":
+            state.status = "failed"
+        elif state.status == "running":
+            state.status = "done"
 
     # 命令行首条任务（可选）：与交互循环走同一套路径，
     # 保证 argv 分支后 history 状态完整，后续追问上下文不丢。
