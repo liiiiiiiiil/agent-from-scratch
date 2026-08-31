@@ -69,59 +69,39 @@ python -m mini_agent "calculate 123 * 456"
 
 Tutorials are organized by capability stage, while versions remain the basic units of code evolution and Git tags. Start at Stage 1 and continue through Stage 3; after `v0.10`, you have a Mini Agent that can handle basic coding tasks. Continue with Stage 4 to learn context management. **This is the core learning path.**
 
-### Stage 1: Understand the Agent Loop
-
-Goal: understand LLM calls, `messages`, the loop, and completion conditions.
-
-| Version | Topic | What this version adds | Tutorial |
-|---|---|---|---|
-| **v0.01** | Minimal agent loop | `call_llm` + `agent_loop` (no tools) | [01-minimal-loop.md](./docs/tutorials/01-minimal-loop.md) |
-
-### Stage 2: Tools and Safety
-
-Goal: let the Agent call tools while controlling file-modifying side effects.
-
-| Version | Topic | What this version adds | Tutorial |
-|---|---|---|---|
-| **v0.02** | First tool | `Tool`/`ToolRegistry` + `calculate` + function calling | [02-first-tool.md](./docs/tutorials/02-first-tool.md) |
-| **v0.03** | File read/write tools | `read_file` / `write_file` | [03-file-tools.md](./docs/tutorials/03-file-tools.md) |
-| **v0.04** | Permission gate | `permission.py` (allow/deny/ask) | [04-permission-gate.md](./docs/tutorials/04-permission-gate.md) |
-
-### Stage 3: Mini Agent Milestone
-
-Goal: add interaction, file operations, and command execution so the Agent can handle basic coding tasks.
-
-| Version | Topic | What this version adds | Tutorial |
-|---|---|---|---|
-| **v0.05** | Streaming output | streaming `call_llm` + typewriter effect | [05-streaming.md](./docs/tutorials/05-streaming.md) |
-| **v0.06** | Concurrent tool_calls | `ThreadPoolExecutor` concurrency | [06-concurrent-tool-calls.md](./docs/tutorials/06-concurrent-tool-calls.md) |
-| **v0.07** | System prompt engineering | expand system prompt to a full specification | [07-system-prompt.md](./docs/tutorials/07-system-prompt.md) |
-| **v0.08** | File operations complete | `list_dir` / `edit_file` / `grep` | [08-file-operations.md](./docs/tutorials/08-file-operations.md) |
-| **v0.09** | Permission system upgrade | 2D permission (tool_name, pattern) + fnmatch | [09-permission-upgrade.md](./docs/tutorials/09-permission-upgrade.md) |
-| **v0.10** | Shell execution | `run_shell` tool + subprocess + timeout + output truncation + 2D command pattern permission | [10-shell-execution.md](./docs/tutorials/10-shell-execution.md) |
+<table>
+  <thead>
+    <tr><th>Version</th><th>Topic</th><th>Overview</th></tr>
+  </thead>
+  <tbody>
+    <tr><th colspan="3">Stage 1 · Understand the Agent Loop</th></tr>
+    <tr><td><strong>v0.01</strong></td><td><a href="./docs/tutorials/01-minimal-loop.md">Minimal agent loop</a></td><td>Build the smallest conversation loop and its completion conditions.</td></tr>
+    <tr><th colspan="3">Stage 2 · Tools and Safety</th></tr>
+    <tr><td><strong>v0.02</strong></td><td><a href="./docs/tutorials/02-first-tool.md">First tool</a></td><td>Add calculate and walk through the function-calling protocol.</td></tr>
+    <tr><td><strong>v0.03</strong></td><td><a href="./docs/tutorials/03-file-tools.md">File read/write tools</a></td><td>Let the Agent read and write files in a real project.</td></tr>
+    <tr><td><strong>v0.04</strong></td><td><a href="./docs/tutorials/04-permission-gate.md">Permission gate</a></td><td>Gate side-effecting tools with allow, deny, and ask actions.</td></tr>
+    <tr><th colspan="3">Stage 3 · Mini Agent Milestone</th></tr>
+    <tr><td><strong>v0.05</strong></td><td><a href="./docs/tutorials/05-streaming.md">Streaming output</a></td><td>Receive and display LLM responses incrementally for better feedback.</td></tr>
+    <tr><td><strong>v0.06</strong></td><td><a href="./docs/tutorials/06-concurrent-tool-calls.md">Concurrent tool_calls</a></td><td>Run multiple tool calls from one turn concurrently.</td></tr>
+    <tr><td><strong>v0.07</strong></td><td><a href="./docs/tutorials/07-system-prompt.md">System prompt engineering</a></td><td>Layer identity, rules, and environment details into a stable prompt.</td></tr>
+    <tr><td><strong>v0.08</strong></td><td><a href="./docs/tutorials/08-file-operations.md">File operations complete</a></td><td>Add directory listing, precise edits, and regular-expression search.</td></tr>
+    <tr><td><strong>v0.09</strong></td><td><a href="./docs/tutorials/09-permission-upgrade.md">Permission system upgrade</a></td><td>Match permissions by tool and file-path or command pattern.</td></tr>
+    <tr><td><strong>v0.10</strong></td><td><a href="./docs/tutorials/10-shell-execution.md">Shell execution</a></td><td>Run commands with timeouts, output limits, and command-level authorization.</td></tr>
+    <tr><th colspan="3">Stage 4 · Context Management</th></tr>
+    <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">Context architecture</a></td><td>Separate durable execution state from the trimmable conversation context.</td></tr>
+    <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">Budget and trimming</a></td><td>Estimate tokens and safely trim complete conversation rounds.</td></tr>
+    <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">Context compaction</a></td><td>Use historical summaries and structured state to reduce long-task forgetting.</td></tr>
+    <tr><th colspan="3">Stage 5 · Project-Aware Task Orchestration</th></tr>
+    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">Project Instructions</a></td><td>Discover and inject project-level AGENTS.md instructions automatically.</td></tr>
+    <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">Todo / Task State</a></td><td>Track multi-step progress with explicit Todo state.</td></tr>
+    <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">Plan-driven Execution</a></td><td>Close the execution loop with plans, verification evidence, and failure states.</td></tr>
+    <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding recovery, memory, sandboxing, and related capabilities.</td></tr>
+  </tbody>
+</table>
 
 > `v0.06.1` is a protocol-state fix for v0.06 and has no separate tutorial; use `git checkout v0.06.1` to reproduce it.
 
 After `v0.10`, the Agent can inspect a project, search and modify files, run commands, run tests, and control high-risk operations through permissions. This is the repo's first stage milestone.
-
-### Stage 4: Context Management
-
-Goal: let the Agent keep executing complex tasks reliably within a finite context window by separating state from context, managing budget, trimming history, and compacting old history.
-
-| Version | Topic | What this version adds | Tutorial |
-|---|---|---|---|
-| **v0.11** | Context architecture | `AgentState` + `ContextManager` + Executor result callback | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
-| **v0.12** | Budget and trimming | token estimation + atomic round trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
-| **v0.13** | Context compaction | LLM summary + Structured State anchor + context observability | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
-
-### Stage 5: Project-Aware Task Orchestration
-
-| Version | Topic | Status |
-|---|---|---|
-| v0.14 | Project Instructions | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
-| v0.15 | Todo / Task State | [15-task-state.md](./docs/tutorials/15-task-state.md) |
-| v0.16 | Plan-driven Execution | [16-plan-driven-execution.md](./docs/tutorials/16-plan-driven-execution.md) |
-| Later versions | Failure recovery, verification loops, observability, memory, sandboxing, and more | as needed |
 
 **How to learn by version:**
 

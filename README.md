@@ -69,59 +69,39 @@ python -m mini_agent "帮我算一下 123 * 456"
 
 教程按能力阶段组织，版本仍然是代码演进和 Git tag 的基本单位。建议从阶段一开始，按顺序学习到阶段三；完成 `v0.10` 后即可得到一个能完成基础编程任务的 Mini Agent，再继续学习阶段四的上下文管理。**这是本仓库的核心学习路径**。
 
-### 阶段一：理解 Agent Loop
-
-目标：理解 LLM 调用、`messages`、循环和结束条件。
-
-| 版本 | 主题 | 本版新增 | 教程 |
-|---|---|---|---|
-| **v0.01** | 最简 agent loop | `call_llm` + `agent_loop`（无工具纯对话） | [01-minimal-loop.md](./docs/tutorials/01-minimal-loop.md) |
-
-### 阶段二：工具与安全
-
-目标：让 Agent 能调用工具，并控制文件修改等副作用。
-
-| 版本 | 主题 | 本版新增 | 教程 |
-|---|---|---|---|
-| **v0.02** | 第一个工具 | `Tool`/`ToolRegistry` + `calculate` + function calling | [02-first-tool.md](./docs/tutorials/02-first-tool.md) |
-| **v0.03** | 文件读写工具 | `read_file` / `write_file` | [03-file-tools.md](./docs/tutorials/03-file-tools.md) |
-| **v0.04** | 权限闸门 | `permission.py`（allow/deny/ask 三态） | [04-permission-gate.md](./docs/tutorials/04-permission-gate.md) |
-
-### 阶段三：Mini Agent 里程碑
-
-目标：补齐交互、文件操作和命令执行能力，形成一个能完成基础编程任务的 Mini Agent。
-
-| 版本 | 主题 | 本版新增 | 教程 |
-|---|---|---|---|
-| **v0.05** | 流式输出 | `call_llm` 改流式 + 打字机效果 | [05-streaming.md](./docs/tutorials/05-streaming.md) |
-| **v0.06** | 并发 tool_calls | `ThreadPoolExecutor` 并发执行 | [06-concurrent-tool-calls.md](./docs/tutorials/06-concurrent-tool-calls.md) |
-| **v0.07** | 系统提示词工程化 | system prompt 从一行扩到完整规范 | [07-system-prompt.md](./docs/tutorials/07-system-prompt.md) |
-| **v0.08** | 文件操作补全 | `list_dir` / `edit_file` / `grep` | [08-file-operations.md](./docs/tutorials/08-file-operations.md) |
-| **v0.09** | 权限系统升级 | 二维权限 (tool_name, pattern) + fnmatch 通配符匹配 | [09-permission-upgrade.md](./docs/tutorials/09-permission-upgrade.md) |
-| **v0.10** | shell 执行 | `run_shell` 工具 + subprocess + 超时 + 输出截断 + 二维命令模式权限 | [10-shell-execution.md](./docs/tutorials/10-shell-execution.md) |
+<table>
+  <thead>
+    <tr><th>版本</th><th>主题</th><th>简介</th></tr>
+  </thead>
+  <tbody>
+    <tr><th colspan="3">阶段一 · 理解 Agent Loop</th></tr>
+    <tr><td><strong>v0.01</strong></td><td><a href="./docs/tutorials/01-minimal-loop.md">最简 agent loop</a></td><td>建立最小对话循环，理解请求、回复与结束条件。</td></tr>
+    <tr><th colspan="3">阶段二 · 工具与安全</th></tr>
+    <tr><td><strong>v0.02</strong></td><td><a href="./docs/tutorials/02-first-tool.md">第一个工具</a></td><td>接入 calculate 工具，跑通 function calling 的基本协议。</td></tr>
+    <tr><td><strong>v0.03</strong></td><td><a href="./docs/tutorials/03-file-tools.md">文件读写工具</a></td><td>让 Agent 能读取和写入文件，开始处理真实项目内容。</td></tr>
+    <tr><td><strong>v0.04</strong></td><td><a href="./docs/tutorials/04-permission-gate.md">权限闸门</a></td><td>为有副作用的工具加入 allow、deny、ask 三态授权。</td></tr>
+    <tr><th colspan="3">阶段三 · Mini Agent 里程碑</th></tr>
+    <tr><td><strong>v0.05</strong></td><td><a href="./docs/tutorials/05-streaming.md">流式输出</a></td><td>逐块接收并显示 LLM 回复，改善交互反馈。</td></tr>
+    <tr><td><strong>v0.06</strong></td><td><a href="./docs/tutorials/06-concurrent-tool-calls.md">并发 tool_calls</a></td><td>并发执行同一轮的多个工具调用，减少等待时间。</td></tr>
+    <tr><td><strong>v0.07</strong></td><td><a href="./docs/tutorials/07-system-prompt.md">系统提示词工程化</a></td><td>分层组织身份、规则和环境信息，稳定 Agent 行为。</td></tr>
+    <tr><td><strong>v0.08</strong></td><td><a href="./docs/tutorials/08-file-operations.md">文件操作补全</a></td><td>补齐目录列举、精确编辑和正则搜索能力。</td></tr>
+    <tr><td><strong>v0.09</strong></td><td><a href="./docs/tutorials/09-permission-upgrade.md">权限系统升级</a></td><td>按工具和路径或命令模式细粒度匹配权限规则。</td></tr>
+    <tr><td><strong>v0.10</strong></td><td><a href="./docs/tutorials/10-shell-execution.md">shell 执行</a></td><td>执行命令并处理超时、输出截断和命令级授权。</td></tr>
+    <tr><th colspan="3">阶段四 · Context Management</th></tr>
+    <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">上下文架构</a></td><td>将持久执行状态与可裁剪的对话上下文分离。</td></tr>
+    <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token 并按完整对话轮次安全裁剪历史。</td></tr>
+    <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务的遗忘。</td></tr>
+    <tr><th colspan="3">阶段五 · 项目感知与任务编排</th></tr>
+    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">Project Instructions</a></td><td>自动发现并注入项目级 AGENTS.md 指令。</td></tr>
+    <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">Todo / Task State</a></td><td>用显式 Todo 状态跟踪多步任务进度。</td></tr>
+    <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">Plan-driven Execution</a></td><td>通过计划、验证证据和失败状态闭合执行流程。</td></tr>
+    <tr><td>后续版本</td><td>按需追加</td><td>继续扩展恢复、记忆、沙箱等能力。</td></tr>
+  </tbody>
+</table>
 
 > `v0.06.1` 是 v0.06 的协议状态修订，没有独立课程；需要复现该修订时可直接 `git checkout v0.06.1`。
 
 完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑。
-
-### 阶段四：Context Management
-
-目标：让 Agent 在有限 Context Window 下持续稳定执行复杂任务——状态与上下文分离、预算感知、超限裁剪、历史压缩。
-
-| 版本 | 主题 | 本版新增 | 教程 |
-|---|---|---|---|
-| **v0.11** | 上下文架构 | `AgentState` + `ContextManager` + Executor 结果回调 | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
-| **v0.12** | 预算与裁剪 | token 估算 + Context Budget + 按轮次原子 trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
-| **v0.13** | 上下文压缩 | LLM 摘要 + Structured State 锚定 + Context 可观测性 | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
-
-### 阶段五：项目感知与任务编排
-
-| 版本 | 主题 | 本版新增 | 教程 |
-|---|---|---|---|
-| **v0.14** | Project Instructions | 自动发现并注入项目级 `AGENTS.md` 指令 | [14-project-instructions.md](./docs/tutorials/14-project-instructions.md) |
-| **v0.15** | Todo / Task State | 显式 Todo 任务状态与 Structured State 注入 | [15-task-state.md](./docs/tutorials/15-task-state.md) |
-| **v0.16** | Plan-driven Execution | 计划驱动执行、验证证据与 blocked/failed 状态 | [16-plan-driven-execution.md](./docs/tutorials/16-plan-driven-execution.md) |
-| 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 | — |
 
 **如何切版本学习：**
 
