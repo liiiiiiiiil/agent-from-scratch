@@ -3,7 +3,7 @@
 > 状态：v0.11/v0.12/v0.13 已实施并验收；Context Observability 已并入 v0.13
 > 评审结论：原六 Phase 方案依赖顺序正确、原则正确、粒度偏细，合并为三个版本落地；修正项见"关键架构决策"
 > 版本映射：v0.11 / v0.12 / v0.13（tag 命名弃用 v0.011，理由见 D8）
-> 关联文档：`teaching-repo-plan.md`（版本切片表已同步）、`AGENTS.md` 路线图
+> 关联文档：`teaching-repo-plan.md`（版本切片表已同步）；运行时硬约束见 `AGENTS.md`
 
 ## 1. 目标与定位
 
@@ -86,7 +86,7 @@ class ContextManager:
 3. Executor 结果回调 → `state.record_tool` / `files_changed` / `errors`（D5，已完成）
 4. `agent_loop` 改造：`call_llm(cm.prepare_messages())`；顺带消除 agent.py 中"MAX_ITERATIONS 半截状态"注释对应的调用方契约（已完成）
 5. 手工回归：跑 v0.10 的典型任务，行为不变（已完成，真实 LLM 回归通过）
-6. 教程 `11-context-architecture.md` + CHANGELOG + AGENTS.md 打勾 + tag `v0.11`（已完成）
+6. 教程 `11-context-architecture.md` + CHANGELOG + 版本信息 + tag `v0.11`（已完成）
 
 ### 验收标准
 
@@ -135,7 +135,7 @@ class TrimPolicy:
 3. tool result 截断策略 + 单测
 4. 整轮删除 + 预算循环收敛 + 单测
 5. `prepare_messages` 接入超限检查；手工构造长任务（如让 agent 反复 `read_file` 大文件）
-6. 教程 `12-token-budget-trimming.md` + CHANGELOG + AGENTS.md + tag `v0.12`
+6. 教程 `12-token-budget-trimming.md` + CHANGELOG + 版本信息 + tag `v0.12`
 
 ### 验收标准
 
@@ -186,7 +186,7 @@ def compact(self, keep_rounds: int = 6) -> None:
 5. trimming → compaction 自动触发链路
 6. `MAX_ITERATIONS` 调大；端到端长任务手工验证（压缩后继续原任务、多次压缩 State 仍准）
 7. （可选收尾，Phase 5 前置）`read_file`/`grep` 结果接入统一的截断处理
-8. 教程 `13-context-compaction.md` + CHANGELOG + AGENTS.md + tag `v0.13`
+8. 教程 `13-context-compaction.md` + CHANGELOG + 版本信息 + tag `v0.13`
 
 ### 验收标准
 
@@ -234,7 +234,7 @@ def compact(self, keep_rounds: int = 6) -> None:
 ## 8. 与既有文档的同步
 
 - `teaching-repo-plan.md`：版本切片表 / 目录树 / 使用指导表 / 代码差异要点已同步为 v0.11–v0.13，plan 引导顺移至 v0.14
-- `AGENTS.md`：路线图与教学阶段划分已同步；每版完成时打勾并更新"当前架构"
+- `AGENTS.md`：仅在运行时约束变化时同步；版本路线与教学阶段由计划和教程索引维护
 - `docs/plans/README.md`：索引已加本文档
 - `docs/tutorials/README.md`：阶段四改为 Context Management 三版表
 - `docs/tutorials/13-context-compaction.md`：补充 Context Observability 说明

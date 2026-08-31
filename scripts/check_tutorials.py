@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the minimum tutorial structure required by AGENTS.md."""
+"""Check the minimum tutorial structure requirements."""
 from __future__ import annotations
 import re
 import sys
@@ -36,4 +36,3 @@ def main(argv):
     return 1 if failed else 0
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

@@ -3,7 +3,7 @@
 > 状态：已完成（v0.14–v0.16 已实现并验收）
 > 版本映射：v0.14 / v0.15 / v0.16
 > 前置阶段：`context-management-plan.md`（v0.11–v0.13）
-> 关联文档：`teaching-repo-plan.md`、`AGENTS.md` 路线图
+> 关联文档：`teaching-repo-plan.md`；运行时硬约束见 `AGENTS.md`
 
 ## 1. 目标与定位
 
@@ -169,7 +169,7 @@ Source: /repo/subdir/AGENTS.md
 4. `prompt.py` 增加 Project Instructions 分层
 5. `ContextManager` 将指令视为 protected context，预算超限也不删除
 6. CLI 组装接入，手工验证模型能复述并遵守仓库特定规则
-7. 教程、CHANGELOG、README、AGENTS.md、版本号与 tag `v0.14`
+7. 教程、CHANGELOG、README、版本号与 tag `v0.14`（运行时约束变化时同步 AGENTS.md）
 
 ### 5.6 验收标准
 
@@ -254,7 +254,7 @@ Todo 工具是内存状态工具，不应触发文件写入权限；它也不能
 5. ContextManager 将最新 Task State 每轮重新渲染，非追加进 history
 6. 验证连续 2+ 次 compaction 后 Todo 与 `current_goal` 保持准确
 7. prompt 加最小使用规则；手工运行一个三步编程任务
-8. 教程、CHANGELOG、README、AGENTS.md、版本号与 tag `v0.15`
+8. 教程、CHANGELOG、README、版本号与 tag `v0.15`（运行时约束变化时同步 AGENTS.md）
 
 ### 6.6 验收标准
 
@@ -353,7 +353,7 @@ class AgentState:
 6. 单测：工具失败后计划调整，不污染 Execution State
 7. 单测：带未完成 Todo 的最终回复只触发一次提醒，不形成死循环
 8. 端到端任务：遵守项目规则，调查、修改、测试；首次验证失败后调整计划并再次验证
-9. 教程、CHANGELOG、README、AGENTS.md、版本号与 tag `v0.16`
+9. 教程、CHANGELOG、README、版本号与 tag `v0.16`（运行时约束变化时同步 AGENTS.md）
 
 ### 7.8 验收标准
 

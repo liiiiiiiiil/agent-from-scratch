@@ -157,7 +157,7 @@ def _detect_git(cwd: str) -> bool:
 
 ### 为什么不动 `agent.py`
 
-`call_llm` / `agent_loop` 仍然只接收 `messages` 列表，完全不感知 system prompt 的构造。这符合 AGENTS.md 的「核心 loop 保持清晰」原则——prompt 组装是入口层（`__main__.py`）的职责，核心 loop 不掺混。
+`call_llm` / `agent_loop` 仍然只接收 `messages` 列表，完全不感知 system prompt 的构造。这符合运行时契约中的「核心 loop 保持清晰」原则——prompt 组装是入口层（`__main__.py`）的职责，核心 loop 不掺混。
 
 ### 为什么在入口调一次而非每轮调
 

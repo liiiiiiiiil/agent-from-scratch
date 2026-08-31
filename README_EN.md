@@ -141,16 +141,17 @@ agent-from-scratch/
 
 ## Design Philosophy
 
-- **Progressive growth**: Add just enough capability each step, avoid over-engineering. New features are first recorded as intent in `AGENTS.md`, then implemented.
+- **Progressive growth**: Add just enough capability each step, avoid over-engineering. Record feature intent in the corresponding plan document; update `AGENTS.md` only when runtime constraints change.
 - **Keep the core loop clear**: The agent loop does not catch top-level LLM or CLI exceptions; the tool layer catches handler failures and feeds error results back to the LLM. Complex fault tolerance is introduced at the tool layer as needed.
-- **Zero dependencies**: Standard library only, staying self-contained and easy to deploy. Switching HTTP clients reintroduces a known pitfall (see `AGENTS.md` key constraints).
+- **Zero dependencies**: Standard library only, staying self-contained and easy to deploy. HTTP client and other runtime contracts are summarized in [`AGENTS.md`](./AGENTS.md).
 
 ## Documentation
 
 - [Tutorial path index](./docs/tutorials/README.md) — **start here**
 - [Full usage manual](./docs/operation/manual.md) — complete usage, config, FAQ for the latest version
 - [Roadmap & plans](./docs/plans/teaching-repo-plan.md) — stage navigation and version slicing plan
-- [AGENTS.md](./AGENTS.md) — project architecture & constraints memo
+- [AGENTS.md](./AGENTS.md) — runtime hard constraints and concise architecture index
+- [Governance docs](./docs/governance/README.md) — detailed standards and decision records
 - [CHANGELOG.md](./CHANGELOG.md) — versioned change history
 
 ## Tests
@@ -165,7 +166,7 @@ Without pytest, run the standard-library smoke-test entry points listed in the [
 
 ## Contributing
 
-Issues and PRs welcome. For new version slices, please read `docs/plans/teaching-repo-plan.md` and `AGENTS.md` first, and follow the "one concept per version" slicing principle.
+Issues and PRs welcome. For new version slices, read `docs/plans/teaching-repo-plan.md`, the [tutorial authoring guide](./docs/governance/tutorial-authoring.md), and `AGENTS.md`; follow the “one concept per version” slicing principle.
 
 ## License
 

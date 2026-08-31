@@ -43,7 +43,7 @@
 
 ```
 mini_agent/
-├── AGENTS.md                # 更新：路线图改为版本切片表
+├── AGENTS.md                # 运行时硬约束与精简架构索引
 ├── CHANGELOG.md             # 新增：每版一段 Added/Changed/Why
 ├── README.md                # 更新：加"教学路径"章节
 ├── pyproject.toml           # version 跟随最新 tag
@@ -82,7 +82,7 @@ mini_agent/
 | `docs/governance/` | 维护者 | 约束、规范、决策记录 | 偶尔 |
 | `docs/plans/` | 维护者 | 方案、任务拆解（本文件所在目录） | 偶尔 |
 | `docs/operation/` | 使用者 | 运行手册、使用指南 | 跟随代码变 |
-| `AGENTS.md` | 维护者 + AI | 项目总纲、路线图、约束备忘 | 每版同步 |
+| `AGENTS.md` | 维护者 + AI | 运行时硬约束与精简索引 | 约束变化时同步 |
 
 ## 4. 教学文档模板
 
@@ -248,7 +248,7 @@ git branch -m main-new main
 
 ```bash
 # 1. 在 main 上开发到本版状态
-# 2. 更新 CHANGELOG.md、docs/tutorials/0X-xxx.md、AGENTS.md 路线图打勾
+# 2. 更新 CHANGELOG.md、docs/tutorials/0X-xxx.md；必要时同步 AGENTS.md 运行时约束
 # 3. 跑 tests
 $env:PYTHONPATH="src"; python tests/test_tools.py
 # 4. 提交 + 打 tag
@@ -368,7 +368,7 @@ def agent_loop(messages):
 - [ ] 每份教学文档有"使用指导"章节且命令可跑通
 - [ ] `CHANGELOG.md` 每个已落地版本一段，每段 Added/Changed/Why 齐全
 - [ ] `git diff v0.(X-1)..v0.X --stat` 每版差异在"一两个文件"量级
-- [ ] `AGENTS.md` 路线图与版本切片表一致
+- [ ] 版本切片表与教程索引、CHANGELOG 保持一致
 
 ## 13. 执行顺序建议
 
@@ -376,7 +376,7 @@ def agent_loop(messages):
 2. **v0.02 → v0.06**：复用 backup 分支现有代码，按版本顺序重新提交 + 写文档（工作量在文档）
 3. **v0.07 → v0.14**：需新写代码（system prompt 扩写、list_dir/edit_file/grep、权限升级、run_shell、上下文管理三版、plan 引导），工作量较大
 4. **v0.15+**：持续迭代，按需追加新功能
-5. **每版完成后**：跑 tests、更新 AGENTS.md 路线图打勾、打 tag
+5. **每版完成后**：跑 tests、更新计划/教程索引与 CHANGELOG；仅约束变化时更新 AGENTS.md，再打 tag
 
 > v0.02-v0.06 的代码已存在于 backup-pre-teaching 分支，落地主要是拆分提交节奏 + 写文档。
 > v0.07+ 需要新写代码，工作量较大。

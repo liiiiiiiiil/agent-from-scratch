@@ -141,16 +141,17 @@ agent-from-scratch/
 
 ## 设计哲学
 
-- **渐进式生长**：每次只加刚好够用的能力，避免过度设计。新功能先在 `AGENTS.md` 记下意图，再落地代码。
+- **渐进式生长**：每次只加刚好够用的能力，避免过度设计。新功能意图先记录到对应计划文档；只有运行时约束变化才更新 `AGENTS.md`。
 - **核心 loop 保持清晰**：agent loop 不对 LLM 或 CLI 顶层异常做兜底；工具层捕获 handler 异常并将错误结果回灌给 LLM。复杂容错按需在工具层引入。
-- **零依赖**：只用标准库，保持自包含、易部署。换 HTTP 客户端会踩坑（见 `AGENTS.md` 关键约束）。
+- **零依赖**：只用标准库，保持自包含、易部署。HTTP 客户端约束与其他运行时契约见 [`AGENTS.md`](./AGENTS.md)。
 
 ## 文档
 
 - [教学路径索引](./docs/tutorials/README.md) —— **从这里开始学**
 - [完整使用手册](./docs/operation/manual.md) —— 最新版全量用法、配置、FAQ
 - [路线图与计划](./docs/plans/teaching-repo-plan.md) —— 阶段导航与版本切分方案
-- [AGENTS.md](./AGENTS.md) —— 项目架构与约束备忘
+- [AGENTS.md](./AGENTS.md) —— 运行时硬约束与精简架构索引
+- [治理文档](./docs/governance/README.md) —— 详细规范与决策记录
 - [CHANGELOG.md](./CHANGELOG.md) —— 按版本记录的变更
 
 ## 测试
@@ -165,7 +166,7 @@ PYTHONPATH=src python -m pytest -q
 
 ## 贡献
 
-欢迎提 Issue / PR。如果是新增版本切片，请先读 `docs/plans/teaching-repo-plan.md` 和 `AGENTS.md`，遵循"每版只加一个概念"的切分原则。
+欢迎提 Issue / PR。如果是新增版本切片，请先读 `docs/plans/teaching-repo-plan.md`、[教程作者规范](./docs/governance/tutorial-authoring.md) 和 `AGENTS.md`，遵循“每版只加一个概念”的切分原则。
 
 ## License
 
