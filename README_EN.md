@@ -21,7 +21,7 @@
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
-> **Current status**: The code and tutorials are up to `v0.13` (context compaction); `v0.14` and later remain planned.
+> **Current status**: The code and tutorials are up to `v0.13.1` (context compaction + observability enhancement); `v0.14` and later remain planned.
 
 ## Why learn agents with this repo
 
@@ -113,6 +113,7 @@ Goal: let the Agent keep executing complex tasks reliably within a finite contex
 | **v0.11** | Context architecture | `AgentState` + `ContextManager` + Executor result callback | [11-context-architecture.md](./docs/tutorials/11-context-architecture.md) |
 | **v0.12** | Budget and trimming | token estimation + atomic round trimming | [12-token-budget-trimming.md](./docs/tutorials/12-token-budget-trimming.md) |
 | **v0.13** | Context compaction | LLM summary + Structured State anchor | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) |
+| **v0.13.1** | Context observability enhancement | ContextStats + trim/compact events | [13-context-compaction.md](./docs/tutorials/13-context-compaction.md) (same tutorial) |
 
 ### Stage 5: Advanced Capabilities (planned)
 

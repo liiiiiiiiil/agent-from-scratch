@@ -6,6 +6,7 @@ API_KEY = "sk-YOUR_API_KEY_HERE"
 MODEL = "EB-GLM-5.2"
 MAX_ITERATIONS = 50
 CONTEXT_WINDOW = 128_000
+CONTEXT_OBSERVABILITY = True
 
 # 本地真实配置覆盖（config_local.py 不进 git）
 try:

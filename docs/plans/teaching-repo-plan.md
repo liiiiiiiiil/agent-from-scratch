@@ -32,6 +32,7 @@
 | v0.11 | 上下文架构 | `AgentState`（状态独立于 messages）+ `ContextManager`（LLM 调用前统一入口） | Agent State ≠ LLM Context；上下文构建与 loop 解耦 |
 | v0.12 | 预算与裁剪 | token 估算 + Context Budget + 按轮次原子 trimming | Context 是有限资源；超限优先删低价值信息而非崩溃 |
 | v0.13 | 上下文压缩 | 老历史 LLM 摘要 + Structured State 锚定 + `MAX_ITERATIONS` 调大 | 压缩不失忆；State 是锚，Summary 允许有损 |
+| v0.13.1 | 上下文压缩增强 | Context Observability（无独立教程，追加到第 13 课） | 观察预算、trimming 与 compaction |
 | v0.14 | plan 引导 | 规划模式引导 | 规划与执行分离 |
 | ... | ... | ...（持续迭代，按需追加行） | ... |
 

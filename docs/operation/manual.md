@@ -61,9 +61,11 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.13）
+## 3. 当前能力（v0.13.1）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。
+
+v0.13.1 增加 Context Observability：每次请求显示 token 分桶，并记录 trimming/compaction 事件。可在 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False` 关闭默认日志。
 
 ### 3.1 上下文架构
 

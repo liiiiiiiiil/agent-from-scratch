@@ -1,6 +1,6 @@
 # 第 13 课：上下文压缩
 
-> 版本 v0.13 | [上一课](12-token-budget-trimming.md) | [返回教程总览](README.md)
+> 版本 v0.13 / v0.13.1 增强 | [上一课](12-token-budget-trimming.md) | [返回教程总览](README.md)
 
 ## 本课目标
 
@@ -344,9 +344,47 @@ PYTHONPATH=src python -m pytest tests/test_context.py tests/test_loop.py -q
 - 支持多次压缩，事实锚随真实执行状态刷新。
 - `MAX_ITERATIONS` 从 10 提高到 50，允许长任务跨压缩继续执行。
 
+## v0.13.1 增强：Context Observability
+
+`v0.13.1` 是 v0.13 的维护/增强版本，不新增独立教程。它让上下文预算、裁剪和压缩过程可观察，便于教学和调试。
+
+每次主 LLM 请求准备完成后，默认打印实际发送消息的 token 统计：
+
+```text
+[Context]
+tokens: 82,341 / 128,000
+system:       2,100
+task:         1,200
+state:        1,500
+history:     65,000
+tool_result: 12,541
+reserve:     19,200
+```
+
+五个输入分桶互斥且总和等于 `tokens`；`reserve` 是输出预留，不计入输入总和。发生裁剪或压缩时，还会打印 `[Context Trim]` 和 `[Context Compact]`，指出轮次、对象和节省的 token。
+
+代码也提供结构化快照，避免调用方解析终端文本：
+
+```python
+from mini_agent.context import ContextManager
+
+context = ContextManager(state, history)
+context.prepare_messages()
+stats = context.stats_snapshot()
+print(stats.tokens, stats.tool_result)
+```
+
+需要关闭终端观测时，在 `config_local.py` 中设置：
+
+```python
+CONTEXT_OBSERVABILITY = False
+```
+
+关闭只影响默认日志，不影响预算、trimming、compaction 或 `stats_snapshot()`。也可以向 `ContextManager(..., observer=callback)` 传入回调接收 `ContextEvent`；回调异常不会影响 agent。
+
 ## 阶段小结与下一步
 
-阶段四至此形成完整链路：v0.11 分离 State 与 Context，v0.12 建立预算和协议安全的 trimming，v0.13 用 Summary + State 缓解裁剪造成的遗忘。
+阶段四至此形成完整链路：v0.11 分离 State 与 Context，v0.12 建立预算和协议安全的 trimming，v0.13 用 Summary + State 缓解裁剪造成的遗忘，v0.13.1 增加可观测性。
 
 下一阶段从 v0.14 的 plan 引导开始。规划能力应继续复用 ContextManager 和 AgentState，而不是把计划逻辑重新塞回核心 loop。
 

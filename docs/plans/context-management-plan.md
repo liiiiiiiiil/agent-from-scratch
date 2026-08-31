@@ -1,8 +1,8 @@
 # 阶段四：Context Management 实施计划
 
-> 状态：v0.11/v0.12/v0.13 已实施并验收
+> 状态：v0.11/v0.12/v0.13 已实施并验收；v0.13.1 Context Observability 待实施
 > 评审结论：原六 Phase 方案依赖顺序正确、原则正确、粒度偏细，合并为三个版本落地；修正项见"关键架构决策"
-> 版本映射：v0.11 / v0.12 / v0.13（tag 命名弃用 v0.011，理由见 D8）
+> 版本映射：v0.11 / v0.12 / v0.13 / v0.13.1（tag 命名弃用 v0.011，理由见 D8）
 > 关联文档：`teaching-repo-plan.md`（版本切片表已同步）、`AGENTS.md` 路线图
 
 ## 1. 目标与定位
@@ -204,12 +204,39 @@ def compact(self, keep_rounds: int = 6) -> None:
 | v0.11 | State 记录更新 / prepare_messages 恒等构建 | v0.10 典型任务回归 |
 | v0.12 | 轮次划分无孤儿 / 保底不删 / 预算循环收敛 | 反复读大文件触发裁剪，观察日志 |
 | v0.13 | compact mock / 失败降级 / 多次压缩 State 准确 | 20+ 轮长任务跨压缩完成 |
+| v0.13.1 | ContextStats 分桶 / trim 与 compact 事件 / observer 隔离 | 观察一次长任务的 Context、Trim、Compact 日志 |
 
 测试原则：单测全部 mock LLM（零网络依赖），风格与现有 `tests/` 一致；协议合法性（无孤儿 tool result）是唯一红线断言。
 
-## 7. 与既有文档的同步
+## 7. v0.13.1 Context Observability 增强
+
+`v0.13.1` 是 v0.13 的维护/增强版本，不新增教学小阶段，也不创建独立教程。它为每次 LLM 请求提供 Context token 统计，并记录 trimming/compaction 事件；详细说明追加在现有 `docs/tutorials/13-context-compaction.md`。
+
+- `ContextStats` 使用互斥的 `system` / `task` / `state` / `history` / `tool_result` 分桶，另列输出 `reserve`。
+- `ContextManager` 保留 `last_stats` / `stats_snapshot()`，并支持 observer 回调；默认终端输出可由 `CONTEXT_OBSERVABILITY = True` 关闭。
+- trim 事件包含截断或删除轮次及节省 token；compact 事件包含压缩轮次、摘要大小和 recent 轮次。
+- 观测逻辑不修改 history，不改变 tool calling 协议；observer 异常被吞掉。
+
+任务拆解：
+
+1. 增加 `ContextStats`、`ContextEvent` 和默认 observer 渲染。
+2. 将 TrimPolicy 的截断/整轮删除改为可观察事件。
+3. 为 compaction 成功和失败降级发出事件。
+4. 增加 stats、事件、关闭开关和 observer 隔离测试。
+5. 在 v0.13 教程追加 v0.13.1 说明，更新 CHANGELOG、版本信息并创建 tag `v0.13.1`。
+
+验收标准：
+
+- [ ] 每次主 LLM 请求输出或记录最终 ContextStats，分桶可加总。
+- [ ] trim/compact 日志包含对象、轮次范围和 token 差值。
+- [ ] 关闭日志不影响快照、预算、压缩或 agent 行为。
+- [ ] v0.13 原有测试和协议合法性测试全部通过。
+
+## 8. 与既有文档的同步
 
 - `teaching-repo-plan.md`：版本切片表 / 目录树 / 使用指导表 / 代码差异要点已同步为 v0.11–v0.13，plan 引导顺移至 v0.14
 - `AGENTS.md`：路线图与教学阶段划分已同步；每版完成时打勾并更新"当前架构"
 - `docs/plans/README.md`：索引已加本文档
 - `docs/tutorials/README.md`：阶段四改为 Context Management 三版表
+- `docs/tutorials/13-context-compaction.md`：追加 v0.13.1 Context Observability 说明（不新增教程）
+- `CHANGELOG.md`、`README.md`、`README_EN.md`、`docs/operation/manual.md`、`AGENTS.md`、`pyproject.toml`：同步增强版本信息

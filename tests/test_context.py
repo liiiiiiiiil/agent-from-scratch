@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mini_agent.context import (
     ContextBudget,
+    ContextEvent,
     ContextManager,
+    ContextStats,
     Message,
     _split_rounds,
     count_tokens,
@@ -296,6 +298,61 @@ def test_repeated_prepare_does_not_resummarize_same_rounds():
     context.prepare_messages()
 
     assert len(calls) == 1
+
+
+def test_context_stats_use_mutually_exclusive_buckets():
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "tool output"},
+    ]
+    state = AgentState(task="task")
+    context = ContextManager(state, history, observability=False)
+
+    prepared = context.prepare_messages()
+    stats = context.stats_snapshot()
+
+    assert isinstance(stats, ContextStats)
+    assert stats.tokens == count_tokens(prepared)
+    assert stats.tokens == stats.system + stats.task + stats.state + stats.history + stats.tool_result
+    assert stats.reserve == context.budget.window - context.budget.input_limit
+    assert stats.system > 0 and stats.task > 0 and stats.history > 0 and stats.tool_result > 0
+
+
+def test_observer_receives_prepared_trimmed_and_compacted_events():
+    events = []
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    for number in range(8):
+        history.extend(_tool_round(number))
+    context = ContextManager(
+        AgentState(task="task"), history,
+        ContextBudget(window=120, output_reserve_ratio=0, history_ratio=0.5),
+        summarizer=lambda prompt: "summary",
+        keep_rounds=2,
+        observability=False,
+        observer=events.append,
+    )
+
+    context.prepare_messages()
+
+    assert all(isinstance(event, ContextEvent) for event in events)
+    assert "prepared" in [event.kind for event in events]
+    assert "compacted" in [event.kind for event in events]
+    assert any(event.details.get("action") == "remove_round" for event in events)
+
+
+def test_observability_can_be_disabled_and_observer_errors_are_ignored(capsys):
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    context = ContextManager(
+        AgentState(), history, observability=False,
+        observer=lambda event: (_ for _ in ()).throw(RuntimeError("observer")),
+    )
+
+    context.prepare_messages()
+
+    assert capsys.readouterr().out == ""
+    assert isinstance(context.stats_snapshot(), ContextStats)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,72 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from mini_agent.config import CONTEXT_WINDOW
+from mini_agent.config import CONTEXT_OBSERVABILITY, CONTEXT_WINDOW
 from mini_agent.state import AgentState
 
 
 Message = dict[str, object]
+
+
+@dataclass(frozen=True)
+class ContextStats:
+    """Token accounting for the exact message view sent to the LLM."""
+
+    tokens: int
+    window: int
+    input_limit: int
+    reserve: int
+    system: int
+    task: int
+    state: int
+    history: int
+    tool_result: int
+
+
+@dataclass(frozen=True)
+class ContextEvent:
+    """Observable context lifecycle event."""
+
+    kind: str
+    stats: ContextStats | None
+    details: dict[str, object]
+
+
+Observer = Callable[[ContextEvent], None]
+
+
+def _default_observer(event: ContextEvent) -> None:
+    details = event.details
+    if event.kind == "prepared" and event.stats is not None:
+        stats = event.stats
+        print("[Context]")
+        print(f"tokens: {stats.tokens:,} / {stats.window:,}")
+        for name in ("system", "task", "state", "history", "tool_result", "reserve"):
+            print(f"{name + ':':12}{getattr(stats, name):>10,}")
+    elif event.kind == "trimmed":
+        action = details.get("action")
+        if action == "truncate":
+            print("[Context Trim]")
+            print(f"truncated tool_call {details.get('tool_call_id', '<unknown>')}")
+            print(f"tool_result: -{int(details.get('saved_tokens', 0)):,} tokens")
+        elif action == "remove_round":
+            print("[Context Trim]")
+            print(f"removed turn #{details.get('round', '?')}")
+            print(f"tool_result: -{int(details.get('saved_tokens', 0)):,} tokens")
+    elif event.kind == "compacted":
+        if details.get("failed"):
+            print("[Context Compact]")
+            print("failed; fallback: trimming")
+        else:
+            print("[Context Compact]")
+            print(
+                f"compressed turns: {details.get('start_round')}-{details.get('end_round')}"
+            )
+            print(f"summary tokens: {int(details.get('summary_tokens', 0)):,}")
+            print(
+                f"recent turns: {details.get('recent_start_round')}-"
+                f"{details.get('recent_end_round')}"
+            )
 
 
 def count_tokens(text_or_messages: object) -> int:
@@ -112,7 +173,12 @@ class TrimPolicy:
 
     minimum_tool_result_characters = 120
 
-    def trim(self, messages: list[Message], budget: ContextBudget) -> list[Message]:
+    def trim(
+        self,
+        messages: list[Message],
+        budget: ContextBudget,
+        observer: Observer | None = None,
+    ) -> list[Message]:
         """Return a protocol-safe, budgeted copy of ``messages``."""
         prepared = [dict(message) for message in messages]
         prefix, rounds = _split_rounds(prepared)
@@ -121,7 +187,6 @@ class TrimPolicy:
         if before <= target:
             return prepared
 
-        print(f"[Context] token budget exceeded: {before}/{target}")
         for round_messages in rounds:
             for message in round_messages:
                 current_tokens = count_tokens(_flatten(prefix, rounds))
@@ -143,21 +208,27 @@ class TrimPolicy:
                 old_tokens = count_tokens(content)
                 message["content"] = shortened
                 saved = old_tokens - count_tokens(shortened)
-                print(
-                    "[Context] truncated tool result "
-                    f"{message.get('tool_call_id', '<unknown>')}, saved {saved} tokens"
-                )
+                if observer:
+                    observer(ContextEvent("trimmed", None, {
+                        "action": "truncate",
+                        "tool_call_id": message.get("tool_call_id", "<unknown>"),
+                        "saved_tokens": saved,
+                    }))
 
+        round_number = 1
         while rounds and count_tokens(_flatten(prefix, rounds)) > target:
             removed = rounds.pop(0)
-            print(f"[Context] removed oldest round, saved {count_tokens(removed)} tokens")
+            if observer:
+                observer(ContextEvent("trimmed", None, {
+                    "action": "remove_round",
+                    "round": round_number,
+                    "saved_tokens": count_tokens(removed),
+                    "message_count": len(removed),
+                }))
+            round_number += 1
 
         prepared = _flatten(prefix, rounds)
         after = count_tokens(prepared)
-        if after > target:
-            print(f"[Context] protected system/task messages exceed budget: {after}/{target}")
-        else:
-            print(f"[Context] prepared context: {after}/{target} tokens")
         return prepared
 
 
@@ -172,6 +243,8 @@ class ContextManager:
         trim_policy: TrimPolicy | None = None,
         summarizer: Callable[[list[Message]], str] | None = None,
         keep_rounds: int = 6,
+        observability: bool = CONTEXT_OBSERVABILITY,
+        observer: Observer | None = None,
     ) -> None:
         self.state = state
         self.history = history
@@ -186,6 +259,49 @@ class ContextManager:
         self._summary = ""
         self._compacted = False
         self._summarized_rounds = 0
+        self.observability = observability
+        self.observer = observer or (_default_observer if observability else None)
+        self.last_stats: ContextStats | None = None
+
+    def stats_snapshot(self) -> ContextStats | None:
+        return self.last_stats
+
+    def _emit(self, kind: str, details: dict[str, object], stats: ContextStats | None = None) -> None:
+        if self.observer is None:
+            return
+        try:
+            self.observer(ContextEvent(kind, stats, details))
+        except Exception:
+            # Observability is strictly observational and cannot break execution.
+            return
+
+    def _stats(self, messages: list[Message]) -> ContextStats:
+        first_user = next(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            None,
+        )
+        buckets = {"system": 0, "task": 0, "state": 0, "history": 0, "tool_result": 0}
+        for index, message in enumerate(messages):
+            amount = count_tokens(message)
+            role = message.get("role")
+            content = message.get("content")
+            if role == "tool":
+                buckets["tool_result"] += amount
+            elif index == first_user:
+                buckets["task"] += amount
+            elif role == "system" and isinstance(content, str) and content.startswith("[Structured State]"):
+                buckets["state"] += amount
+            elif role == "system":
+                buckets["system"] += amount
+            else:
+                buckets["history"] += amount
+        return ContextStats(
+            tokens=sum(buckets.values()),
+            window=self.budget.window,
+            input_limit=self.budget.input_limit,
+            reserve=self.budget.window - self.budget.input_limit,
+            **buckets,
+        )
 
     def _render_state(self) -> Message:
         snapshot = self.state.snapshot()
@@ -248,13 +364,19 @@ class ContextManager:
             if not isinstance(summary, str) or not summary.strip():
                 return False
         except Exception:
-            print("[Context] compaction failed; falling back to trimming")
+            self._emit("compacted", {"failed": True})
             return False
         self._summary = summary.strip()
         self.keep_rounds = keep
         self._compacted = True
         self._summarized_rounds = eligible_end
-        print(f"[Context] compacted {len(old_rounds)} old rounds")
+        self._emit("compacted", {
+            "start_round": start + 1,
+            "end_round": eligible_end,
+            "summary_tokens": count_tokens(self._summary),
+            "recent_start_round": eligible_end + 1,
+            "recent_end_round": len(rounds),
+        })
         return True
 
     def prepare_messages(self) -> list[Message]:
@@ -263,7 +385,12 @@ class ContextManager:
         prefix, _ = _split_rounds(messages)
         target = self.budget.message_limit(count_tokens(prefix))
         over_budget = count_tokens(messages) > target
-        trimmed = self.trim_policy.trim(messages, self.budget)
+        trim_observer = lambda event: self._emit(event.kind, event.details, event.stats)
+        trimmed = self.trim_policy.trim(messages, self.budget, observer=trim_observer)
         if over_budget and self.compact():
-            trimmed = self.trim_policy.trim(self._build_messages(), self.budget)
+            trimmed = self.trim_policy.trim(
+                self._build_messages(), self.budget, observer=trim_observer
+            )
+        self.last_stats = self._stats(trimmed)
+        self._emit("prepared", {}, self.last_stats)
         return trimmed

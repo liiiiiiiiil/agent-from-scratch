@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.13.1] - Context Observability 增强
+
+### Added
+- `ContextStats` 与 `ContextManager.stats_snapshot()`：记录实际请求的 token 总量、预算、输出预留及互斥分桶。
+- `ContextEvent` observer：观察 prepared、trimmed、compacted 事件；默认终端日志可通过 `CONTEXT_OBSERVABILITY` 关闭。
+- v0.13 教程追加 Context Observability 说明；本版本不新增独立教程。
+
+### Changed
+- trimming 日志记录 tool result 截断和完整轮次删除的对象与 token 节省量。
+- compaction 日志记录压缩轮次、摘要大小和保留轮次；观测回调异常不影响上下文构建。
+
 ## [v0.13] - 上下文压缩
 
 ### Added
