@@ -2,6 +2,8 @@
 
 本目录是 `mini_agent` 教学仓库的核心：教程文件都放在同一个目录中，`README.md` 负责按阶段导航，具体课程负责解释对应版本的代码变化。
 
+新增课程请先复制 [`_template.md`](_template.md)。提交前运行 `PYTHONPATH=src python scripts/check_tutorials.py`；检查器默认验证最新版本课程，也支持传入具体教程路径。
+
 ## 先从这里开始
 
 - 第一次学习 Agent：从阶段一开始，按顺序读到阶段三。

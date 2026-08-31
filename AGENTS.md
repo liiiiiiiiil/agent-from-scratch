@@ -176,6 +176,7 @@ python -m mini_agent
 
 ```bash
 PYTHONPATH=src python -m pytest -q
+PYTHONPATH=src python scripts/check_tutorials.py
 ```
 
 未安装 pytest 时，可运行各测试文件自带的脚本入口（这些入口覆盖核心 smoke test）：
@@ -190,6 +191,7 @@ PYTHONPATH=src python tests/test_executor.py
 ```
 
 新增版本的验收至少应覆盖对应模块的测试、教程中的最小示例，以及稳定版文档中的版本号、默认配置和命令。
+教程结构检查器默认校验教程索引中的最新版本，也可传入相对路径校验指定课程：`PYTHONPATH=src python scripts/check_tutorials.py docs/tutorials/15-task-state.md`。
 
 ## 已知行为
 
