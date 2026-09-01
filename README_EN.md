@@ -149,6 +149,7 @@ agent-from-scratch/
 
 - [Tutorial path index](./docs/tutorials/README.md) — **start here**
 - [Full usage manual](./docs/operation/manual.md) — complete usage, config, FAQ for the latest version
+- [Context architecture](./docs/operation/context-architecture.md) — current context view, state, and budget mechanics
 - [Roadmap & plans](./docs/plans/teaching-repo-plan.md) — stage navigation and version slicing plan
 - [AGENTS.md](./AGENTS.md) — runtime hard constraints and concise architecture index
 - [Governance docs](./docs/governance/README.md) — detailed standards and decision records

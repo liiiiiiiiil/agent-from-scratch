@@ -149,6 +149,7 @@ agent-from-scratch/
 
 - [教学路径索引](./docs/tutorials/README.md) —— **从这里开始学**
 - [完整使用手册](./docs/operation/manual.md) —— 最新版全量用法、配置、FAQ
+- [上下文架构说明](./docs/operation/context-architecture.md) —— 当前上下文视图、状态与预算机制
 - [路线图与计划](./docs/plans/teaching-repo-plan.md) —— 阶段导航与版本切分方案
 - [AGENTS.md](./AGENTS.md) —— 运行时硬约束与精简架构索引
 - [治理文档](./docs/governance/README.md) —— 详细规范与决策记录
