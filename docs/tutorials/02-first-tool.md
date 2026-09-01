@@ -4,8 +4,9 @@
 
 ## 本课目标
 
-给 agent 接上第一个工具 `calculate`，让 LLM 能真正"做事"而不只是聊天。
-引入 `Tool`/`ToolRegistry`/`ToolExecutor` 三件套和 OpenAI function calling 协议。
+上一课的 LLM 只能生成文本。即使它回答了计算题，也只是依靠模型自己的推断，程序没有真正执行计算。
+
+这一课接入第一个工具 `calculate`，并介绍 function calling，也就是“模型提出工具调用请求，程序负责实际执行”的协议。为了组织这条流程，代码新增 `Tool`、`ToolRegistry` 和 `ToolExecutor`。
 
 ## 前置
 
@@ -30,7 +31,7 @@
 
 ### 工具三件套：Tool / ToolRegistry / ToolExecutor
 
-**Tool**（`src/mini_agent/tools/base.py:14`）——一个工具的完整定义：
+程序需要同时告诉模型“有哪些工具”，也要知道“收到请求后调用哪个 Python 函数”。`Tool`（`src/mini_agent/tools/base.py:14`）把这两部分放在同一个定义中：
 
 ```python
 @dataclass
@@ -41,11 +42,11 @@ class Tool:
     handler: Callable   # Runtime 真正执行的 Python 函数
 ```
 
-一个 Tool 同时携带"给 LLM 的描述"和"给 runtime 的实现"。`to_llm_schema()` 把它转成 OpenAI function calling 需要的格式。
+其中 `name`、`description` 和 `parameters` 供 LLM 理解工具；`handler` 是运行时真正调用的函数。`to_llm_schema()` 会把前一部分转换成 function calling 所需的格式。
 
-**ToolRegistry**（`base.py:45`）——注册中心，负责注册/查找/列举工具，生成给 LLM 的 schemas 列表。
+**ToolRegistry**（`base.py:45`）是工具注册表。它负责保存、查找和列出工具，也能生成发给 LLM 的 schema 列表。schema 是一份结构说明，告诉模型工具需要哪些参数。
 
-**ToolExecutor**（`base.py:82`）——执行器，拿到工具名 + 参数，调 handler，捕获异常返回错误信息。v0.02 版无权限闸门（v0.04 才加）。
+**ToolExecutor**（`base.py:82`）是工具执行器。它根据工具名找到对应 `handler`，传入参数，并把可预期的执行异常转换为错误结果。v0.02 还没有权限检查，这部分会在第 4 课加入。
 
 ### calculate 工具（`src/mini_agent/tools/calc.py`）
 
@@ -56,7 +57,7 @@ def calculate(expression: str):
     return str(eval(expression))
 ```
 
-用正则白名单限制只允许数字和数学运算符，防注入。`eval` 在白名单保护下使用。
+`eval` 会执行字符串，因此不能直接接收任意内容。这里先用正则白名单，只允许数字、空白和数学运算符，再把表达式交给 `eval`。
 
 ### function calling 协议
 
@@ -70,7 +71,7 @@ body = json.dumps({
 }, ensure_ascii=False).encode()
 ```
 
-LLM 收到 `tools` 后，回复里可能带 `tool_calls`：
+LLM 收到 `tools` 后，可以选择直接回答，也可以在回复中返回 `tool_calls`。`tool_calls` 是一组结构化的工具调用请求，例如：
 
 ```python
 {
@@ -109,21 +110,25 @@ for tc in msg["tool_calls"]:
 # 循环回到顶部，带着工具结果再调 LLM
 ```
 
-关键点：`role=tool` 消息必须带 `tool_call_id`，LLM 靠它把结果对应到发起的 tool_call。回灌后进入下一轮循环，LLM 拿着工具结果生成最终回复。
+程序不能执行完工具就直接结束，还要把结果发回 LLM。这个动作称为“回灌”。
+
+回灌消息使用 `role=tool`，并且必须携带原请求的 `tool_call_id`。因为一轮里可能有多个调用，所以 LLM 需要用这个 ID 判断每份结果属于哪个请求。所有结果回灌后，loop 才进入下一轮，让模型根据结果继续回答。
 
 ## 为什么这样设计
 
 ### 为什么 Tool 同时带"给 LLM 的描述"和"给 runtime 的 handler"
 
-把"LLM 看到的"和"实际执行的"绑在一个对象里，注册时一步到位。对比另一种设计（先注册 schema，再单独绑 handler），这种更不容易漏配。
+如果 schema 和 Python 函数分开注册，修改一边时可能漏掉另一边。`Tool` 把模型看到的描述和运行时执行的函数放在一起，因此注册一次就能同时建立两者的对应关系。
 
 ### 为什么 Executor 捕获异常而不是让 loop 崩
 
-v0.01 的约束是"loop 不兜底"。但工具层不同：工具失败是可预期的（文件不存在、表达式非法），应该把错误信息返回给 LLM，让 LLM 决定下一步（换个参数重试或告诉用户）。所以 `ToolExecutor.execute` 里有 try/except，但这不违反"loop 不兜底"——容错在工具层，不在 loop 层。
+文件不存在、参数非法等工具错误很常见，模型拿到错误信息后还可能换参数重试。因此 `ToolExecutor.execute` 会捕获 handler 异常，并把错误作为工具结果回灌。
+
+这个边界与第 1 课一致：工具层处理工具错误，核心 loop 不替 LLM 调用或 CLI 顶层异常兜底。
 
 ### 为什么 tool_calls 串行执行
 
-v0.02 串行执行同一轮的多个 tool_calls。v0.06 才改成 `ThreadPoolExecutor` 并发。先串行是为了让逻辑清晰——看 v0.02 的 loop 能一眼读懂"取 tool_call → 执行 → 回灌"。
+v0.02 会按顺序执行同一轮中的多个 `tool_calls`。这样“取出请求 → 执行工具 → 回灌结果”的顺序最容易观察，但多个互不依赖的工具也必须逐个等待。第 6 课才会引入并发执行。
 
 ## 使用指导
 
@@ -157,7 +162,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 123 * 456"
 === [2] LLM 回复 ===
 123 × 456 的结果是 56,088。
 ```
-注意两轮循环：第 1 轮 LLM 决策调工具，第 2 轮 LLM 拿着结果给出最终回复。
+这里一定会经历工具结果回灌，但模型何时给出最终文本由模型决定。示例中用了两轮：第 1 轮请求计算，第 2 轮根据结果回答。
 
 **示例 2：LLM 自己能算的就不调工具**
 ```bash

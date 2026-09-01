@@ -4,7 +4,7 @@
 
 ## 本课目标
 
-v0.13 已经能压缩旧对话并观察上下文变化，但模型仍不知道当前项目的约束，例如测试命令、代码风格和禁止操作。本课加入一个边界清晰的输入源：启动 Agent 时读取适用的 `AGENTS.md`，将其作为受保护的项目指令注入每次 LLM 请求。
+压缩能让对话变短，却不会让模型自动知道仓库的测试命令、代码风格和禁止操作。把这些规则只写在项目文件里，模型就可能看不到。本课让 Agent 启动时读取适用的 `AGENTS.md`，并把内容作为每次 LLM 请求都会携带的项目指令。这里的 Project Instructions（项目指令）有明确边界：它提示模型如何做，不直接授予工具权限。
 
 读完本课后，你应能：
 
@@ -37,7 +37,9 @@ git diff v0.13..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py
 
 ## 为什么需要本版
 
-上下文管理只能保留模型已经知道的信息，不能让模型自动获得仓库约束。把项目规则混入普通 history 又会被裁剪或摘要，因此需要独立发现规则，并把它们放入受保护的 system context。
+普通上下文管理只能保留已经发给模型的内容，不能发现仓库规则。若把规则塞进普通 `history`，对话变长后它可能被裁剪或写进摘要，原文就不一定还在。
+
+因此，本版单独查找规则，并把它们放进受保护的 system context（系统上下文）。这样每次请求都能看到规则，历史处理也不会删除它们。
 
 ## 关键流程
 
@@ -51,13 +53,13 @@ git diff v0.13..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py
   -> 每次 prepare_messages() 与当前 history 合并后再预算裁剪
 ```
 
-`history` 仍只保存 user、assistant 和 tool 消息。ContextManager 构建请求时先复制受保护消息，再复制 history；进入压缩模式后，受保护消息仍位于消息前缀，Structured State、Historical Summary 和近期轮次接在其后。因此项目规则不会被 `TrimPolicy` 删除，也不会随旧轮次摘要消失。
+`history` 仍只保存 user、assistant 和 tool 消息。ContextManager 先放入受保护消息，再放入 `history`。即使后续发生压缩，项目规则仍在消息前缀，Structured State、Historical Summary 和近期轮次排在它后面。因此 `TrimPolicy` 不会删除这些规则，它们也不会随着旧轮次被摘要掉。
 
 ## 实现拆解
 
 ### InstructionLoader 的规则
 
-`InstructionLoader(cwd, max_chars=12000)` 提供两个主要接口：`discover()` 返回路径，`load()` 返回带来源标记的文本。
+启动目录里可能有多层规则，读者需要知道哪些文件会生效、谁排在后面。`InstructionLoader(cwd, max_chars=12000)` 为此提供两个接口：`discover()` 返回找到的路径，`load()` 返回带来源标记的文本。
 
 1. 在 Git 仓库内，从仓库根目录到启动目录逐层检查 `AGENTS.md`，结果按 root → cwd 排列；越靠近 cwd 的规则位于后面。
 2. 不在 Git 仓库时，只检查启动目录本身，不向父目录寻找。
@@ -65,7 +67,7 @@ git diff v0.13..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py
 4. 读取发生 `OSError` 时跳过正文并保留 `[读取失败，已跳过]`，不会阻止 Agent 启动。
 5. 总字符数最多 12,000。超限时保留来源和截断标记，例如 `[指令已截断，最多保留 12000 个字符]`。
 
-首版刻意不做以下事情：不执行指令文件中的命令，不把自然语言规则转换成权限规则，不读取 `.cursorrules` 或 `CLAUDE.md`，也不根据工具后来访问的目录动态重新加载规则。作用域固定在**进程启动时的 cwd**；项目指令只能影响模型选择行为，文件写入和 shell 执行仍由 `PermissionGate` 决定。
+这里有意把范围收窄。运行时不会执行指令文件里的命令，也不会把自然语言规则转换成权限规则；它不读取 `.cursorrules` 或 `CLAUDE.md`，也不会因为工具访问了新目录就重新加载规则。作用域固定为**进程启动时的 cwd**。因此项目指令只能影响模型的选择，文件写入和 shell 执行仍一定由 `PermissionGate` 决定。
 
 ### CLI 与上下文边界
 
@@ -78,15 +80,15 @@ context = ContextManager(state, history)
 context.protected_messages = [{"role": "system", "content": system_prompt}]
 ```
 
-没有 `AGENTS.md` 时，`project_instructions` 为空，生成的 prompt 和 v0.13 兼容。即使预算超限，受保护消息也会保留；代价是极端情况下可供 history 使用的空间变少，这是保护项目约束的明确取舍。
+没有 `AGENTS.md` 时，`project_instructions` 为空，生成的 prompt 与 v0.13 一致。即使预算超限，受保护消息也会保留。因为规则不能丢，所以极端情况下留给 `history` 的空间会更少。
 
 ## 设计选择与边界
 
-规则只在进程启动时加载一次，保证实现和作用域可解释；代价是运行期间新增或切换目录不会动态刷新。项目指令影响模型行为，但不改变 `PermissionGate` 的授权结果。读取失败会降级为来源标记，不阻断 Agent 启动。
+规则只在进程启动时加载一次，所以来源和作用范围始终清楚。相应地，运行期间新增规则或切换目录时，内容不会自动刷新。项目指令可以影响模型行为，但一定不会改变 `PermissionGate` 的 allow/deny/ask 结果。读取失败只留下来源标记，Agent 仍会启动。
 
 ## 最小无网络示例
 
-下面的示例不调用 LLM，直接观察发现顺序、来源和截断行为：
+下面不调用 LLM，直接查看规则的发现顺序、来源和截断结果：
 
 ```bash
 PYTHONPATH=src python - <<'PY'
@@ -105,7 +107,7 @@ with tempfile.TemporaryDirectory() as root:
 PY
 ```
 
-预期结果是先出现根目录的 `Source` 和规则，再出现 `src/AGENTS.md` 的规则；如果正文超过上限，输出末尾包含截断标记。真实 CLI 示例需要先配置 `config_local.py`：
+输出一定先列出根目录的 `Source` 和规则，再列出 `src/AGENTS.md` 的规则。正文超过上限时，末尾会有截断标记。真实 CLI 示例仍需先配置 `config_local.py`：
 
 ```bash
 PYTHONPATH=src python -m mini_agent "读取项目规则并列出当前目录"
@@ -113,7 +115,7 @@ PYTHONPATH=src python -m mini_agent "读取项目规则并列出当前目录"
 
 ## 测试与验收
 
-运行本版直接相关测试：
+运行以下直接相关的测试：
 
 ```bash
 PYTHONPATH=src python tests/test_instructions.py
@@ -143,4 +145,4 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 
 ### 本版独有特性与下一课
 
-v0.14 的新增能力是“静态项目规则进入 Agent 上下文”，而不是任务计划、动态目录规则或权限升级。下一课 v0.15 将把动态 Todo / Task State 从自然语言中分离出来，并让它在压缩后仍可恢复。
+v0.14 只让静态项目规则进入 Agent 上下文。它不提供任务计划、动态目录规则或权限升级。下一课 v0.15 会把动态 Todo / Task State 从自然语言中拿出来单独保存，这样压缩后也能恢复。

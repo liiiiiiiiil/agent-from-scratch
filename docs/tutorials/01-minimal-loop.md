@@ -4,8 +4,9 @@
 
 ## 本课目标
 
-从零搭一个能跑的 agent loop：调 LLM → 拿回复 → 再调，循环到 LLM 不再要求工具就结束。
-这一版**没有任何工具**，纯对话循环，先把"什么是 agent loop"讲透。
+这一课先解决一个最基础的问题：怎样让程序把用户的话交给 LLM，并拿回最终回答。
+
+我们会从零搭出 agent loop，也就是“反复调用模型并处理回复的循环”。v0.01 还没有任何工具，所以它只展示循环骨架：调用 LLM → 收到回复 → 判断是否结束。
 
 ## 前置
 
@@ -31,7 +32,7 @@ tests/
 
 ### 什么是 agent loop
 
-agent 的本质是一个**循环**：
+普通聊天程序调用一次 LLM 就结束。编程 agent 不同：模型可能先要求调用工具，拿到工具结果后才能继续回答。因此 agent 的核心是一个**循环**：
 
 1. 把对话历史（`messages` 列表）发给 LLM
 2. LLM 返回一条回复，append 到 `messages`
@@ -39,11 +40,13 @@ agent 的本质是一个**循环**：
    - 没有 → LLM 给出最终答案，循环结束
    - 有 → 执行工具，把结果 append 回 `messages`，回到第 1 步
 
-v0.01 没有工具，所以第 3 步只会走"没有 tool_calls"分支——LLM 回复一次就结束。但 loop 的骨架已经在了，后续版本只需在"有 tool_calls"分支上接工具。
+`tool_calls` 表示模型请求程序调用工具。v0.01 没有向模型提供工具，所以模型不会产生这类请求，通常回复一次就会结束。这里仍然保留判断分支，因为后续版本会在这个位置接入工具。
 
 ### messages 列表
 
-整个对话状态就是一个 list of dict：
+LLM 本身不会记住上一次请求。为了让它看懂对话前后关系，程序需要在每次请求时重新发送已有消息。
+
+这些消息保存在 `messages` 中。它是一个由字典组成的 Python 列表，每个字典记录一条消息及其发送者：
 
 ```python
 messages = [
@@ -53,11 +56,11 @@ messages = [
 ]
 ```
 
-每轮调用 LLM 时，把**整个 messages** 发过去（LLM 无状态，靠这个列表维持上下文）。LLM 返回的新消息 append 进去，下一轮再发。这就是"对话循环"的全部状态管理。
+每轮调用 LLM 时，程序都会发送完整的 `messages`。收到回复后，再用 `append` 把新消息放到列表末尾。因为下一轮还能看到前面的消息，所以模型表现得像是“记住了”对话。
 
 ### call_llm：用 http.client 调 LLM
 
-`src/mini_agent/agent.py:12` 的 `call_llm` 干的事：
+`src/mini_agent/agent.py:12` 中的 `call_llm` 负责把 `messages` 变成 HTTP 请求，并从响应中取出模型消息：
 
 ```python
 def call_llm(messages):
@@ -79,7 +82,9 @@ def call_llm(messages):
     return data["choices"][0]["message"]
 ```
 
-用 OpenAI chat completions 协议：POST 到 `{BASE_URL}/chat/completions`，body 里带 `model` 和 `messages`，header 带 `Authorization: Bearer <API_KEY>`。返回的 JSON 里 `data["choices"][0]["message"]` 就是 LLM 的回复消息，直接 append 回 messages 即可。
+这里使用 OpenAI Chat Completions 协议。程序向 `{BASE_URL}/chat/completions` 发送 POST 请求，在请求体中放入 `model` 和 `messages`，并通过 `Authorization` 请求头传递 API key。
+
+响应仍是 JSON。`data["choices"][0]["message"]` 就是本轮回复，调用方会把它追加到 `messages`。
 
 ### agent_loop：循环主体
 
@@ -100,10 +105,10 @@ def agent_loop(messages):
     return "达到最大迭代次数"
 ```
 
-三个要点：
-1. **messages 由调用方传入并跨轮复用**：`agent_loop` 只往里 append，不负责创建。这样调用方（`__main__.py`）能在多次调用间维持对话。
-2. **结束条件**：`if not msg.get("tool_calls")`。v0.01 的 LLM 永远不会返回 tool_calls（因为没传 `tools` 参数），所以第一轮就结束。但这个判断为后续版本预留了分支。
-3. **迭代上限**：`MAX_ITERATIONS = 10`。超限直接返回 `"达到最大迭代次数"`，不报错——长任务可能静默截断，后续版本会处理。
+这里有三个要点：
+1. **跨轮复用消息**：`messages` 由调用方创建，`agent_loop` 只负责追加。这样 `__main__.py` 多次调用 loop 时仍能保留之前的对话。
+2. **判断何时结束**：`if not msg.get("tool_calls")` 表示模型没有请求工具，此时当前文本就是最终回答。v0.01 没有提供工具，因此第一轮通常就会走到这里。
+3. **限制循环次数**：`MAX_ITERATIONS = 10` 防止循环一直运行。达到上限后会返回 `"达到最大迭代次数"`。这一版不会进一步解释任务为什么没有完成。
 
 ### __main__.py：CLI 入口
 
@@ -118,21 +123,19 @@ def agent_loop(messages):
 
 ### 为什么用 http.client 而不是 requests
 
-`your-gateway-host` 网关对 `Accept-Encoding: gzip` 的响应异常，会返回 502。
-`requests` 默认发 `Accept-Encoding: gzip, deflate`，且不易关掉。
-`http.client` 是标准库，可以精确控制 header——显式设 `Accept-Encoding: identity` 绕过。
+项目使用的网关在收到 `Accept-Encoding: gzip` 时可能返回 502。`http.client` 属于 Python 标准库，并且可以准确控制请求头，所以代码显式发送 `Accept-Encoding: identity`，要求服务端不要压缩响应。
 
-**这是踩坑后的硬约束，换 HTTP 客户端会重新踩坑。** 后续所有版本都遵守。
+这是项目的运行约束，后续版本也继续使用 `http.client`。
 
 ### 为什么不用 try/except 兜底
 
-`agent_loop` 里没有 try/except。如果 `call_llm` 抛异常（网络断、API key 错、JSON 解析失败），整个 loop 直接崩。
+`agent_loop` 没有使用 `try/except` 包住 `call_llm`。网络中断、API key 错误或响应无法解析时，异常会直接交给上层。
 
-这是有意的：**保持核心路径可读**。第一课的 loop 应该一眼能看懂"调 LLM → 判断 → 结束"。容错是工具层、执行器层的事（v0.02+ 的 `ToolExecutor` 会捕获 handler 异常），loop 本身不该兜底。
+这一课只保留“调用 LLM → 判断回复 → 结束”的主路径。下一课开始，工具执行中的可预期错误会由 `ToolExecutor` 处理；LLM 调用和 CLI 顶层异常仍不会在 loop 中被隐藏。
 
 ### 为什么 config 硬编码
 
-`BASE_URL`/`API_KEY`/`MODEL` 直接写在 `config.py` 里，不读环境变量。教学仓库追求"改一处即生效，重启就跑通"，环境变量会增加配置步骤。后续版本若需多环境部署再改。
+`BASE_URL`、`API_KEY` 和 `MODEL` 直接写在 `config.py` 中，不读取环境变量。这样初学者只需修改一个文件就能运行。代价是它不适合多环境部署，真实配置也不能提交到版本库。
 
 ## 使用指导
 
@@ -179,11 +182,11 @@ $env:PYTHONPATH="src"; python -m mini_agent
 你刚才说你叫小明。
 你: exit
 ```
-注意第二轮 LLM 能记住"小明"——因为 `messages` 列表跨轮复用，上下文保留了。
+第二轮 LLM 能回答“小明”，不是因为模型在服务端保存了记忆，而是因为程序再次发送了包含前一轮内容的 `messages`。
 
 ### 本版独有特性
 
-- **无工具**：v0.01 的 LLM 只能纯对话回复，不能调任何工具。问它"读取文件"它会告诉你它做不到，或者瞎编一个答案。
+- **无工具**：v0.01 的 LLM 只能生成文本，不能真的读取文件。它可能说明自己做不到，也可能生成未经验证的内容。
 - **非流式**：LLM 回复是整段返回的，终端一次性打印，没有打字机效果（v0.05 才加流式）。
 - **无权限交互**：因为没工具，没有任何"是否允许执行"的提示。
 

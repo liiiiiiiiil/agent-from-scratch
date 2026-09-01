@@ -4,7 +4,8 @@
 
 ## 本课目标
 
-给 agent 补全文件操作能力：`list_dir`（列目录）、`edit_file`（精确替换）、`grep`（正则搜索），同时给 `read_file` 加 `offset`/`limit` 分段读取。完成后 agent 具备"浏览→定位→读取→编辑"的完整文件操作链路，能独立完成基础编程任务。
+之前 agent 能读写文件，却常常不知道项目里有什么、目标内容在哪，或者为了改一行而重写整个文件。
+这一版加入 `list_dir`（列出目录）、`edit_file`（精确替换）和 `grep`（正则搜索），并让 `read_file` 支持 `offset`/`limit` 分段读取。这样它可以按“浏览→定位→读取→编辑”的顺序完成基础编程任务。
 
 ## 前置
 
@@ -25,23 +26,24 @@
  └── test_tools.py      # 改：加 6 个新测试，共 15 个
 ```
 
-> 本版只改 `file.py` + `permission.py` + `__init__.py` + 测试。`agent.py` 不动——核心 loop 仍然只认 `messages` 列表，不感知工具数量变化。这是 v0.02 三件套分离关注点的持续红利。
+> 本版只改 `file.py`、`permission.py`、`__init__.py` 和测试。`agent.py` 不动，因为核心 loop 仍然只处理 `messages` 列表，不需要知道工具数量是否变化。
 
 ## 核心概念
 
 ### 为什么 v0.03 的三个工具不够
 
-v0.03 给了 `read_file`/`write_file`，agent 能读写文件，但实际编程任务还差三块：
+v0.03 已有 `read_file`/`write_file`，可以读写文件。但遇到真实编程任务时，仍会缺少三种动作：
 
 1. **看不到目录结构**：agent 不知道项目里有哪些文件，只能靠用户告诉它路径。需要 `list_dir`。
 2. **改文件只能整文件重写**：改一行代码也要 `write_file` 重写整个文件，大文件浪费 token、容易丢内容。需要 `edit_file` 做局部替换。
 3. **找不到内容在哪**：agent 想改某个函数，但不知道在哪个文件。需要 `grep` 搜索内容定位文件。
 
-v0.08 补齐这三块，加上 `read_file` 的分段读取，形成完整操作链路。
+这一版补上这三块，并增加 `read_file` 的分段读取，形成完整的文件操作链路。
 
 ### read_file 加 offset/limit（`src/mini_agent/tools/file.py`）
 
-v0.03 的 `read_file` 一次读全量，大文件会爆上下文。v0.08 加 `offset`/`limit`：
+以前 `read_file` 一次读取全部内容。文件很大时，返回内容可能占满上下文。
+v0.08 用 `offset`/`limit` 指定从哪一行开始、最多读取多少行：
 
 ```python
 def read_file(path: str, offset: int = 0, limit: int = 2000):
@@ -54,14 +56,14 @@ def read_file(path: str, offset: int = 0, limit: int = 2000):
     ...
 ```
 
-两个设计点：
+这样读文件时还要解决两个问题：
 
-- **行号前缀** `00001| `：借鉴 OpenCode 的 ReadTool。LLM 看到行号后，调用 `edit_file` 时能更准确地定位 `old_string` 所在位置，减少误匹配。
-- **剩余行提示**：未读完整时追加 `(共 N 行，已读 M 行，还有 K 行未读)`，LLM 知道还有内容、需要再调一次 `read_file(offset=...)`。
+- **行号前缀** `00001| `：参考 OpenCode 的 ReadTool。LLM 看见行号后，选择 `edit_file` 的 `old_string` 会更准确，也更不容易匹配错位置。
+- **剩余行提示**：没有读完时，结果会追加 `(共 N 行，已读 M 行，还有 K 行未读)`。模型因此知道还有内容，可能继续调用 `read_file(offset=...)`。
 
 ### edit_file：精确字符串替换
 
-`edit_file` 用 `old_string`/`new_string` 做精确匹配替换，而非按行号编辑：
+改文件时，模型不擅长稳定地数行号。`edit_file` 因此用 `old_string`/`new_string` 做精确字符串替换：
 
 ```python
 def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False):
@@ -76,9 +78,10 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     ...
 ```
 
-**为什么用字符串匹配而非行号**：LLM 容易数错行号（尤其大文件），而字符串匹配让 LLM 直接从 `read_file` 的输出里复制要改的片段，更可靠。
+**为什么用字符串匹配而非行号**：LLM 可能数错行，尤其在大文件中。字符串匹配让它直接从 `read_file` 的输出复制要改的片段，定位更可靠。
 
-**多匹配安全检查**：当 `old_string` 在文件中出现多次时，默认报错而非静默替换第一处——避免误改不相关的地方。LLM 要么传 `replace_all=true`（确认全部替换），要么扩大 `old_string` 范围使其唯一。这是借鉴 OpenCode EditTool 的安全设计，但简化为单策略（OpenCode 有 8 种模糊匹配策略，对教学项目过度设计）。
+**多匹配安全检查**：`old_string` 出现多次时，代码一定报错，不会悄悄替换第一处。这样可以避免改到无关位置。
+LLM 要么传入 `replace_all=true` 确认全部替换，要么把 `old_string` 扩大到唯一。这参考 OpenCode EditTool 的安全设计，但只保留一个简单策略；它的八种模糊匹配对本教学项目过于复杂。
 
 ### list_dir：列出目录内容
 
@@ -92,7 +95,7 @@ def list_dir(path: str = "."):
     ...
 ```
 
-目录加 `/` 后缀，让 LLM 一眼区分文件和目录。200 条上限防爆（借鉴 OpenCode 的截断思路）。
+目录会加 `/` 后缀，模型可以直接区分文件和目录。结果最多 200 条，避免目录很大时返回过多内容。
 
 ### grep：正则搜索文件内容（纯标准库）
 
@@ -110,11 +113,11 @@ def grep(pattern: str, path: str = ".", include: str = "*"):
                     results.append(f"{fpath}:{i}: {line.rstrip()}")
 ```
 
-三个设计点：
+搜索实现需要兼顾以下三点：
 
-- **零依赖**：用 `re` + `os.walk` + `fnmatch`，不依赖 ripgrep。mini_agent 约定零第三方依赖。
-- **`include` 过滤**：支持 `*.py` 等 glob 模式过滤文件名，避免搜到 `.git/`、二进制文件。
-- **100 条上限**：搜索结果可能巨量，截断防爆。输出格式 `file:line: content` 借鉴 ripgrep。
+- **零依赖**：使用 `re`、`os.walk` 和 `fnmatch`，不依赖 ripgrep。mini_agent 约定运行时不引入第三方依赖。
+- **`include` 过滤**：支持 `*.py` 这类 glob 模式过滤文件名，避免搜索 `.git/` 或二进制文件。
+- **100 条上限**：匹配可能很多，因此最多返回 100 条。输出格式 `file:line: content` 参考 ripgrep。
 
 ### 权限策略更新（`src/mini_agent/permission.py`）
 
@@ -129,25 +132,29 @@ PERMISSION_RULES = {
 }
 ```
 
-只读工具（`list_dir`/`grep`）放行，写操作（`edit_file`）走 ASK，与 v0.04 的策略一致：能力越强，越要管住副作用。
+`list_dir`/`grep` 只读取信息，所以直接放行。`edit_file` 会修改文件，所以一定经过 ASK。
+这延续 v0.04 的策略：有副作用的操作需要确认。
 
 ## 为什么这样设计
 
 ### 为什么 edit_file 不做模糊匹配
 
-OpenCode 的 EditTool 有 8 种匹配策略（精确、行首尾空白忽略、锚定行+相似度、空白标准化、缩进灵活、转义标准化、边界截断、上下文感知）。mini_agent 只做精确匹配，原因：
+编辑时如果匹配不到，似乎可以尝试模糊匹配。OpenCode 的 EditTool 有八种策略，包括忽略空白、相似度和上下文感知。
+mini_agent 只做精确匹配，原因是：
 
-1. **教学优先**：8 种策略的优先级和阈值是工程经验，不是概念，教学项目不需要。
-2. **精确匹配 + replace_all 已够用**：LLM 从 `read_file` 输出复制原文作为 `old_string`，精确匹配足够可靠。
-3. **失败即反馈**：匹配失败时报错，LLM 会看到错误信息并重试（扩大上下文或改用 `read_file` 重新确认内容），这是 agent loop 的自我修正能力。
+1. **教学优先**：八种策略的优先级和阈值属于工程细节，不是本课要讲的核心。
+2. **精确匹配 + replace_all 已够用**：LLM 可以从 `read_file` 输出复制原文作为 `old_string`，通常已经足够可靠。
+3. **失败会反馈**：匹配失败时，工具返回错误。LLM 可以扩大上下文，或重新 `read_file` 确认内容后重试。
 
 ### 为什么 grep 不用 ripgrep
 
-OpenCode 的 GrepTool 用 ripgrep（外部二进制）。mini_agent 约定零第三方依赖，用 `re` + `os.walk` + `fnmatch` 实现。性能差很多（ripgrep 用 Rust 并行+内存映射），但教学场景文件量小，够用。v0.09 加 `run_shell` 后，LLM 可以自己调 `rg` 命令获得高性能搜索。
+OpenCode 的 GrepTool 使用 ripgrep 这个外部二进制。mini_agent 约定零第三方依赖，所以用 `re`、`os.walk` 和 `fnmatch` 实现。
+它的性能远不如使用 Rust 并行和内存映射的 ripgrep，但教学场景文件较少，已经够用。v0.09 增加 `run_shell` 后，LLM 可以自行调用 `rg` 获得更快的搜索。
 
 ### 为什么 read_file 要加行号前缀
 
-v0.03 的 `read_file` 输出纯文本，LLM 不知道每行行号。v0.08 加 `00001| ` 前缀后，LLM 调 `edit_file` 时能更准确地选择 `old_string`（知道选哪几行），减少多匹配误报。这是 `read_file` 和 `edit_file` 的协同设计。
+v0.03 的 `read_file` 只输出文本，LLM 不知道每段来自哪几行。加上 `00001| ` 前缀后，它能更准确地选择 `edit_file` 的 `old_string`，多匹配报错也会减少。
+这是 `read_file` 和 `edit_file` 配合工作的地方。
 
 ## 使用指导
 
@@ -170,32 +177,32 @@ $env:PYTHONPATH="src"; python tests/test_tools.py
 ```bash
 $env:PYTHONPATH="src"; python -m mini_agent "看看 examples 目录里有什么，然后读取 input.txt"
 ```
-预期：`list_dir` 列目录 → `read_file` 读内容 → 最终回复。
+预期：agent 先用 `list_dir` 列目录，再用 `read_file` 读取内容，最后回复。
 
 **示例 2：精确编辑文件**
 ```bash
 $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt，把里面的 5 改成 100"
 ```
-预期：`read_file` 读内容 → `edit_file` 把 `3 + 5 * 2` 改成 `3 + 100 * 2`（会触发 ASK 权限）。
+预期：agent 先 `read_file`，再由 `edit_file` 把 `3 + 5 * 2` 改成 `3 + 100 * 2`。这一步会触发 ASK 权限确认。
 
 **示例 3：搜索定位**
 ```bash
 $env:PYTHONPATH="src"; python -m mini_agent "搜索 src 目录下所有包含 calculate 的文件"
 ```
-预期：`grep` 搜索 → 返回 `file:line: content` 格式结果。
+预期：`grep` 搜索后，结果以 `file:line: content` 格式返回。
 
 **示例 4：大文件分段读**
 ```bash
 $env:PYTHONPATH="src"; python -m mini_agent "读取 src/mini_agent/agent.py 的第 50 到 70 行"
 ```
-预期：`read_file(offset=50, limit=20)` → 只返回 20 行，带行号前缀。
+预期：调用 `read_file(offset=50, limit=20)` 后，只返回 20 行，且每行带行号前缀。
 
 ### 本版独有特性
 
-- **完整文件操作链路**：`list_dir`（浏览）→ `grep`（定位）→ `read_file`（读取）→ `edit_file`（编辑），agent 能独立完成基础编程任务。
-- **分段读取**：`read_file` 支持 `offset`/`limit`，大文件不爆上下文。
-- **精确编辑**：`edit_file` 用字符串匹配替换，多匹配安全检查防误改。
-- **行号前缀**：`read_file` 输出带 `00001| ` 前缀，帮 LLM 定位 `edit_file` 的 `old_string`。
+- **完整文件操作链路**：`list_dir` 浏览、`grep` 定位、`read_file` 读取、`edit_file` 编辑，agent 可以完成基础编程任务。
+- **分段读取**：`read_file` 支持 `offset`/`limit`，大文件不会一次占用全部上下文。
+- **精确编辑**：`edit_file` 按字符串替换，多匹配时会先报错，避免误改。
+- **行号前缀**：`read_file` 输出的 `00001| ` 前缀帮助 LLM 选择 `edit_file` 的 `old_string`。
 
 ## 动手验证
 

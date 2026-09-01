@@ -4,9 +4,11 @@
 
 ## 本课目标
 
-引入 `AgentState` 与 `ContextManager`，把 **Agent 状态**从 **LLM 上下文**中分离出来，并让 ContextManager 成为 LLM 调用前的统一入口。
+对话变长后，agent 不能永远把所有内容都发给模型。可是任务进度、改过哪些文件、发生过哪些错误，又不能随着旧消息一起丢掉。
 
-本版是**纯重构**：外部行为与 v0.10 完全一致，不裁剪、不压缩、不估算 token——概念先于工程。后续 v0.12（预算与裁剪）、v0.13（上下文压缩）都在本版立的边界内实现。
+这一课引入 `AgentState` 和 `ContextManager`。前者记录执行事实，后者负责准备发给 LLM 的上下文。两者分开后，后续可以裁剪消息，却不会丢失任务状态。
+
+本版是**纯重构**：外部行为与 v0.10 完全一致。它不会裁剪、压缩或估算 token，只先把职责边界放好。v0.12 的预算与裁剪、v0.13 的上下文压缩都会在这条边界内实现。
 
 ## 前置
 
@@ -34,7 +36,9 @@ git diff --stat v0.10..v0.11
 
 ### 1. Agent State ≠ LLM Context
 
-v0.10 及之前，agent 的全部"记忆"都在 `messages` 列表里：任务、历史对话、工具结果混作一团。这带来一个根本问题——**上下文是易耗品，状态不是**。
+v0.10 及之前，agent 的全部“记忆”都在 `messages` 列表里：任务、历史对话和工具结果混在一起。消息越长，之后越可能需要裁掉；但执行状态不能跟着消失。
+
+这就是“上下文是易耗品，状态不是”的意思：LLM Context（模型上下文）可以缩短，AgentState（执行状态）必须独立保留。
 
 ```
 messages（LLM 上下文）          AgentState（执行状态）
@@ -46,10 +50,10 @@ messages（LLM 上下文）          AgentState（执行状态）
                                 └── status      running/done/failed
 ```
 
-- **messages** 会被裁剪、截断、摘要（v0.12/v0.13 的主题），是有损的。
-- **AgentState** 独立存在，永不参与裁剪/压缩——它是压缩后不失忆的锚。
+- **messages** 之后可能被裁剪、截断或摘要（v0.12/v0.13 的主题），因此信息会减少。
+- **AgentState** 独立存在，不参与裁剪或压缩。上下文缩短后，它仍保留执行事实。
 
-这个分离其实 v0.09 已经验证过可行性：PermissionGate 的 always 状态就是存在 messages 之外、且删消息不受影响的运行时状态。
+v0.09 已经有类似做法：PermissionGate 的 always 状态存在 messages 之外，删掉消息也不会影响它。
 
 ### 2. AgentState：由执行结果驱动
 
@@ -66,11 +70,11 @@ class AgentState:
     def record_tool(self, name, args, ok, brief): ...
 ```
 
-关键设计：
+工具可以并发执行，因此 State 的记录必须来自真实结果，并且能安全地被多个线程更新。关键设计如下：
 
-- **只记事实，不做转述**：`record_tool` 由真实执行结果回调更新（哪个工具、什么参数、成败、结果摘要），`files_changed`/`errors` 是从记录派生的字段。v0.13 压缩后 summary 会漂移，但 State 永远准确——验收看 State，不苛求 summary。
-- **线程安全**：v0.06 起同一轮多个 tool_calls 并发执行，回调来自线程池工作线程，所以更新加 `Lock`，读取走 `snapshot()` 拿独立副本。
-- **不进 messages**：State 由 ContextManager 持有，本版不渲染进上下文（v0.13 的 Structured State 才注入）。
+- **只记事实，不做转述**：`record_tool` 从真实执行结果回调中记录工具、参数、成败和结果摘要。`files_changed` 与 `errors` 根据这些记录生成。v0.13 的 summary 可能因压缩而变化，State 仍保持准确。
+- **线程安全**：v0.06 起，同一轮的多个 tool_calls 可能并发执行。回调来自线程池工作线程，所以更新使用 `Lock`，读取通过 `snapshot()` 取得独立副本。
+- **不进 messages**：State 由 ContextManager 持有，本版不会把它渲染进上下文；v0.13 才会注入 Structured State。
 
 ### 3. ContextManager：LLM 调用前统一入口
 
@@ -83,7 +87,7 @@ class ContextManager:
         return self.history
 ```
 
-本版 `prepare_messages()` 恒等返回，看起来"什么都没做"——但它的意义是**占住位置**：
+本版 `prepare_messages()` 只是原样返回 history，看起来“什么都没做”。它先成为唯一入口，后续策略才有固定的位置可以加入：
 
 ```
 agent_loop ──> cm.prepare_messages() ──> call_llm
@@ -92,7 +96,7 @@ agent_loop ──> cm.prepare_messages() ──> call_llm
         v0.13 在这里做压缩 + State 注入
 ```
 
-所有 LLM 请求都经此构建后，后续加多少上下文策略，`agent_loop` 一行都不用改。
+所有 LLM 请求都经过这里构建。以后新增上下文策略时，`agent_loop` 不需要修改。
 
 ### 4. Executor 结果回调（D5）
 
@@ -101,7 +105,7 @@ class ToolExecutor:
     def __init__(self, registry, gate=None, on_result=None): ...
 ```
 
-工具执行结果如何进入 State？答案是 **Executor 回调，loop 不感知**：
+工具执行后，如何把结果记入 State？这里使用 **Executor 回调**，而不是让 loop 自己记账：
 
 ```python
 # __main__.py 组装
@@ -110,7 +114,9 @@ context = ContextManager(state, history)
 tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 ```
 
-为什么不让 `agent_loop` 顺手更新 State？否则 State 会变成第二个无人维护的 messages——每个写 loop 的人都要记得同步两份数据。回调把"记录状态"收敛到 Executor 一处：权限拒绝、handler 异常、执行成功三条路径都走 `_notify_result`，brief 截断到 200 字符。回调本身抛异常只打印日志，绝不影响工具执行结果（回调是观察者，不是参与者）。
+如果让 `agent_loop` 顺手更新 State，每次修改 loop 都要记得同步两份数据，之后很容易漏掉路径。回调把“记录状态”集中到 Executor：权限拒绝、handler 异常和执行成功这三条路径都会经过 `_notify_result`，brief 会截断到 200 字符。
+
+回调本身若抛异常，只会打印日志，一定不会改变工具执行结果。它只观察结果，不参与执行。
 
 ### 5. agent_loop 签名变化
 
@@ -122,21 +128,25 @@ def agent_loop(messages): ...
 def agent_loop(context_manager, tool_executor): ...
 ```
 
-loop 只向 `context_manager.history` 追加 assistant 和 tool 消息，不把 AgentState 序列化到 messages。顺带消除了 v0.10 的一个已知隐患：以前达到 `MAX_ITERATIONS` 提前返回时，messages 可能停在"有 tool_calls 但无对应 tool 结果"的半截状态；现在每轮 tool 结果全部回灌后才进入下一轮或返回，协议始终合法。
+loop 只向 `context_manager.history` 追加 assistant 和 tool 消息，不把 AgentState 序列化到 messages。
+
+这也消除了 v0.10 的一个隐患：以前达到 `MAX_ITERATIONS` 后提前返回时，messages 可能停在“有 tool_calls、没有对应 tool 结果”的半截状态。现在每轮一定会回灌全部 tool 结果，再进入下一轮或返回，因此协议保持合法。
 
 ## 为什么这样设计
 
 ### 为什么本版什么都不"做"？
 
-上下文管理最大的坑不是算法，是**边界不清**：裁剪逻辑散在 loop 里、状态和消息互相污染、摘要时机不可控。v0.11 先把"谁能碰 messages"立好规矩（只有 ContextManager）、"状态放哪"立好位置（AgentState），v0.12/v0.13 的工程实现才有落点。纯重构 + 行为不变，也让回归验证变得简单：tests 全绿 + 典型任务跑通即可。
+上下文管理先会遇到的通常不是算法问题，而是职责混在一起：裁剪散在 loop 中，状态和消息互相影响，摘要时机也难控制。
+
+v0.11 先明确规则：只有 ContextManager 准备 messages，AgentState 专门保存状态。因为外部行为不变，回归验证也直接，tests 全绿并跑通典型任务即可。
 
 ### 为什么 State 更新放 Executor 而不是 loop？
 
-见上文 D5。补充一点：`record_tool` 里 `files_changed` 只在 `ok=True` 且工具是 `write_file`/`edit_file` 时记录路径——失败的工具调用不算"改过文件"。这类派生规则集中在 State 内部，调用方只管喂原始事实。
+见上文 D5。还有一点：`record_tool` 只有在 `ok=True` 且工具是 `write_file`/`edit_file` 时才记录路径；失败调用不会算作“改过文件”。这类规则放在 State 内部，调用方只提供原始事实。
 
 ### 为什么 snapshot() 返回深拷贝？
 
-工具并发执行时，读取方（未来的渲染逻辑）拿到的列表可能正被工作线程追加。`snapshot()` 在锁内 deepcopy，保证调用方拿到一致且独立的视图。
+工具并发执行时，读取方拿到的列表可能正被工作线程追加。`snapshot()` 会在锁内 deepcopy，所以调用方拿到的是一致且独立的视图。
 
 ## 使用指导
 

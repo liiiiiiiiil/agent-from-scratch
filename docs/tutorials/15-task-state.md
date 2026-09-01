@@ -4,7 +4,9 @@
 
 ## 本课目标
 
-第 14 课解决了“项目规则如何进入上下文”，但任务进度仍混在自然语言和可被裁剪的消息历史里。v0.15 引入显式的 Todo / Task State：模型通过 `update_todo` 提交完整列表，运行实例把它校验后保存到 `AgentState`，每次 LLM 请求再从最新快照渲染为 Structured State。
+第 14 课让模型读到项目规则，但“还要做什么”仍散落在自然语言和可能被裁剪的消息里。对话一长，计划可能不见，模型也可能给出彼此矛盾的下一步。
+
+v0.15 因此引入显式的 Todo / Task State（待办与任务状态）。模型用 `update_todo` 提交完整列表，运行实例先校验，再存入 `AgentState`。每次请求都会从最新快照生成 Structured State（结构化状态），所以计划不依赖旧消息是否还在。
 
 读完本课，你应该能够：
 
@@ -13,11 +15,11 @@
 - 看懂 state-bound registry 如何避免多个运行实例互相污染。
 - 验证 trimming/compaction 后 Todo 仍从状态重新渲染，以及本版本刻意不提供的自动规划和持久化能力。
 
-本课的核心原则是：**Todo 是可校验的任务意图，不是执行证据，也不是自动规划器。**
+本课的核心原则是：**Todo 记录可校验的任务意图，不是执行证据，也不是自动规划器。**
 
 ## 前置条件与版本切换
 
-需要 Python 3.10+，运行时仅标准库；先阅读[第 14 课](14-project-instructions.md)关于受保护项目指令和 ContextManager 的内容。使用已发布 tag 学习时：
+需要 Python 3.10+，运行时仍只使用标准库。请先阅读[第 14 课](14-project-instructions.md)，了解受保护项目指令和 ContextManager。使用已发布 tag 学习时：
 
 ```bash
 git checkout v0.15
@@ -38,9 +40,9 @@ git diff v0.14..v0.15 -- src/mini_agent/state.py src/mini_agent/tools/todo.py sr
 
 ## 为什么需要本版
 
-仅靠 assistant 文本记录“还剩哪些步骤”有两个问题：上下文 trimming/compaction 可能删掉旧计划；模型也可能输出互相矛盾的多个进行中步骤。把意图独立存储后，状态可以在每轮重建，不依赖摘要是否完整。
+只用 assistant 文本记录“还剩哪些步骤”会遇到两个实际问题：trimming/compaction 可能删掉旧计划，模型也可能同时写出多个进行中步骤。把任务意图单独保存后，每轮都能重新生成状态，不必赌摘要保留了计划。
 
-但 Todo 不能冒充事实。文件是否真的改变、工具是否失败，仍由 `ToolExecutor` 的 `on_result` 回调写入 `tool_history`、`files_changed` 和 `errors`。因此本课只解决“任务意图可见且结构化”，不解决第 16 课才加入的验证闭环。
+但 Todo 不能当作事实。文件是否真的改变、工具是否失败，仍由 `ToolExecutor` 的 `on_result` 回调写入 `tool_history`、`files_changed` 和 `errors`。因此本课只让任务意图可见且有固定结构；第 16 课才处理验证闭环。
 
 ## 数据结构与校验不变量
 
@@ -51,9 +53,9 @@ content: str                 # 去除首尾空白后 1–240 字符
 status: pending | in_progress | completed
 ```
 
-`AgentState.todos` 最多 50 项；列表中最多一个 `in_progress`。`current_goal` 从该项自动派生，没有进行中项时为空字符串。`snapshot()` 返回普通字典和深拷贝列表，供 ContextManager 安全读取。
+`AgentState.todos` 最多保存 50 项，列表中最多只能有一个 `in_progress`。因为当前目标只能有一个，所以 `current_goal` 从这一项自动得出；没有进行中项时它一定是空字符串。`snapshot()` 返回普通字典和深拷贝列表，ContextManager 可以安全读取。
 
-`update_todos(todos)` 的校验顺序是“先解析全部、再一次性替换”：参数必须是 list；每项必须是 dict；`content` 必须是非空字符串且不超过 240 字符；状态必须在三种枚举中；最后检查进行中项数量。任何一项失败都抛出 `ValueError`，旧的 todos/current_goal 保持不变。
+`update_todos(todos)` 先检查整个列表，再一次替换旧值。参数必须是 list，每项必须是 dict；`content` 必须是 1 到 240 字符的非空字符串；状态只能是三种枚举之一，最后还会检查进行中项的数量。任何一项不合格都会抛出 `ValueError`。因为替换发生在全部检查之后，旧的 todos 和 current_goal 不会被半途改坏。
 
 ## 关键流程
 
@@ -69,7 +71,7 @@ main()
        -> state.snapshot() -> [Structured State] Todos
 ```
 
-`permission.py` 将 `update_todo` 设为 `ALLOW`，更新计划不会触发文件写入类询问。CLI 每次 `run_task` 使用同一个运行实例的 registry；交互式后续任务会调用 `begin_task()`（后续版本实现）重置运行态，但不会把 Todo 序列化进 history。
+`permission.py` 把 `update_todo` 设为 `ALLOW`，所以更新计划不会触发文件写入类询问。CLI 的一次 `run_task` 使用同一个运行实例的 registry。交互式后续任务会调用 `begin_task()`（在后续版本实现）重置运行状态，但 Todo 不会被序列化进 `history`。
 
 ## 实现拆解
 
@@ -87,9 +89,9 @@ def update_todo(todos=None):
     return f"Todo 已更新：共 {len(snapshot['todos'])} 项；当前目标：..."
 ```
 
-模型每次必须提交完整数组，而不是 `add`/`remove` 增量操作。这样可以避免顺序和重复应用的歧义；代价是每次请求都要传递当前计划。handler 将校验异常转换为工具结果字符串，旧列表不会被半更新。
+模型每次都必须提交完整数组，而不是使用 `add`/`remove` 增量操作。因为完整替换没有顺序和重复应用的歧义，所以状态更容易判断；代价是每次请求都要传递当前计划。handler 会把校验异常变成工具结果字符串，旧列表不会被半更新。
 
-`create_registry(state)` 先注册 calculate、文件和 shell 工具，再注册绑定该 state 的 `update_todo`。不传 state 的全局 `registry` 仍用于旧版 smoke test，但不会提供实例 Todo；生产 CLI 始终传入运行实例 registry。
+`create_registry(state)` 先注册 calculate、文件和 shell 工具，再注册绑定这个 state 的 `update_todo`。不传 state 的全局 `registry` 仍供旧版 smoke test 使用，但不会提供实例 Todo；生产 CLI 一定传入当前运行实例的 registry。
 
 ### Structured State 的重建
 
@@ -106,23 +108,23 @@ Status: running
 Tools executed: 0
 ```
 
-这条消息属于请求视图，不会追加到 `history`。即使发生 trimming 或 compaction，下一次 `_build_messages()` 仍会从最新 snapshot 生成，因此模型更新 Todo 后无需手动修改旧消息。压缩摘要可以丢失计划措辞，但 Structured State 中的当前列表仍准确。
+这条消息只属于当前请求视图，不会追加到 `history`。即使发生 trimming 或 compaction，下一次 `_build_messages()` 仍会从最新 snapshot 生成它。因此模型更新 Todo 后，不必再修改旧消息。摘要可能改写计划的措辞，但 Structured State 中的当前列表仍准确。
 
 ### 与工具执行事实的边界
 
-`record_tool()` 对 `update_todo` 直接返回，不将其放进 `tool_history` 或 `errors`。这是刻意的职责分离：Todo 表示“模型打算做什么”，而 `write_file`、`run_shell` 等工具结果表示“环境实际发生了什么”。第 16 课会在同一 State 上增加 generation 和验证证据，把两者连接成完成条件。
+`record_tool()` 遇到 `update_todo` 会直接返回，不把它写入 `tool_history` 或 `errors`。这是有意的职责分工：Todo 表示“模型打算做什么”，`write_file`、`run_shell` 等结果表示“环境实际发生了什么”。第 16 课会在同一个 State 上增加 generation 和验证证据，再把两者连成完成条件。
 
 ## 设计选择与边界
 
-- **完整替换而非增量 API**：语义简单且原子，代价是请求必须携带完整列表。
-- **严格限制规模和状态**：50 项、240 字符和单个进行中项避免上下文膨胀与并行目标歧义。
-- **状态与消息分离**：压缩安全、实例可隔离；代价是每轮 Structured State 会重复占用少量 token。
-- **不自动规划、不阻断完成、不持久化**：v0.15 不会替模型生成 Todo，不会因为未完成项自动阻止最终回复，也不会写入磁盘。验证和 blocked/failed 收口属于下一课。
-- **权限保持独立**：`update_todo` 仅更新内存；文件和 shell 副作用仍走原有 PermissionGate。
+- **完整替换而非增量 API**：每次都提交完整列表，状态才不会因顺序或重复产生歧义；代价是请求更长。
+- **严格限制规模和状态**：50 项、240 字符和单个进行中项限制上下文大小，也避免同时存在多个当前目标。
+- **状态与消息分离**：压缩后仍能恢复，多个实例也能隔离；代价是每轮都会重复占用少量 token 来放 Structured State。
+- **不自动规划、不阻断完成、不持久化**：v0.15 不会替模型生成 Todo，不会因未完成项自动阻止最终回复，也不会写入磁盘。验证和 blocked/failed 的收口留给下一课。
+- **权限保持独立**：`update_todo` 只更新内存；文件和 shell 的副作用仍走原有 PermissionGate。
 
 ## 最小可运行示例
 
-下面演示成功更新、当前目标派生，以及非法提交保持旧快照：
+下面演示成功更新、自动得出的当前目标，以及非法提交后旧快照仍保持不变：
 
 ```bash
 PYTHONPATH=src python - <<'PY'
@@ -142,11 +144,11 @@ print(state.snapshot() == before)
 PY
 ```
 
-预期输出包含更新成功、`修改实现`、`Todo 更新失败: ...` 和 `True`。最后一个 `True` 说明失败提交没有覆盖原列表。
+输出会包含更新成功、`修改实现`、`Todo 更新失败: ...` 和 `True`。最后的 `True` 表示失败提交没有覆盖原列表。
 
 ## 实例隔离示例
 
-同一进程创建两个 registry 时，工具分别捕获自己的 state：
+同一进程创建两个 registry 时，每个工具只会捕获自己的 state：
 
 ```python
 from mini_agent.state import AgentState
@@ -158,7 +160,7 @@ assert first.snapshot()["todos"][0]["content"] == "first"
 assert second.snapshot()["todos"] == []
 ```
 
-这也是 `tests/test_tools.py` 的核心验收点：不能使用模块级可变 Todo 共享不同任务的进度。
+这也是 `tests/test_tools.py` 的核心验收点：不同任务绝不能通过模块级可变 Todo 共享进度。
 
 ## 测试与验收
 
@@ -169,7 +171,7 @@ PYTHONPATH=src python tests/test_tools.py
 PYTHONPATH=src python tests/test_context.py
 ```
 
-重点检查：
+重点检查以下行为：
 
 - 非 list、空内容、超长内容、非法状态、超过 50 项和重复 `in_progress` 都拒绝，且旧快照不变。
 - `current_goal` 始终由唯一的 `in_progress` 项派生；Todo 不进入执行历史。
@@ -178,7 +180,7 @@ PYTHONPATH=src python tests/test_context.py
 
 ## 本版特性、下一课与代码索引
 
-v0.15 的独有能力是显式、受校验、可恢复的任务状态，而非计划生成器。下一课将在此基础上加入 Plan → Execute → Observe → Replan → Verify、验证证据和 `done/blocked/failed` 收口。
+v0.15 提供显式、可校验、可恢复的任务状态，但它不是计划生成器。下一课会在此基础上加入 Plan → Execute → Observe → Replan → Verify、验证证据和 `done/blocked/failed` 收口。
 
 - [state.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/state.py)
 - [todo.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/tools/todo.py)

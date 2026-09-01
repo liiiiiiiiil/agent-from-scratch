@@ -4,8 +4,8 @@
 
 ## 本课目标
 
-把同一轮的多个 tool_calls 从串行执行改成 `ThreadPoolExecutor` 并发执行。
-当 LLM 一次发起多个无依赖的工具调用时，并发执行能显著减少等待时间。
+上一版同一轮收到多个工具调用时，会一个接一个执行。只要其中一个工具在等待文件或网络，后面的调用也只能等着。
+这一版用 `ThreadPoolExecutor` 同时执行互不依赖的 tool_calls，从而缩短这一轮的等待时间。
 
 ## 前置
 
@@ -25,14 +25,14 @@
 
 ### 串行 vs 并发
 
-**v0.05 串行**：同一轮的 N 个 tool_calls 用 `for` 循环逐个执行，总耗时 = Σ(每个工具耗时)。
+v0.05 是串行执行（前一个完成后才开始下一个）。同一轮的 N 个 tool_calls 用 `for` 循环逐个执行，总耗时 = Σ(每个工具耗时)。
 
 ```python
 for tc in msg["tool_calls"]:
     result = executor.execute(name, args)   # 第 2 个等第 1 个跑完才开始
 ```
 
-**v0.06 并发**：用 `ThreadPoolExecutor` 把 N 个 tool_calls 丢进线程池同时执行，总耗时 ≈ max(每个工具耗时)。
+v0.06 改为并发执行（多个调用同时进行）。`ThreadPoolExecutor` 把 N 个 tool_calls 放进线程池，总耗时约等于最慢的那个调用。
 
 ```python
 with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
@@ -41,7 +41,7 @@ with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
 
 ### LLM 何时发多个 tool_calls
 
-LLM 在一轮回复里可以返回多个 `tool_calls`，通常是无依赖的独立调用。例如：
+问题只会在模型一次返回多个 `tool_calls` 时出现。LLM 可以在一轮回复里发出多个调用；它们通常互相独立，例如：
 
 ```
 用户："同时读取 a.txt 和 b.txt"
@@ -51,7 +51,7 @@ LLM 回复（一轮 2 个 tool_calls）:
   tool_calls[1]: read_file({"path": "b.txt"})
 ```
 
-这两个 read_file 互不依赖——a.txt 的读取不需要等 b.txt 的结果。串行执行浪费时间，并发执行同时跑完。
+这两个 read_file 互不依赖，读取 a.txt 不需要 b.txt 的结果。因此串行会浪费等待时间，并发可以让它们同时完成。
 
 ### ThreadPoolExecutor 实现（`src/mini_agent/agent.py:95`）
 
@@ -76,35 +76,34 @@ for tool_call_id, content in results:
     })
 ```
 
-关键点：
-1. **`max_workers=len(tool_calls)`**：线程数 = 本轮 tool_calls 数量，不多不少。
-2. **`pool.map`**：按 tool_calls 的原始顺序提交，结果也按原始顺序返回——`results[0]` 对应 `tool_calls[0]`。
-3. **`with` 语句**：`ThreadPoolExecutor` 的上下文管理器会在退出时自动 `join()`——等所有线程跑完才继续。
-4. **回灌顺序**：`pool.map` 保证结果顺序与输入顺序一致，`role=tool` 消息按原序 append。
+实现需要注意以下几点：
+1. **`max_workers=len(tool_calls)`**：本轮有几个调用就开几个线程。
+2. **`pool.map`**：提交和返回都保持原始顺序，所以 `results[0]` 一定对应 `tool_calls[0]`。
+3. **`with` 语句**：离开代码块时会自动 `join()`，也就是等所有线程完成后才继续。
+4. **回灌顺序**：结果按原序追加为 `role=tool` 消息，模型收到的对应关系不会改变。
 
 ## 为什么这样设计
 
 ### 为什么用线程而不是协程
 
-`read_file`/`write_file` 是 IO 密集型（磁盘读写），`ThreadPoolExecutor` 能在 IO 等待时切换到其他线程。
-协程（asyncio）也能做，但需要把整个调用链改成 async——从 `call_llm` 到 `executor.execute` 全部 async 化，改动太大。
-线程池是"最小改动 + 足够好的并发"的选择。
+`read_file`/`write_file` 主要时间花在 IO（磁盘读写）等待上，线程可以在一个调用等待时运行另一个调用。
+协程（asyncio）也能实现并发，但那会要求从 `call_llm` 到 `executor.execute` 的整条调用链都改成 async，超出本课范围。
+所以这里选择线程池，改动小且足以解决当前的等待问题。
 
 ### 为什么 max_workers = len(tool_calls)
 
-每轮的 tool_calls 数量通常很少（2-5 个），直接开对应数量的线程。
-不需要复用线程池（每轮新建一个），因为 agent loop 本身是串行的——一轮跑完才进下一轮。
+每轮的 tool_calls 通常只有 2～5 个，因此直接按调用数创建线程即可。
+agent loop 仍然是一轮一轮执行，当前一轮结束后才会进入下一轮，所以不必在多轮之间复用线程池。
 
 ### 为什么 pool.map 而不是 submit + as_completed
 
-`pool.map` 保证**结果顺序与输入顺序一致**。`as_completed` 是谁先完成谁先返回——顺序乱。
-tool_calls 的回灌需要按原序（LLM 发的 tool_calls[0] 对应的 tool 消息要在前面），用 map 更安全。
+`pool.map` 保证**结果顺序与输入顺序一致**。`as_completed` 会按完成先后返回，顺序可能改变。
+回灌时需要让 LLM 发出的 tool_calls[0] 对应第一条 tool 消息，因此这里使用 `map`。
 
 ### 为什么权限闸门的 _ask_lock 在这里起作用
 
-v0.04 的 `PermissionGate` 里有 `self._ask_lock = threading.Lock()`。
-并发执行时，如果两个 write_file 同时触发 ASK，没有锁会导致两个权限提示交错（终端乱码）。
-锁保证同一时刻只有一个 ASK 交互在终端进行——v0.04 埋的伏笔在 v0.06 生效。
+v0.04 的 `PermissionGate` 已经准备了 `self._ask_lock = threading.Lock()`。
+如果两个 write_file 同时触发 ASK，没有这把锁，两个提示可能交错显示。锁让同一时刻只有一个 ASK 交互占用终端，因此本轮并发不会破坏权限确认。
 
 ## 使用指导
 
@@ -136,8 +135,8 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
   执行 read_file -> 3 + 5 * 2
   执行 read_file -> 3 + 5 * 3
 ```
-注意：两个 `[Executor] 执行 Tool: read_file` 几乎同时出现——并发执行的证据。
-对比 v0.05 串行版，第一个 read_file 跑完打印结果后，第二个才开始。
+注意：两个 `[Executor] 执行 Tool: read_file` 会几乎同时出现，这说明调用正在并发执行。
+在 v0.05 串行版中，第一个 read_file 打印结果后，第二个才会开始。
 
 **示例 2：并发计算 + 读取**
 ```bash
@@ -158,9 +157,9 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
 
 ### 本版独有特性
 
-- **并发执行日志**：终端里多个工具的 `[Executor]` 日志交错出现，而非一个跑完再出下一个。
-- **结果按原序回灌**：虽然并发执行，但 `pool.map` 保证 results 顺序与 tool_calls 原序一致。
-- **权限锁生效**：如果并发触发多个 write_file 的 ASK，锁保证交互不交错。
+- **并发执行日志**：多个工具的 `[Executor]` 日志可能交错出现，因为它们同时运行。
+- **结果按原序回灌**：虽然执行是并发的，`pool.map` 仍保证 results 与 tool_calls 原序一致。
+- **权限锁生效**：并发触发多个 write_file 的 ASK 时，锁会让提示逐个出现。
 
 ## 动手验证
 
@@ -199,17 +198,18 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
 
 ### 发现的问题
 
-`agent_loop` 通过 **list 可变副作用** 向传入的 `messages` 追加 assistant / tool 消息，但这个契约此前是**隐式的**——只在源码里靠 `messages.append(...)` 体现，docstring 只写了"messages 由调用方维护并跨轮复用，本函数只往里 append"，含糊不清。
+上一版虽然能工作，但调用方不容易看出 `agent_loop` 会怎样改变传入的 `messages`。它通过 **list 可变副作用** 追加 assistant / tool 消息，规则只藏在源码和含糊的 docstring 里。
+这会让多轮调用时难以判断列表当前是否完整。
 
 由此引发两个实际问题：
 
-1. **`__main__.py` 两条路径分叉**：argv 分支和交互循环分支各自维护 messages 的方式不一致，读代码时无法信任"agent_loop 调用后 messages 到底处于什么状态"。虽然 argv 分支实际靠副作用拿到了完整状态，但写法隐晦，后续维护易踩坑。
+1. **`__main__.py` 两条路径分叉**：argv 分支和交互循环分支维护 messages 的方式不同。虽然 argv 分支实际上依靠副作用拿到了完整状态，但读代码时很难确认调用后列表是什么样，后续维护容易出错。
 
 2. **半截状态未文档化**：当 `agent_loop` 因达到 `MAX_ITERATIONS` 提前返回 `"达到最大迭代次数"` 时，messages 会停在 **"有 tool_calls 但无对应 tool 结果"** 的半截状态。下一轮调用前若不处理，OpenAI 协议会因 `tool_calls` 后缺 `role=tool` 消息而报错。此前这个边界完全没文档。
 
 ### 修复点（方案 A：不改签名）
 
-选择**不改 `agent_loop` 签名**（保持 `agent_loop(messages)` 单参数），原因：
+这一版选择**不改 `agent_loop` 签名**（保持 `agent_loop(messages)` 单参数），因为：
 - `tests/test_loop.py` 的 `test_agent_loop_signature` 断言签名必须只有 `messages`，改签名会破坏现有测试。
 - 问题本质不在签名，而在契约不清晰和调用方路径分叉。
 
@@ -256,14 +256,14 @@ if len(sys.argv) > 1:
 
 ### 为什么是 patch 不是 minor
 
-- 零功能新增，零行为变更（argv 分支本就靠副作用拿到完整状态）。
-- 只是把隐式契约写成显式，消除维护隐患。
-- 测试全部通过，无需新增 test case（契约文档化不改变可观测行为）。
+- 没有新增功能，也没有改变行为；argv 分支本来就依靠副作用保存完整状态。
+- 改动只是把原来隐含的规则写清楚，减少维护时的误解。
+- 测试无需增加，因为写清契约不会改变可观察结果。
 
 ### 遗留问题（未在本版修）
 
-1. **MAX_ITERATIONS 半截状态清理**：docstring 已点明风险，但未实现自动清理。长任务触发上限后，下一轮仍可能协议报错。已在 v0.11 上下文架构中处理：每轮 tool results 全部回灌后才进入下一轮或返回。
-2. **`agent_loop` 返回值语义**：当前返回 content 字符串仅供打印，真正的状态在 messages 副作用里。这种"返回值 + 副作用"双通道设计不够干净，但改它要动签名，留待后续。
+1. **MAX_ITERATIONS 半截状态清理**：docstring 现在会提示风险，但运行时仍不会自动清理。长任务达到上限后，下一轮仍可能触发协议错误。v0.11 的上下文架构才会要求每轮先回灌全部 tool results。
+2. **`agent_loop` 返回值语义**：当前返回的 content 字符串只用于打印，真正的多轮状态保存在 messages 列表中。这个双通道设计暂时保留，改动签名会影响现有调用。
 
 ### 本版改动文件
 

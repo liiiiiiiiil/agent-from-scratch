@@ -4,7 +4,9 @@
 
 ## 本课目标
 
-把权限从一维 `tool_name -> action` 升级为二维 `(tool_name, pattern) -> action`，支持按文件路径模式（或命令模式）细粒度控制权限。为 v0.10 `run_shell` 的命令模式权限铺路。
+上一版只能按工具名决定放行、询问还是拒绝。同一个工具面对不同文件或命令时，往往只能采用同一种处理方式，权限粒度太粗。
+
+这一课把权限升级为二维 `(tool_name, pattern) -> action`：除了工具名，还会检查文件路径或命令模式。这样可以为 v0.10 的 `run_shell` 做准备，让安全命令自动放行，危险命令继续询问。
 
 ## 前置
 
@@ -28,7 +30,9 @@ git diff --stat v0.08..v0.09
 
 ### 1. Rule 三元组：从嵌套 dict 到扁平 list
 
-v0.04 的规则是嵌套 dict：`{"write_file": "ask"}`，只能按工具名控制。
+先看上一版的限制：v0.04 的规则是嵌套 dict：`{"write_file": "ask"}`，只能按工具名控制。它无法表达“只允许写某类文件”这样的要求。
+
+v0.09 把规则保存为扁平列表。每条规则都记录工具、匹配模式和动作，下面这三个字段合在一起就是一个 Rule（三元组）：
 
 v0.09 内部存扁平 `list[dict]`，每条规则是三元组：
 
@@ -40,7 +44,7 @@ v0.09 内部存扁平 `list[dict]`，每条规则是三元组：
 ]
 ```
 
-构造函数 `_from_config()` 兼容两种格式：
+构造函数 `_from_config()` 仍兼容两种配置格式，因此旧配置不需要立刻改写：
 
 ```python
 # 简单格式（一维兼容，pattern 默认 "*"）
@@ -52,6 +56,8 @@ PermissionPolicy({"read_file": {"*": "allow", "*.env": "deny"}})
 
 ### 2. check()：fnmatch + findLast
 
+有了多条规则之后，运行时必须回答“当前调用应该执行哪一条规则”。`check()` 会把工具名和模式分别拿去匹配，并从后往前查找。
+
 ```python
 def check(self, tool_name: str, pattern: str = "*") -> str:
     merged = self._rules + self._approved
@@ -62,13 +68,15 @@ def check(self, tool_name: str, pattern: str = "*") -> str:
 ```
 
 **关键设计**：
-- `fnmatch.fnmatch()` 做 wildcard 匹配（`*` 匹配任意字符，`?` 匹配单字符）
-- `reversed()` 从后往前找，`findLast` 语义——后出现的规则优先级更高
-- 未匹配任何规则时默认 `ask`（安全优先）
+- `fnmatch.fnmatch()` 做 wildcard 匹配（通配符匹配）：`*` 匹配任意字符，`?` 匹配单字符。
+- `reversed()` 从后往前找，体现 `findLast` 语义，也就是后出现的规则优先级更高。
+- 如果没有任何规则匹配，结果一定是 `ask`，由用户确认后才会继续。
 
-**为什么用 findLast？** 运行时 `approved` 规则追加在 `self._approved` 末尾，`merged = rules + approved`，`reversed` 先扫 approved，自然覆盖前面的 `ask` 规则。无需显式删除旧规则。
+**为什么用 findLast？** 运行时批准过的规则会追加到 `self._approved` 末尾。`merged = rules + approved` 后再反向扫描，就会先看到 approved 规则，自然覆盖前面的 `ask`，不需要显式删除旧规则。
 
 ### 3. approve()：存 (tool_name, pattern)
+
+当用户选择“始终允许”时，系统要记住允许的范围。v0.09 连工具名和模式一起保存，所以一次批准不会意外扩大到所有文件。
 
 ```python
 # v0.04：只存工具名
@@ -82,9 +90,11 @@ def approve(self, tool_name: str, pattern: str = "*"):
     })
 ```
 
-效果：用户对 `write_file` + `*.txt` 选 `always` 后，后续写 `.txt` 文件免问，但写 `.py` 文件仍会问。
+效果是：用户对 `write_file` + `*.txt` 选 `always` 后，后续写 `.txt` 文件不再询问，但写 `.py` 文件仍然会询问。
 
 ### 4. _extract_pattern()：从 args 提取 pattern
+
+工具调用的参数里没有统一叫作 `pattern` 的字段，因此闸门需要先从参数提取用于匹配的文本：文件工具取路径，shell 工具取完整命令，其他工具使用 `*`。
 
 ```python
 @staticmethod
@@ -96,29 +106,33 @@ def _extract_pattern(tool_name: str, args: dict) -> str:
     return "*"
 ```
 
-`PermissionGate.guard()` 调 `_extract_pattern()` 从工具参数提取 pattern，传给 `check()`。对非 shell 工具，pattern 是文件路径，`fnmatch` 用 `*.env` 等模式匹配文件名。
+`PermissionGate.guard()` 调用 `_extract_pattern()`，把得到的 pattern 传给 `check()`。对文件工具，pattern 是文件路径，`fnmatch` 可以用 `*.env` 等模式匹配文件名。
 
 ## 为什么这样设计
 
 ### 为什么不沿用一维？
 
-v0.04 的一维权限 `tool_name -> action` 无法区分同一工具的不同操作。`run_shell` 执行 `git status`（安全）和 `rm -rf /`（危险）共享同一个 action——要么全允许要么全问，粒度太粗。二维权限按命令模式控制：`git *` 可以 allow，`rm *` 可以 deny，其他 ask。
+一维权限 `tool_name -> action` 无法区分同一工具的不同操作。比如 `run_shell` 执行 `git status`（通常安全）和 `rm -rf /`（危险）时只能共用一个 action。结果要么全部放行，要么全部询问。
+
+二维权限按命令模式分别处理：`git *` 可以 allow，`rm *` 可以 deny，其他命令保持 ask。
 
 ### 为什么用 findLast 而非 first？
 
-OpenCode 的 `evaluate()` 用 `findLast`——后出现的规则优先级更高。这让运行时 `approved` 规则（追加在末尾）自然覆盖前面的 `ask` 规则。如果用 first，approved 规则会被前面的 ask 规则挡住，需要显式删除旧规则，复杂度上升。
+OpenCode 的 `evaluate()` 使用 `findLast`，所以后出现的规则优先级更高。运行时追加的 `approved` 规则会自然覆盖前面的 `ask` 规则。
+
+如果改用 first，前面的 ask 会挡住 approved，系统就得显式删除旧规则，逻辑更复杂。
 
 ### 为什么未匹配默认 ask 而非 allow？
 
-安全优先。新工具或未配置的工具默认需要用户确认，避免静默放行危险操作。
+这是安全优先的选择。新工具或没有配置的工具一定要先询问用户，避免危险操作被静默放行。
 
 ### 为什么 _extract_pattern 对 run_shell 只返回完整命令？
 
-v0.09 只升级权限框架，不实现 `run_shell` 工具。`_extract_pattern()` 对 `run_shell` 返回完整命令字符串，v0.10 直接用 fnmatch 通配符（如 `git *`）按命令前缀匹配，不做 BashArity 命令泛化——fnmatch 已够用。
+v0.09 只升级权限框架，还没有实现 `run_shell` 工具。`_extract_pattern()` 先返回完整命令字符串，v0.10 再直接用 fnmatch 通配符（如 `git *`）按命令前缀匹配。这里不做 BashArity 命令泛化，因为 fnmatch 已经够用。
 
 ### 为什么现有工具行为不变？（二维退化为一维）
 
-v0.09 升级后，`calculate`/`read_file`/`write_file`/`edit_file`/`list_dir`/`grep` 这 6 个工具的实际权限判定与 v0.08 完全一致——这是有意为之的向后兼容，不是失效。原因有二：
+升级后，`calculate`/`read_file`/`write_file`/`edit_file`/`list_dir`/`grep` 这 6 个工具的实际权限判定仍与 v0.08 完全一致。这是为了向后兼容，并不代表二维匹配没有生效。原因有二：
 
 **① 规则里 pattern 全是 `*`**
 
@@ -141,15 +155,17 @@ PERMISSION_RULES = {
 - 对 `calculate`/`list_dir`/`grep`：`_extract_pattern` 返回 `"*"`（`permission.py:147`），规则 pattern 也是 `"*"`，`fnmatch("*", "*")` → True，等价于一维判定。
 - 对 `read_file`/`write_file`/`edit_file`：`_extract_pattern` 返回真实 path（如 `"a.txt"`，`permission.py:145`），但规则 pattern 仍是 `"*"`，`fnmatch("*", "a.txt")` → True，同样等价于一维。
 
-**设计意图**：二维权限的真正受益者是 v0.10 的 `run_shell`——只有 shell 命令才有"按模式细分授权"的实际需求（`git *` allow、`rm *` deny）。文件工具按路径细分权限在 CLI agent 场景里价值不大（用户不会预先配"只许写 src/"），所以 v0.09 没给它们配细粒度规则，保持 `*` 兜底。若需要，可显式配：
+**设计意图**：二维权限主要服务于 v0.10 的 `run_shell`，因为 shell 命令确实需要按模式区分（`git *` allow、`rm *` deny）。v0.09 没有给文件工具预置细粒度规则，仍用 `*` 兜底；如果确实需要按路径限制，可以显式配置：
 
 ```python
 PermissionPolicy({"read_file": {"*": "allow", "*.env": "deny", "*.key": "deny"}})
 ```
 
-**唯一行为差异：approve 粒度收窄**
+**唯一行为差异是 approve 粒度收窄。**
 
-v0.09 的 `approve()` 存 `(tool_name, pattern)` 而非只存 `tool_name`（`permission.py:88-95`）。所以选 `always` 写 `a.txt` 后，写 `b.txt` 仍会问——免问粒度从"按工具"收窄为"按 (工具, 路径模式)"。方向是更安全（收紧而非放宽），符合"安全优先"原则。若要恢复"所有 write_file 免问"，可在规则里显式配 `{"write_file": {"*": "allow"}}`，或在 `always` 时让 pattern 落到 `"*"`。
+v0.09 的 `approve()` 存 `(tool_name, pattern)` 而不是只存 `tool_name`（`permission.py:88-95`）。因此对 `a.txt` 选择 `always` 后，写 `b.txt` 仍会询问。免问范围从“整个工具”收窄为“工具加路径模式”，行为更安全。
+
+如果要让所有 `write_file` 都免问，可以显式配置 `{"write_file": {"*": "allow"}}`，或者在 `always` 时让 pattern 使用 `"*"`。
 
 ### 借鉴了 OpenCode 什么？去掉了什么？
 

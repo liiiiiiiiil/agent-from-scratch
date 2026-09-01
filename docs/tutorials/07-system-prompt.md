@@ -4,7 +4,8 @@
 
 ## 本课目标
 
-把 system prompt 从 `__main__.py` 里的一行硬编码字符串，升级为 `prompt.py` 模块里分层组装的完整规范，让模型知道自己是谁、该怎么干活、在什么环境下干活。
+上一版只用一行 system prompt（系统提示词，给模型的固定工作说明）。模型因此可能不知道当前目录、平台和应遵守的工作方式。
+这一版把提示词放进 `prompt.py`，分层组装身份、规则和环境信息，让模型知道该做什么以及在何处执行。
 
 ## 前置
 
@@ -33,15 +34,16 @@ v0.06 的 system prompt 是这样的（`__main__.py:11`）：
 messages = [{"role": "system", "content": "你是一个助手，通过调用工具完成任务。"}]
 ```
 
-能跑，但有三个问题：
+这段提示词能运行，但遇到实际任务时有三个问题：
 
-1. **模型不知道环境**：工作目录在哪？什么平台？今天几号？模型只能猜，相对路径容易错、平台命令容易选错。
-2. **行为不可控**：模型可能啰嗦、加 emoji、每次工具调用后复述结果、主动总结"我做了什么"——多轮迭代时这些坏习惯会污染上下文。
-3. **无法区分 agent 身份**：后续要多 agent / sub-agent，每个 agent 职责不同，一行字符串没法承载"你是 build 还是 explore"。
+1. **模型不知道环境**：它只能猜工作目录、平台和日期，因此相对路径或平台命令可能选错。
+2. **行为不稳定**：模型可能啰嗦、加 emoji、反复复述工具结果，或主动总结“我做了什么”。多轮对话中，这些内容会占用上下文。
+3. **无法区分 agent 身份**：以后有多个 agent / sub-agent 时，它们职责不同；一行字符串无法说清“你是 build 还是 explore”。
 
 ### 分层组装：借鉴 OpenCode 做减法
 
-OpenCode 的 system prompt 分四层：`header`（身份）+ `provider`（按模型适配）+ `environment`（环境）+ `custom`（用户规则）。mini_agent 按「渐进生长」原则裁剪为三层：
+要解决这些问题，不需要把提示词堆成一大段。这里参考 OpenCode 的分层方式，再按教学需要删减。
+OpenCode 分为 `header`（身份）、`provider`（按模型适配）、`environment`（环境）和 `custom`（用户规则）四层。mini_agent 暂时保留其中最需要的三层：
 
 | OpenCode 层 | mini_agent 对应 | 是否做 | 理由 |
 |---|---|---|---|
@@ -52,7 +54,7 @@ OpenCode 的 system prompt 分四层：`header`（身份）+ `provider`（按模
 
 ### 三层结构（`src/mini_agent/prompt.py`）
 
-`build_system_prompt(agent_name="build")` 返回一个字符串，三段用 `\n\n` 拼接：
+`build_system_prompt(agent_name="build")` 返回一个字符串。它用 `\n\n` 把三段内容隔开，使每段只负责一类信息：
 
 ```python
 def build_system_prompt(agent_name: str = "build") -> str:
@@ -81,14 +83,15 @@ def header(agent_name: str = "build") -> str:
     return agents.get(agent_name, agents["build"])
 ```
 
-关键点：
-- **dict + fallback**：未知 `agent_name` 回退到 `build`，安全。
-- **身份描述具体**：说明当前能力边界（读写改文件 + 计算）和目标（独立完成任务），不只说"你是助手"。
-- **为多 agent 预留**：后续加 explore/plan 只需在 dict 加一行，调用方传不同 `agent_name` 即可。
+这一层先解决“模型是谁、能做什么”的问题：
+
+- **dict + fallback**：传入未知 `agent_name` 时一定回退到 `build`。
+- **身份描述具体**：明确当前只能读、写、修改文件和计算，而不是笼统地说“你是助手”。
+- **为多 agent 预留**：以后增加 explore/plan 时，只需在 dict 加一项，并传入对应的 `agent_name`。
 
 #### 第二层：`_CORE_RULES` — 行为规范
 
-静态文本，所有 agent 共享，分四段：
+身份明确后，还需要所有 agent 都遵守同一组规则。`_CORE_RULES` 是静态文本，分为四段：
 
 | 段 | 规则要点 |
 |---|---|
@@ -97,7 +100,7 @@ def header(agent_name: str = "build") -> str:
 | `# Tool usage` | 优先用工具、参数完整合法、可并发 tool_calls |
 | `# Safety` | 权限闸门是预期行为、不猜 URL、工具失败直接抛异常 |
 
-> 为什么用 `<rules>...</rules>` 标签包裹？对 GLM 系列模型，显式标签比纯 Markdown 标题有更强的"这是硬规则"语义提示。
+> 这里用 `<rules>...</rules>` 包住规则。对 GLM 系列模型，这种显式标签比只有 Markdown 标题更容易表达“这是必须遵守的规则”。
 
 #### 第三层：`environment()` — 动态环境
 
@@ -115,7 +118,7 @@ def environment() -> str:
     ])
 ```
 
-四项字段，纯标准库获取：
+模型还需要了解当前运行位置。`environment()` 用标准库读取四项信息：
 
 | 字段 | 获取方式 | 作用 |
 |---|---|---|
@@ -148,20 +151,22 @@ def _detect_git(cwd: str) -> bool:
         p = parent
 ```
 
-用纯目录遍历而非 `subprocess.run(["git", ...])`，理由：
-- **零外部依赖**：不依赖 git 可执行文件，符合 mini_agent 自包含原则。
-- **无子进程开销**：目录遍历比起进程快得多。
-- **worktree/submodule 漏判**：当前教学场景无此需求，后续按需升级。
+这里只需要判断当前目录或其父目录是否有 `.git`。因此使用目录遍历，不调用 `subprocess.run(["git", ...])`：
+
+- **零外部依赖**：不必依赖 git 可执行文件，符合 mini_agent 自包含的约定。
+- **无需启动子进程**：目录遍历足以完成当前判断。
+- **限制**：worktree 和 submodule 可能被漏判；当前教学场景不处理，后续有需求再升级。
 
 ## 为什么这样设计
 
 ### 为什么不动 `agent.py`
 
-`call_llm` / `agent_loop` 仍然只接收 `messages` 列表，完全不感知 system prompt 的构造。这符合运行时契约中的「核心 loop 保持清晰」原则——prompt 组装是入口层（`__main__.py`）的职责，核心 loop 不掺混。
+提示词变复杂后，核心循环不应因此承担组装工作。`call_llm` / `agent_loop` 仍然只接收 `messages` 列表，不知道 system prompt 是如何生成的。
+组装提示词是入口层（`__main__.py`）的职责，所以 `agent.py` 不需要改动。
 
 ### 为什么在入口调一次而非每轮调
 
-`build_system_prompt()` 在 `__main__.py` 启动时调一次，构造 `messages[0]`，之后跨轮复用。环境信息（工作目录/平台/日期）在一次会话内不变，无需每轮重新生成。
+一次会话里，工作目录、平台和日期通常不会改变。因此 `__main__.py` 启动时调用一次 `build_system_prompt()`，写入 `messages[0]`，之后每轮直接复用。
 
 ```python
 # __main__.py
@@ -170,13 +175,14 @@ messages = [{"role": "system", "content": build_system_prompt()}]
 
 ### 为什么不照搬 OpenCode 的 `header()` 身份伪装
 
-OpenCode 的 `header()` 对 Anthropic 模型做身份伪装（让 Claude 以为自己不是 Claude）——这是针对特定模型的绕过 hack。mini_agent 对接 GLM 系列，不需要这种绕过，照搬无意义。
+OpenCode 的 `header()` 会对 Anthropic 模型做身份伪装，让 Claude 以为自己不是 Claude。这是针对特定模型的绕过方式。
+mini_agent 对接 GLM 系列，并不需要它，所以这里不照搬。
 
 ### 为什么 `core_rules` 用中文
 
-- 对接的 `EB-GLM-5.2` 是中文模型，中文 prompt 指令遵循度更高。
-- 教学仓库面向中文学习者，prompt 可读性优先。
-- `environment()` 的字段名用英文（`Working directory` 等）——结构化标签英文更稳定，模型识别一致性好。混搭是合理的。
+- 对接的 `EB-GLM-5.2` 是中文模型，所以中文指令通常更容易被遵循。
+- 教学仓库面向中文学习者，提示词也应便于直接阅读。
+- `environment()` 的字段名保留英文，如 `Working directory`。结构化标签用英文更稳定，模型也更容易一致识别。
 
 ## 使用指导
 
@@ -199,7 +205,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下你自己"
 ```bash
 $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
-预期输出：三段文本——身份描述 + `<rules>` 行为规范 + `<env>` 环境信息。
+预期输出：按顺序包含身份描述、`<rules>` 行为规范和 `<env>` 环境信息三段。
 
 **示例 2：对比 v0.06 vs v0.07 的模型自我介绍**
 ```bash
@@ -211,19 +217,19 @@ $env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下自己"
 git checkout v0.07
 $env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下自己"
 ```
-预期：v0.07 的回复更简洁、结构化、无 emoji，自报身份为 mini_agent。
+预期：v0.07 的回复通常更简洁、更有结构、不带 emoji，并会说明自己是 mini_agent。模型输出仍可能有差异。
 
 **示例 3：环境信息帮助路径解析**
 ```bash
 $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt 并告诉我内容"
 ```
-预期：模型从 `<env>` 知道工作目录，能正确解析相对路径，无需猜。
+预期：模型能从 `<env>` 取得工作目录，因此可以正确解析相对路径，而不必猜测。
 
 ### 本版独有特性
 
-- **环境感知**：模型知道工作目录、平台、日期、git 状态，不再靠猜。
-- **行为收敛**：回复简洁、无 emoji、不复述工具输出、不主动总结。
-- **多 agent 预留**：`header(agent_name)` 参数已就位，后续加 explore/plan 只需在 dict 加一行。
+- **环境感知**：模型会收到工作目录、平台、日期和 git 状态，不必猜测。
+- **行为约束**：规则要求回复简洁、不带 emoji、不复述工具输出，也不主动总结。
+- **多 agent 预留**：`header(agent_name)` 已提供参数；以后加 explore/plan 只需扩充 dict。
 
 ## 动手验证
 

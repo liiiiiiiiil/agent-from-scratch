@@ -4,7 +4,9 @@
 
 ## 本课目标
 
-新增 `run_shell` 工具，让 agent 能跑命令（跑测试、跑脚本）。v0.09 的二维权限系统已为命令模式权限铺路，本课落地工具本身。
+前几课的 agent 能读写文件和调用工具，却不能自己运行测试或脚本。它修改代码后，仍要依赖用户去终端验证结果。
+
+这一课新增 `run_shell` 工具，让 agent 能运行命令。v0.09 的二维权限已经能按命令模式判断权限，本课把这项能力真正接到工具上。
 
 ## 前置
 
@@ -29,6 +31,8 @@ git diff --stat v0.09..v0.10
 
 ### 1. run_shell 工具
 
+运行 shell 命令时，需要同时避免三类问题：命令卡住、输出过长，以及失败后模型看不出原因。`run_shell` 因此在执行时设置超时、收集输出并带上退出码。
+
 ```python
 def run_shell(command: str):
     proc = subprocess.run(
@@ -44,13 +48,15 @@ def run_shell(command: str):
 ```
 
 关键设计：
-- **`shell=True`**：命令字符串直接执行，教学简洁。安全性由权限闸门兜底。
-- **`capture_output=True`**：stdout + stderr 合并捕获
-- **`timeout=30`**：超时 30s，防止命令卡死 agent
-- **输出截断 2000 字符**：防长输出爆上下文，与 `read_file` 的 limit 设计一致
-- **退出码前缀**：非零退出码时加 `[exit=N]` 前缀，让 LLM 知道命令失败了
+- **`shell=True`**：直接执行命令字符串，读者不必先学习如何拆分参数数组。权限闸门负责兜住安全问题。
+- **`capture_output=True`**：把 stdout 和 stderr 一起收集。
+- **`timeout=30`**：30 秒后一定超时返回，避免命令卡住 agent。
+- **输出截断 2000 字符**：长输出不会占满上下文，和 `read_file` 的 limit 有相同目的。
+- **退出码前缀**：退出码非零时加 `[exit=N]`，让 LLM 能判断命令失败。
 
 ### 2. 二维命令模式权限
+
+shell 命令的风险差别很大。例如读取 git 状态通常可以直接执行，删除文件则需要确认。因此权限规则不只看 `run_shell` 这个工具名，还要看命令文本。
 
 v0.09 的 `_extract_pattern()` 对 `run_shell` 返回完整命令字符串，v0.10 的权限规则用 fnmatch 通配符按命令前缀匹配：
 
@@ -69,15 +75,17 @@ PERMISSION_RULES = {
 }
 ```
 
-效果：`git status` → allow，`python tests/test_tools.py` → allow，`rm -rf /` → ask。
+结果是：`git status` → allow，`python tests/test_tools.py` → allow，`rm -rf /` → ask。
 
 ### 3. _from_config 排序修复
 
+通配规则 `*` 能匹配所有命令。如果它先被找到，像 `echo *` 这样的具体规则就永远没有机会生效。
+
 v0.10 发现并修复了 v0.09 的一个 findLast 语义缺陷：
 
-**问题**：复杂格式 dict 里 `*` 放在最后，`_from_config` 按插入顺序展开，`*` 排在具体模式后面。findLast 从后往前找，先碰到 `*`（匹配一切）就返回，具体模式被遮蔽。
+**问题**：复杂格式 dict 里 `*` 放在最后，`_from_config` 按插入顺序展开后，`*` 也排在具体模式后面。findLast 从后往前找，会先遇到匹配一切的 `*`，具体模式便被遮蔽。
 
-**修复**：`_from_config` 对复杂格式的 pattern 排序，`*` 排最前（优先级最低），具体模式排后面（优先级更高）：
+**修复**：`_from_config` 对复杂格式的 pattern 排序，把 `*` 放到最前，即最低优先级；具体模式放到后面，即更高优先级：
 
 ```python
 # "*" 排最前（优先级最低），具体模式排后面（优先级更高）
@@ -90,23 +98,29 @@ findLast 从后往前找，先碰具体模式（如 `echo *`），匹配就返�
 
 ### 为什么不做 BashArity 命令泛化？
 
-原计划提了 "BashArity 命令泛化"（把 `git checkout main` 泛化为 `git checkout *`），但 v0.09 的 `_extract_pattern` 返回完整 command 字符串，fnmatch 的 `git *` 通配符已能按命令前缀匹配。教学简洁性优先，不做 BashArity。如果后续发现需要按"命令+参数"分离匹配，再引入。
+原计划提过 “BashArity 命令泛化”，即把 `git checkout main` 泛化为 `git checkout *`。但 `_extract_pattern` 已返回完整 command 字符串，fnmatch 的 `git *` 也已经能按命令前缀匹配。
+
+所以本版不引入 BashArity。以后如果必须把“命令”和“参数”分开匹配，才需要补上。
 
 ### 为什么用 shell=True？
 
-`shell=True` 让命令字符串直接执行（`subprocess.run("echo hello", shell=True)` 等价于在终端敲 `echo hello`）。教学简洁，不需要拆分参数数组。安全性由二维权限闸门兜底——安全命令 allow，其他 ask。
+`shell=True` 让命令字符串直接执行（`subprocess.run("echo hello", shell=True)` 等价于在终端敲 `echo hello`）。因此示例不需要先拆分参数数组。
+
+它不自动保证命令安全。二维权限闸门会放行规则允许的命令，其余命令仍然 ask。
 
 ### 为什么超时 30s？
 
-跑测试够用。长任务（如 `npm install`）可能超时，后续 Context Management 版本再调。超时后返回错误信息，不杀 agent loop。
+30 秒足够运行这里的测试。长任务，例如 `npm install`，可能超时，本版不会自动延长它。超时后工具返回错误信息，但不会结束 agent loop。
 
 ### 为什么输出截断 2000 字符？
 
-防长输出爆上下文。`read_file` 的 limit 是 2000 行，`run_shell` 的截断是 2000 字符——不同单位但同思路：限制回灌给 LLM 的数据量。截断后尾部标注实际长度，让 LLM 知道输出被截了。
+这是为了防止长输出占满上下文。`read_file` 限制的是 2000 行，`run_shell` 截断的是 2000 字符；单位不同，但都在限制回灌给 LLM 的数据量。
+
+截断后尾部会标出实际长度，因此 LLM 能知道输出并不完整。
 
 ### 为什么 stdout + stderr 合并？
 
-让 LLM 一次看到所有输出。分开返回需要两次解析，合并后 LLM 能从 stderr 里看到错误信息（如 `Traceback`），直接判断命令是否失败。
+LLM 一次就能看到全部输出。若分开返回，它还要分别解析两部分；合并后可以直接从 stderr 中看到 `Traceback` 等错误信息并判断结果。
 
 ## 使用指导
 

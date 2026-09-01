@@ -4,8 +4,9 @@
 
 ## 本课目标
 
-给 agent 加上权限闸门：有副作用的工具（如 `write_file`）执行前先问用户。
-引入 `permission.py` 的 allow/deny/ask 三态权限模型和 `PermissionGate`。
+上一课的 `write_file` 收到调用后会直接覆盖文件。模型一旦选错路径，用户没有机会阻止。
+
+这一课加入权限闸门 `PermissionGate`。它会在工具执行前检查规则，并用 `ALLOW`、`DENY`、`ASK` 三种结果决定直接放行、直接拒绝，还是先询问用户。
 
 ## 前置
 
@@ -30,7 +31,7 @@
 
 ### 三态权限模型（`src/mini_agent/permission.py`）
 
-每个工具有三种权限状态：
+不同工具的风险不同。读取和计算可以默认执行，写文件则需要用户决定。因此每个工具都有一种权限状态：
 
 ```python
 ALLOW, DENY, ASK = "allow", "deny", "ask"
@@ -42,9 +43,9 @@ PERMISSION_RULES = {
 }
 ```
 
-- **ALLOW**：直接执行，不问
-- **DENY**：直接拒绝，不执行
-- **ASK**：每次执行前问用户 `[once/always/reject]`
+- **ALLOW**：一定直接执行，不询问用户。
+- **DENY**：一定拒绝，不会进入工具 handler。
+- **ASK**：执行前显示 `[once/always/reject]`，由用户当场选择。
 
 ### PermissionPolicy（`permission.py:27`）
 
@@ -65,7 +66,7 @@ class PermissionPolicy:
         return action
 ```
 
-关键点：`_approved` 集合实现"always"语义——用户选了 always 后，本轮内同名工具不再问。
+`PermissionPolicy` 只负责查规则。`_approved` 集合记录用户在本次运行中选择了 `always` 的工具名，后续同名工具会直接得到 `ALLOW`。程序重启后，这份记录会消失。
 
 ### PermissionGate（`permission.py:58`）
 
@@ -92,7 +93,7 @@ class PermissionGate:
         return None  # None = 放行，str = 拒绝原因
 ```
 
-返回约定：`None` 表示放行，`str` 表示拒绝原因（会被回灌给 LLM）。
+`guard` 返回 `None` 时，Executor 可以继续执行。返回字符串时，字符串就是拒绝原因，Executor 不会调用 handler，而是把原因作为工具结果回灌给 LLM。
 
 ### ToolExecutor 集成闸门（`src/mini_agent/tools/base.py:93`）
 
@@ -119,32 +120,31 @@ class ToolExecutor:
         return result
 ```
 
-Executor 只需调 `gate.guard(name, args)`，不用关心是 ALLOW/DENY/ASK 的细节——闸门内部处理一切。
+Executor 在调用 handler 前先调用 `gate.guard(name, args)`。权限判断和用户交互都封装在闸门内部，所以 Executor 只需要区分“继续执行”和“返回拒绝原因”。
 
 ## 为什么这样设计
 
 ### 为什么是三态不是两态
 
-两态（allow/deny）的问题：有副作用的工具（write_file）如果设 allow 太危险，设 deny 又用不了。
-ASK 是"动态决策"——规则说"这个工具需要人确认"，但最终执行与否由用户当下决定。
-三态覆盖了"总是允许 / 总是禁止 / 看情况"三种现实需求。
+如果只有 allow 和 deny，`write_file` 要么每次都执行，要么完全无法使用。两种选择都不适合“有时允许写入”的场景。
+
+ASK 把决定留到调用发生时。规则只说明这个工具需要确认，最终是否执行由用户结合当前参数判断。
 
 ### 为什么用 _approved 集合实现 always
 
-用户选了 `always` 后，`policy.approve(tool_name)` 把工具名加入 `_approved` 集合。
-下次 `check` 时发现工具在集合里，直接返回 ALLOW，不再问。
-这是"运行时"状态——重启后失效，避免永久授权的风险。
+用户选择 `always` 后，`policy.approve(tool_name)` 会把工具名加入 `_approved`。同一次程序运行中再次调用这个工具时，`check` 会直接返回 ALLOW。
+
+授权只绑定工具名，不检查参数，并且不会写入磁盘。它会在程序重启后失效，但本次运行中的其他同名调用也都将被放行。
 
 ### 为什么 guard 里有 _ask_lock
 
-`_ask_lock` 是 `threading.Lock()`。v0.04 还是串行执行，但为 v0.06 的并发 tool_calls 预留：
-并发时多个线程可能同时触发 ASK，锁保证交互不会交错（两个权限提示混在一起用户没法看）。
+`_ask_lock` 是一个 `threading.Lock()`。v0.04 仍按顺序执行工具，因此暂时看不到它的作用。第 6 课改为并发后，多个线程可能同时请求确认；这把锁会让提示逐个出现，避免输入对应错请求。
 
 ### 为什么拒绝原因回灌给 LLM
 
-用户拒绝后，`guard` 返回 `"权限拒绝: 用户拒绝执行 write_file"`，这个字符串作为工具结果回灌给 LLM。
-LLM 拿到后会理解"用户不让写这个文件"，从而换策略（比如告诉用户"你没授权我写文件"）。
-**拒绝不是报错，是一种工具结果**——LLM 能据此调整行为。
+用户拒绝后，`guard` 返回 `"权限拒绝: 用户拒绝执行 write_file"`。这个结果仍会使用对应的 `tool_call_id` 回灌，所以协议保持完整。
+
+拒绝表示工具没有执行，但不是程序异常。LLM 拿到结果后，可能改用其他方法，也可能直接告诉用户无法完成写入。
 
 ## 使用指导
 

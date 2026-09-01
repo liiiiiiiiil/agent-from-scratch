@@ -4,14 +4,16 @@
 
 ## 本课目标
 
-让 Agent 在 Context Window 有限时仍能继续工作。读完本课，你应该能够：
+对话和工具结果会不断累积。模型的 Context Window（上下文窗口）有限，等到服务端报超限错误时，这一轮请求已经失败了。
+
+这一课让 Agent 在窗口有限时仍能继续工作：调用前先预留预算，优先缩短价值较低的内容，并且不破坏工具调用消息的对应关系。读完本课，你应该能够：
 
 - 解释为什么上下文管理需要“预算”，而不只是等 API 返回超限错误。
 - 看懂 `ContextBudget` 如何从模型窗口计算本次请求的消息上限。
 - 说明为什么 tool calling 消息必须按完整轮次裁剪。
 - 构造一个小窗口示例，观察 tool result 截断和旧轮次删除。
 
-本课的重点不是精确计算 token，而是建立三个约束：**调用前检查、低价值内容优先、协议结构不被破坏**。
+本课不追求精确计算 token。重点是三个直接的约束：**调用前检查、先处理低价值内容、不能破坏协议结构**。
 
 ## 前置
 
@@ -52,18 +54,20 @@ call_llm(prepared_messages)
 
 ## 上一版的问题
 
-v0.11 把状态与上下文分开了，但 `prepare_messages()` 仍会发送完整 history。任务轮次越多，以下内容就会一直累积：
+v0.11 已把状态与上下文分开，但 `prepare_messages()` 仍会发送完整 history。任务轮次变多后，以下内容会不断累积：
 
 - system prompt 和用户任务。
 - assistant 发出的 tool calls。
 - 文件内容、搜索结果和 shell 输出等 tool results。
 - assistant 的阶段性判断。
 
-最终请求可能超过模型的 Context Window。等服务端报错再处理有两个问题：Agent 当前轮直接失败，而且调用方不知道应该安全删除哪些消息。因此 v0.12 把控制点放在 LLM 调用之前。
+最终请求可能超过模型的 Context Window。等服务端报错再处理有两个问题：当前轮已经失败，调用方也不知道哪些消息能安全删除。
+
+因此 v0.12 一定会在调用 LLM 之前检查预算。
 
 ## 核心概念一：Token 只需要足够好的估算
 
-本项目坚持零第三方依赖，不引入 `tiktoken`。`count_tokens()` 对字符串使用 `len(text) // 3`，并递归统计消息中的 dict、list 和 tuple：
+精确分词需要额外依赖，但本项目保持零第三方依赖，因此不引入 `tiktoken`。`count_tokens()` 用 `len(text) // 3` 粗略估算字符串，并递归统计消息中的 dict、list 和 tuple：
 
 ```python
 def count_tokens(text_or_messages: object) -> int:
@@ -78,11 +82,13 @@ def count_tokens(text_or_messages: object) -> int:
     return len(str(text_or_messages)) // 3
 ```
 
-它不是 tokenizer：不会计算协议包装开销，也不会精确反映不同模型对中英文和标点的编码差异。但这里的用途只是判断“是否应开始收缩上下文”，允许有合理误差。通过保留输出空间和限制历史比例，可以吸收一部分误差。
+这不是 tokenizer（分词器）。它不会计算协议包装开销，也不能精确反映不同模型对中英文和标点的编码差异。
+
+这里仅用它判断“是否应开始缩短上下文”，所以允许合理误差。输出预留和历史比例会吸收一部分误差。
 
 ## 核心概念二：预算不是一个固定上限
 
-`ContextBudget` 用三个量描述一次请求：
+一次请求不能只设一个固定上限，因为输入、模型输出和历史消息都要占窗口。`ContextBudget` 用三个量描述这些边界：
 
 ```python
 @dataclass(frozen=True)
@@ -117,7 +123,9 @@ history_limit = 100 * 40% = 40
 message_limit = min(80, 10 + 40) = 50
 ```
 
-这里的 `max(protected_tokens, ...)` 是保底规则：如果 system 和首条 user task 自己就超过预算，它们仍然保留。此时 ContextManager 会打印超限日志，而不是为了满足数字目标删掉任务本身。
+这里的 `max(protected_tokens, ...)` 是保底规则。即使 system 和首条 user task 自己超过预算，它们也一定保留。
+
+此时 ContextManager 会打印超限日志，不会为了满足数字目标删掉任务本身。
 
 可在不进 git 的 `config_local.py` 中覆盖模型窗口：
 
@@ -127,7 +135,7 @@ CONTEXT_WINDOW = 32_000
 
 ## 核心概念三：按协议轮次原子裁剪
 
-一次工具轮次由一条带 `tool_calls` 的 assistant 消息和紧随其后的全部 tool result 组成：
+工具调用消息不能随便单条删除。一次工具轮次由一条带 `tool_calls` 的 assistant 消息和紧随其后的全部 tool result 组成：
 
 ```text
 assistant(tool_calls: call-1, call-2)
@@ -135,9 +143,9 @@ tool(tool_call_id: call-1)
 tool(tool_call_id: call-2)
 ```
 
-OpenAI tool calling 协议要求每条 `role=tool` 消息都能对应前面的 `tool_call_id`。如果只删除 assistant 消息，就会留下孤儿 tool result；如果只删除其中一个 tool result，又会让 assistant 声明的调用缺少响应。这两种上下文都可能被 API 拒绝。
+OpenAI tool calling 协议要求每条 `role=tool` 消息都对应前面的 `tool_call_id`。只删除 assistant 消息会留下孤儿 tool result；只删除一个 tool result 又会让 assistant 声明的调用缺少响应。这两种情况都可能被 API 拒绝。
 
-`_split_rounds()` 因此先寻找首条 user 消息：它和之前的 system 消息组成不可删除的 `prefix`；后续消息被切成 `rounds`。遇到 tool-calling assistant 时，它和后续连续的 tool 消息会进入同一个列表：
+因此 `_split_rounds()` 先找首条 user 消息。它和之前的 system 消息组成不能删除的 `prefix`；后续消息再切成 `rounds`。遇到 tool-calling assistant 时，它和后续连续的 tool 消息会进入同一个列表：
 
 ```python
 prefix, rounds = _split_rounds(messages)
@@ -149,17 +157,17 @@ prefix, rounds = _split_rounds(messages)
 # ]
 ```
 
-普通 assistant 或后续 user 消息各自构成单消息轮次。裁剪可以缩短某条 tool result 的文本，但删除历史时只删除完整 round。
+普通 assistant 或后续 user 消息各自构成单消息轮次。裁剪可能缩短某条 tool result 的文本，但删除历史时一定只删除完整 round。
 
 ## 裁剪算法
 
-`TrimPolicy.trim()` 始终先浅复制消息字典，所有修改只发生在本次发送副本上：
+如果直接改 history，之后就无法还原完整记录。`TrimPolicy.trim()` 因此总是先浅复制消息字典，所有修改只作用于本次发送的副本：
 
 ```python
 prepared = [dict(message) for message in messages]
 ```
 
-随后按价值从低到高处理：
+随后它按从低价值到高价值的顺序处理：
 
 1. 如果估算值未超过 `message_limit`，直接返回副本。
 2. 从最老轮次开始检查 tool result。
@@ -167,7 +175,7 @@ prepared = [dict(message) for message in messages]
 4. 如果仍超限，从最老的完整 round 开始删除。
 5. rounds 全部删完仍超限时，保留 prefix 并打印 protected messages 超限日志。
 
-保留首尾而不是只留开头，是因为工具输出的结论、报错或汇总经常出现在末尾：
+工具输出的结论、报错或汇总经常出现在末尾，所以截断时会保留首尾，而不是只留开头：
 
 ```text
 beginning of result
@@ -175,11 +183,13 @@ beginning of result
 ending of result
 ```
 
-`needed_characters = (current_tokens - target) * 3` 把待节省 token 换算回字符数；`minimum_tool_result_characters = 120` 防止结果被反复压到完全不可读。截断仍不够时，整轮删除负责保证算法最终收敛。
+`needed_characters = (current_tokens - target) * 3` 把要节省的 token 换算为字符数。`minimum_tool_result_characters = 120` 防止结果被反复压到完全不可读。
+
+如果截断仍不够，算法会删除完整轮次，因此最终一定会收敛。
 
 ## 为什么不修改原始 history
 
-`history` 是本地完整执行记录，`prepared_messages` 是某一次 LLM 请求的临时视图：
+`history` 保存本地完整执行记录，`prepared_messages` 只是某一次 LLM 请求的临时视图：
 
 ```text
 完整 history ---------------------> 下一轮继续追加
@@ -187,7 +197,9 @@ ending of result
       +-- copy --> trim --> LLM request
 ```
 
-如果直接裁掉 history，之后就无法更换策略、重新摘要或排查 Agent 实际执行过什么。`AgentState` 在 v0.12 也仍然不注入 messages；这两个边界为 v0.13 的 Historical Summary 和 Structured State 留出了可靠的数据源。
+直接裁掉 history 后，就无法更换策略、重新摘要或排查 Agent 实际执行过什么。v0.12 也不会把 `AgentState` 注入 messages。
+
+这两个边界为 v0.13 的 Historical Summary 和 Structured State 保留了可靠的数据源。
 
 ## 最小可运行示例
 
@@ -255,7 +267,7 @@ PYTHONPATH=src python -m pytest tests/test_context.py tests/test_loop.py -q
 - **不用精确 tokenizer**：保持零第三方依赖，预算预留承担估算误差。
 - **不让 loop 感知裁剪**：上下文策略继续收敛在 ContextManager。
 - **不删除 protected prefix**：任务可执行性优先于强行满足预算数字。
-- **不摘要历史**：v0.12 只能丢弃低价值内容，删除的旧轮次不会以语义形式保留。
+- **不摘要历史**：v0.12 只能丢弃低价值内容。删除的旧轮次不会以语义形式保留。
 - **不注入 AgentState**：State 仍是独立事实源，下一版才把它渲染为模型可见的锚。
 
 ## 本版独有特性
