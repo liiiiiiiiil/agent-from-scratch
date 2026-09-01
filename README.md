@@ -93,7 +93,6 @@ python -m mini_agent "帮我算一下 123 * 456"
     <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">上下文架构</a></td><td>将持久执行状态与可裁剪的对话上下文分离。</td></tr>
     <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token 并按完整对话轮次安全裁剪历史。</td></tr>
     <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务的遗忘。</td></tr>
-    <tr><td><strong>v0.13.1</strong></td><td><a href="./docs/tutorials/13-context-compaction.md#v0131-增补context-observability">Context Observability 增补</a></td><td>提供上下文 token 统计、裁剪/压缩事件和结构化快照。</td></tr>
     <tr><th colspan="3">阶段五 · 项目感知与任务编排</th></tr>
     <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">Project Instructions</a></td><td>自动发现并注入项目级 AGENTS.md 指令。</td></tr>
     <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">Todo / Task State</a></td><td>用显式 Todo 状态跟踪多步任务进度。</td></tr>
