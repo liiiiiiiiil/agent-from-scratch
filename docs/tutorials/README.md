@@ -75,6 +75,7 @@ PYTHONPATH=src python tests/test_tools.py
 | v0.14 | Project Instructions | [14-project-instructions.md](14-project-instructions.md) |
 | v0.15 | Todo / Task State | [15-task-state.md](15-task-state.md) |
 | v0.16 | Plan-driven Execution | [16-plan-driven-execution.md](16-plan-driven-execution.md) |
+| v0.17 | Failure Model | [17-failure-model.md](17-failure-model.md) |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 ## 版本与 Git tag

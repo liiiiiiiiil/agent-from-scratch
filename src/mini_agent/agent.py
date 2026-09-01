@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from mini_agent.context import ContextManager
 from mini_agent.tools import registry
-from mini_agent.tools.base import ToolExecutor
+from mini_agent.tools.base import ExecutionResult, ToolExecutor
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS
 
 
@@ -143,7 +143,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
     ContextManager 拥有并维护 history；本函数只向其 history 追加
     assistant 和 tool 消息，不把 AgentState 序列化到 messages。Executor
-    的 on_result 回调负责将工具执行结果记录到 AgentState。每个带
+    Runtime 将结构化 ExecutionResult 记录到 AgentState。每个带
     tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
@@ -263,14 +263,54 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 state.status = "blocked"
             return msg.get("content", "")
 
-        # 有 tool_calls：并发执行，结果按原顺序作为 role=tool 回灌
-        # 同一轮的多个 tool_calls 互不依赖，用线程池并发执行以加速
+        # 只有全 effect_class=none 的回合可以并发。任何 possible effect
+        # 都令整轮按模型顺序执行和提交，保证 generation 的确定性。
         tool_calls = msg["tool_calls"]
+        state = getattr(context_manager, "state", None)
+        structured = hasattr(tool_executor, "execute_result") and run_registry is not None
 
-        def _run(tc):
+        parsed_calls = []
+        effects = []
+        for tc in tool_calls:
+            function = tc.get("function", {}) if isinstance(tc, dict) else {}
+            try:
+                args = json.loads(function.get("arguments", "{}"))
+                if not isinstance(args, dict):
+                    raise TypeError("tool arguments 必须是 JSON object")
+            except (TypeError, json.JSONDecodeError):
+                args = {}
+            name = function.get("name", "invalid_tool_call")
+            parsed_calls.append((name, args))
+            try:
+                effect = run_registry.effect_for(name, args) if structured else "none"
+            except (TypeError, ValueError):
+                effect = "none"
+            effects.append(effect)
+        has_possible = "possible" in effects
+        invalid_verifications = {
+            index for index, (name, args) in enumerate(parsed_calls)
+            if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
+        }
+
+        def _run(index_tc):
+            index, tc = index_tc
             tool_call_id = tc.get("id") if isinstance(tc, dict) else None
             if tool_call_id in invalid_tool_call_errors:
-                return tool_call_id, invalid_tool_call_errors[tool_call_id]
+                text = invalid_tool_call_errors[tool_call_id]
+                invalid = ExecutionResult(
+                    "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
+                    "none", text, text[:200], error_kind="malformed_tool_call",
+                ) if structured else None
+                return tool_call_id, text, invalid
+
+            name, args = parsed_calls[index]
+            if index in invalid_verifications:
+                text = "工具调用失败: verification 不能与 possible effect 处于同一回合"
+                invalid = ExecutionResult(
+                    name, args, "not_checked", False, "invalid", 0, "none",
+                    text, text[:200], error_kind="mixed_verification",
+                ) if structured else None
+                return tool_call_id, text, invalid
 
             try:
                 function = tc["function"]
@@ -280,27 +320,47 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 if not isinstance(args, dict):
                     raise TypeError("tool arguments 必须是 JSON object")
             except (KeyError, TypeError, json.JSONDecodeError) as error:
-                return tool_call_id, f"工具调用失败: {type(error).__name__}"
+                return tool_call_id, f"工具调用失败: {type(error).__name__}", None
 
             # Isolate only this tool boundary so pool.map still returns one
             # protocol result per call; LLM and CLI exceptions remain uncaught.
             try:
+                if structured:
+                    execution = tool_executor.execute_result(
+                        name, args, state if effects[index] == "possible" else None,
+                        notify=False,
+                    )
+                    return tool_call_id, execution.tool_content(), execution
                 result = tool_executor.execute(name, args)
-                result_text = str(result)
-                return tool_call_id, result_text
+                return tool_call_id, str(result), None
             except Exception as error:
-                return tool_call_id, f"工具调用失败: {type(error).__name__}"
+                return tool_call_id, f"工具调用失败: {type(error).__name__}", None
 
-        with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
-            results = list(pool.map(_run, tool_calls))
+        indexed_calls = list(enumerate(tool_calls))
+        if has_possible:
+            results = []
+            for item in indexed_calls:
+                result = _run(item)
+                results.append(result)
+                if structured and state is not None and result[2] is not None:
+                    state.record_execution_result(result[2])
+        else:
+            with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
+                results = list(pool.map(_run, indexed_calls))
+            # Concurrent handlers finish in arbitrary order; facts commit in
+            # model order so attempt ids and snapshots stay deterministic.
+            if structured and state is not None:
+                for _, _, execution in results:
+                    if execution is not None:
+                        state.record_execution_result(execution)
 
         # Threads execute concurrently, but terminal output follows tool-call order.
-        for tc, (tool_call_id, content) in zip(tool_calls, results):
+        for tc, (tool_call_id, content, _) in zip(tool_calls, results):
             function = tc.get("function", {}) if isinstance(tc, dict) else {}
             name = function.get("name", "<missing>") if isinstance(function, dict) else "<missing>"
             _safe_print(f"  结果 [{name}]:\n    {_display_result(content)}")
 
-        for tool_call_id, content in results:
+        for tool_call_id, content, _ in results:
             context_manager.history.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,

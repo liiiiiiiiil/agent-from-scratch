@@ -13,11 +13,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mini_agent.permission import ALLOW, DENY, PermissionGate, PermissionPolicy
 from mini_agent.tools.base import (
+    ExecutionResult,
     RESULT_BRIEF_MAX_LENGTH,
     Tool,
     ToolExecutor,
     ToolRegistry,
 )
+from mini_agent.state import AgentState, canonical_arguments_hash
 
 
 def make_registry(handler):
@@ -263,6 +265,56 @@ def test_unknown_tool_does_not_call_callback():
         pass
 
     assert events == []
+
+
+def test_structured_result_reserves_possible_generation_before_failure():
+    state = AgentState(); state.begin_task("write")
+    observed = []
+
+    def handler(path):
+        observed.append(state.current_generation_id)
+        raise RuntimeError("partial write")
+
+    registry = ToolRegistry()
+    registry.register(Tool("dummy", "write", {
+        "type": "object", "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    }, handler, effect_class="possible"))
+    executor = ToolExecutor(registry, PermissionGate(PermissionPolicy({"dummy": ALLOW})))
+
+    result = executor.execute_result("dummy", {"path": "x"}, state)
+    attempt = state.record_execution_result(result)
+
+    assert isinstance(result, ExecutionResult)
+    assert observed == [1]
+    assert attempt.pre_generation_id == 0 and attempt.generation_id == 1
+    assert attempt.handler_admitted and attempt.outcome == "failed"
+    assert state.snapshot()["failures"][0]["caused_by_attempt_id"] == attempt.attempt_id
+    assert state.status == "blocked"
+
+
+def test_denied_and_invalid_possible_calls_do_not_advance_generation():
+    state = AgentState(); state.begin_task("write")
+    registry = ToolRegistry()
+    registry.register(Tool("dummy", "write", {
+        "type": "object", "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    }, lambda path: path, effect_class="possible"))
+    denied = ToolExecutor(registry, PermissionGate(PermissionPolicy({"dummy": DENY})))
+    denied_result = denied.execute_result("dummy", {"path": "x"}, state)
+    state.record_execution_result(denied_result)
+    assert state.current_generation_id == 0 and not denied_result.handler_admitted
+
+    state.begin_task("invalid")
+    invalid_result = denied.execute_result("dummy", {}, state)
+    state.record_execution_result(invalid_result)
+    assert state.current_generation_id == 0
+    assert invalid_result.permission == "not_checked" and invalid_result.outcome == "invalid"
+
+
+def test_canonical_arguments_hash_preserves_types_and_ignores_key_order():
+    assert canonical_arguments_hash({"b": 2, "a": True}) == canonical_arguments_hash({"a": True, "b": 2})
+    assert canonical_arguments_hash({"a": 1}) != canonical_arguments_hash({"a": "1"})
 
 
 if __name__ == "__main__":

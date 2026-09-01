@@ -1,6 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.16**（Plan-driven Execution）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.17**（Failure Model）。
+
+## v0.17 Failure Model
+
+每个任务从 generation 0 开始。可能产生副作用的工具（文件写入、编辑和 execution shell）在权限放行后、handler 前原子推进 generation；即使 handler 失败也不会回退。Executor 产出结构化 `ExecutionResult`，State 保存 `ExecutionAttempt`、`FailureEvent` 和绑定 generation 的 verification evidence。参数以 canonical JSON 的 SHA-256 指纹计数，Structured State 仅显示 hash/脱敏摘要。全只读回合可并发，包含副作用的回合按模型顺序串行提交；verification 不得与副作用同轮。
 
 ## v0.16 计划驱动执行
 

@@ -343,6 +343,24 @@ def test_structured_state_includes_recent_completed_tools():
     assert "do not repeat" in rendered
 
 
+def test_structured_state_redacts_attempt_arguments_and_survives_compaction():
+    from mini_agent.tools.base import ExecutionResult
+    state = AgentState(); state.begin_task("secret task")
+    result = ExecutionResult(
+        "read_file", {"api_key": "super-secret", "path": "main.py"},
+        "allowed", True, "failed", 1, "none", "not found", "not found",
+        error_kind="handler_exception",
+    )
+    state.record_execution_result(result)
+    history = [{"role": "user", "content": "task"}]
+    for number in range(4): history.extend(_tool_round(number))
+    context = ContextManager(state, history, summarizer=lambda _: "summary", keep_rounds=1)
+    context.compact()
+    rendered = context._render_state()["content"]
+    assert "super-secret" not in rendered
+    assert "generation" in rendered and "Latest failure" in rendered and "Budgets" in rendered
+
+
 def test_repeated_prepare_does_not_resummarize_same_rounds():
     history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
     for number in range(8):

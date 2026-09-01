@@ -89,6 +89,7 @@ write_file_tool = Tool(
         "required": ["path", "content"],
     },
     handler=write_file,
+    effect_class="possible",
 )
 
 
@@ -152,6 +153,7 @@ edit_file_tool = Tool(
         "required": ["path", "old_string", "new_string"],
     },
     handler=edit_file,
+    effect_class="possible",
 )
 
 

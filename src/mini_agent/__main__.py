@@ -34,6 +34,8 @@ def main():
     }]
     context = ContextManager(state, history)
     context.protected_messages = protected_messages
+    # Kept as a compatibility observer for callers using ToolExecutor.execute().
+    # The agent loop's structured path suppresses this legacy callback.
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
 
     def run_task(user_input):

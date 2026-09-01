@@ -21,6 +21,8 @@ from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS
 from mini_agent import __main__ as cli
 from mini_agent.state import AgentState
 from mini_agent.context import ContextBudget, ContextManager
+from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
+from mini_agent.tools.base import Tool, ToolExecutor, ToolRegistry
 
 
 def test_import():
@@ -46,6 +48,40 @@ def test_agent_loop_signature():
         f"agent_loop 应接受 context_manager 和 tool_executor，实际: {params}"
     )
     print("PASS: agent_loop(context_manager, tool_executor) 签名正确")
+
+
+def test_possible_round_is_serial_and_mixed_verification_is_invalid():
+    state = AgentState(); state.begin_task("mutate")
+    context = ContextManager(state, [{"role": "user", "content": "mutate"}])
+    events = []
+    registry = ToolRegistry()
+    registry.register(Tool("write_a", "write", {"type": "object", "properties": {}},
+                           lambda: events.append("write_a") or "a", effect_class="possible"))
+    registry.register(Tool("write_b", "write", {"type": "object", "properties": {}},
+                           lambda: events.append("write_b") or "b", effect_class="possible"))
+    registry.register(Tool("run_shell", "verify", {
+        "type": "object", "properties": {
+            "command": {"type": "string"},
+            "purpose": {"type": "string", "enum": ["execution", "verification"], "default": "execution"}},
+        "required": ["command"]},
+        lambda command, purpose="execution": events.append("verify") or "[exit=0] ok",
+        effect_class="possible"))
+    executor = ToolExecutor(registry, PermissionGate(PermissionPolicy({
+        "write_a": ALLOW, "write_b": ALLOW, "run_shell": ALLOW})))
+    responses = [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "write_a", "arguments": "{}"}},
+        {"id": "v", "type": "function", "function": {"name": "run_shell", "arguments": '{"command":"test","purpose":"verification"}'}},
+        {"id": "b", "type": "function", "function": {"name": "write_b", "arguments": "{}"}},
+    ]}, {"role": "assistant", "content": "done"}]
+
+    with patch("mini_agent.agent.call_llm", side_effect=responses):
+        assert agent_loop(context, executor) == "done"
+
+    assert events == ["write_a", "write_b"]
+    snapshot = state.snapshot()
+    assert snapshot["current_generation_id"] == 2
+    assert [item["outcome"] for item in snapshot["attempts"]] == ["succeeded", "invalid", "succeeded"]
+    assert "不能与 possible effect" in context.history[3]["content"]
 
 
 def test_agent_loop_context_and_executor_integration():

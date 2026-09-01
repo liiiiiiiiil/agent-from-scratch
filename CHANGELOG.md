@@ -259,3 +259,9 @@
 - 从最小可用的对话 loop 起步，先讲清"什么是 agent loop"：messages 列表、调 LLM、判断结束条件。
 - 不引入工具、权限、流式、并发，让第一课的 loop 概念最干净。
 - `http.client` + `Accept-Encoding: identity` 是踩坑后的选择（网关对 gzip 响应异常），从第一版就确立。
+## [v0.17] - Failure Model
+
+- Added auditable `ExecutionGeneration`, `ExecutionAttempt`, `FailureEvent`, and reserved `RecoveryAction` state records.
+- Added structured executor results, effect classes, canonical argument fingerprints, bounded budgets, and blocked/failed terminal reasons.
+- Possible-effect tool calls now reserve generations before handlers; read-only calls may remain concurrent while mixed verification calls are rejected.
+- Structured State renders generation, latest failure, causal attempt, budgets, and recovery notices without raw sensitive arguments.

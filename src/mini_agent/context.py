@@ -311,30 +311,30 @@ class ContextManager:
 
     def _render_state(self) -> Message:
         snapshot = self.state.snapshot()
-        return {
-            "role": "system",
-            "content": (
-                "[Structured State]\n"
-                f"Task: {snapshot['task']}\n"
-                f"Current goal: {snapshot['current_goal']}\n"
-                "Todos: " + ("; ".join(
-                    f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]
-                ) or "(none)") + "\n"
-                f"Files changed: {', '.join(snapshot['files_changed']) or '(none)'}\n"
-                f"Errors: {', '.join(snapshot['errors']) or '(none)'}\n"
-                f"Status: {snapshot['status']}\n"
-                f"Tools executed: {len(snapshot['tool_history'])}\n"
-                "Recent completed tools (do not repeat): "
-                + ("; ".join(
-                    f"{item['tool']}({item['args']}) -> {item['brief']}"
-                    for item in snapshot['tool_history'][-4:]
-                ) or "(none)") + ("\nVerification: " + "; ".join(
-                    f"{item['command']} => {item['outcome']} ({item['exit_code']})"
-                    for item in snapshot.get("verification_evidence", [])
-                ) if snapshot.get("verification_evidence") else "")
-                + ("\nVerification required: true" if snapshot.get("verification_required") else "")
-            ),
-        }
+        lines = ["[Structured State]"]
+        if snapshot["task"]: lines.append(f"Task: {snapshot['task']}")
+        if snapshot["current_goal"]: lines.append(f"Current goal: {snapshot['current_goal']}")
+        if snapshot["todos"]:
+            lines.append("Todos: " + "; ".join(
+                f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]))
+        if snapshot["files_changed"]: lines.append(f"Files changed: {', '.join(snapshot['files_changed'])}")
+        if snapshot["errors"]: lines.append(f"Errors: {', '.join(snapshot['errors'])}")
+        lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
+        if snapshot["tool_history"]:
+            lines.append(f"Tools executed: {len(snapshot['tool_history'])}")
+            lines.append("Recent completed tools (do not repeat): " + "; ".join(
+                f"{item['tool']}({item.get('arguments_hash', item.get('args', '<legacy>'))}) -> {item['brief']}"
+                for item in snapshot["tool_history"][-4:]))
+        if snapshot.get("verification_evidence"):
+            lines.append("Verification: " + "; ".join(
+                f"{item['command']} => {item['outcome']} ({item['exit_code']}) @g{item.get('generation_id', 0)}"
+                for item in snapshot["verification_evidence"]))
+        if snapshot.get("verification_required"): lines.append("Verification required: true")
+        if snapshot.get("terminal_reason"): lines.append("Terminal reason: " + snapshot["terminal_reason"])
+        if snapshot.get("latest_failure"): lines.append("Latest failure: " + str(snapshot["latest_failure"]))
+        lines.append("Budgets: retry={failure_retries_remaining}, fingerprint={fingerprint_attempts_limit}, recovery={recovery_actions_remaining}, repair={repair_cycles_remaining}".format(**snapshot["budgets"]))
+        if snapshot.get("recovery_notice"): lines.append("Recovery notice: " + snapshot["recovery_notice"])
+        return {"role": "system", "content": "\n".join(lines)}
 
     def _build_messages(self) -> list[Message]:
         source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])

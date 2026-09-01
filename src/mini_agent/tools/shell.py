@@ -68,4 +68,5 @@ run_shell_tool = Tool(
         "required": ["command"],
     },
     handler=run_shell,
+    effect_class="possible",
 )
