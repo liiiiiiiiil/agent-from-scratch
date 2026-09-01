@@ -2,6 +2,10 @@
 
 > 版本 v0.03 | [上一课](02-first-tool.md) | [下一课](04-permission-gate.md)
 
+> 代码快照：`v0.03` · 相邻差异：`v0.02..v0.03` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.9+。
+
 ## 本课目标
 
 上一课的 agent 只能计算，仍然无法查看或修改项目文件，因此不能完成实际的编程任务。
@@ -114,33 +118,33 @@ v0.03 收到 `write_file` 请求后会直接执行，不会询问用户。因为
 ### 本版可用的命令
 
 ```bash
-# 单次任务
-python -m mini_agent "读取 examples/input.txt 并计算"
+# 命令行首条任务
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt 并计算"
 
 # 交互模式
-python -m mini_agent
+PYTHONPATH=src python -m mini_agent
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：读文件 + 计算（多步串联）**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt 的内容并计算"
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt 的内容并计算"
 ```
 预期：3 轮循环，read_file → calculate → 最终回复"13"。
 
 **示例 2：写文件**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "把'Hello World'写入 examples/output.txt"
+PYTHONPATH=src python -m mini_agent "把'Hello World'写入 examples/output.txt"
 ```
 预期：LLM 调 `write_file({'path': 'examples/output.txt', 'content': 'Hello World'})`，回复"已写入"。
 
 **示例 3：读后写（复制文件）**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt，把内容写入 examples/copy.txt"
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt，把内容写入 examples/copy.txt"
 ```
 预期：read_file 拿到内容，write_file 写入 copy.txt。
 
@@ -154,24 +158,24 @@ $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt，把内�
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：7 个 PASS + "全部 smoke test 通过"。
 
 2. **读文件 + 计算**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt 并计算"
+   PYTHONPATH=src python -m mini_agent "读取 examples/input.txt 并计算"
    ```
    预期：3 轮循环，最终结果 13。
 
 3. **写文件验证**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "把'测试内容'写入 examples/test.txt"
+   PYTHONPATH=src python -m mini_agent "把'测试内容'写入 examples/test.txt"
    ```
    跑完后检查 `examples/test.txt` 是否被创建、内容是否正确。
 
 ## 本版完整代码
 
-- [`src/mini_agent/tools/file.py`](../../src/mini_agent/tools/file.py) — read_file / write_file
-- [`src/mini_agent/tools/__init__.py`](../../src/mini_agent/tools/__init__.py) — 注册三个工具
-- [`tests/test_tools.py`](../../tests/test_tools.py) — 工具 smoke test（含 read_file/write_file）
+- [`src/mini_agent/tools/file.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.03/src/mini_agent/tools/file.py) — read_file / write_file
+- [`src/mini_agent/tools/__init__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.03/src/mini_agent/tools/__init__.py) — 注册三个工具
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.03/tests/test_tools.py) — 工具 smoke test（含 read_file/write_file）

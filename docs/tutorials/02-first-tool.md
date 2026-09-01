@@ -2,6 +2,10 @@
 
 > 版本 v0.02 | [上一课](01-minimal-loop.md) | [下一课](03-file-tools.md)
 
+> 代码快照：`v0.02` · 相邻差异：`v0.01..v0.02` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.9+。
+
 ## 本课目标
 
 上一课的 LLM 只能生成文本。即使它回答了计算题，也只是依靠模型自己的推断，程序没有真正执行计算。
@@ -135,21 +139,21 @@ v0.02 会按顺序执行同一轮中的多个 `tool_calls`。这样“取出请�
 ### 本版可用的命令
 
 ```bash
-# 单次任务
-python -m mini_agent "计算 3+5*2"
+# 命令行首条任务
+PYTHONPATH=src python -m mini_agent "计算 3+5*2"
 
 # 交互模式
-python -m mini_agent
+PYTHONPATH=src python -m mini_agent
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：让 LLM 调 calculate**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "计算 123 * 456"
+PYTHONPATH=src python -m mini_agent "计算 123 * 456"
 ```
 预期输出：
 ```
@@ -166,13 +170,13 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 123 * 456"
 
 **示例 2：LLM 自己能算的就不调工具**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "1+1等于几"
+PYTHONPATH=src python -m mini_agent "1+1等于几"
 ```
 预期：LLM 可能直接回答"2"而不调 calculate——简单算术它自己能做。这取决于 LLM 的判断。
 
 **示例 3：复杂表达式触发工具**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "计算 (100 + 200) * 3 / 5"
+PYTHONPATH=src python -m mini_agent "计算 (100 + 200) * 3 / 5"
 ```
 预期：LLM 调 `calculate({'expression': '(100 + 200) * 3 / 5'})`，结果 180。
 
@@ -186,13 +190,13 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 (100 + 200) * 3 / 5"
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：5 个 PASS + "全部 smoke test 通过"。
 
 2. **让 agent 算数**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "计算 999 * 999"
+   PYTHONPATH=src python -m mini_agent "计算 999 * 999"
    ```
    预期：LLM 调 calculate，结果 998001。
 
@@ -200,8 +204,8 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 (100 + 200) * 3 / 5"
 
 ## 本版完整代码
 
-- [`src/mini_agent/tools/base.py`](../../src/mini_agent/tools/base.py) — Tool / ToolRegistry / ToolExecutor
-- [`src/mini_agent/tools/calc.py`](../../src/mini_agent/tools/calc.py) — calculate 工具
-- [`src/mini_agent/tools/__init__.py`](../../src/mini_agent/tools/__init__.py) — 注册中心
-- [`src/mini_agent/agent.py`](../../src/mini_agent/agent.py) — 改造后的 call_llm + agent_loop
-- [`tests/test_tools.py`](../../tests/test_tools.py) — 工具 smoke test
+- [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.02/src/mini_agent/tools/base.py) — Tool / ToolRegistry / ToolExecutor
+- [`src/mini_agent/tools/calc.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.02/src/mini_agent/tools/calc.py) — calculate 工具
+- [`src/mini_agent/tools/__init__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.02/src/mini_agent/tools/__init__.py) — 注册中心
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.02/src/mini_agent/agent.py) — 改造后的 call_llm + agent_loop
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.02/tests/test_tools.py) — 工具 smoke test

@@ -2,6 +2,10 @@
 
 > 版本 v0.08 | [上一课](07-system-prompt.md) | [下一课](09-permission-upgrade.md)
 
+> 代码快照：`v0.08` · 相邻差异：`v0.07..v0.08` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 之前 agent 能读写文件，却常常不知道项目里有什么、目标内容在哪，或者为了改一行而重写整个文件。
@@ -161,41 +165,41 @@ v0.03 的 `read_file` 只输出文本，LLM 不知道每段来自哪几行。加
 ### 本版可用的命令
 
 ```bash
-# 单次任务
-python -m mini_agent "列出 examples 目录的内容"
+# 命令行首条任务
+PYTHONPATH=src python -m mini_agent "列出 examples 目录的内容"
 
 # 交互模式
-python -m mini_agent
+PYTHONPATH=src python -m mini_agent
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：列目录 + 读文件**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "看看 examples 目录里有什么，然后读取 input.txt"
+PYTHONPATH=src python -m mini_agent "看看 examples 目录里有什么，然后读取 input.txt"
 ```
 预期：agent 先用 `list_dir` 列目录，再用 `read_file` 读取内容，最后回复。
 
 **示例 2：精确编辑文件**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt，把里面的 5 改成 100"
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt，把里面的 5 改成 100"
 ```
 预期：agent 先 `read_file`，再由 `edit_file` 把 `3 + 5 * 2` 改成 `3 + 100 * 2`。这一步会触发 ASK 权限确认。
 
 **示例 3：搜索定位**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "搜索 src 目录下所有包含 calculate 的文件"
+PYTHONPATH=src python -m mini_agent "搜索 src 目录下所有包含 calculate 的文件"
 ```
 预期：`grep` 搜索后，结果以 `file:line: content` 格式返回。
 
 **示例 4：大文件分段读**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 src/mini_agent/agent.py 的第 50 到 70 行"
+PYTHONPATH=src python -m mini_agent "读取 src/mini_agent/agent.py 的第 50 到 70 行"
 ```
-预期：调用 `read_file(offset=50, limit=20)` 后，只返回 20 行，且每行带行号前缀。
+预期：调用 `read_file(offset=50, limit=20)` 后，返回第 51-70 行，共 20 行，且每行带行号前缀。`offset` 是从 0 开始的跳过行数。
 
 ### 本版独有特性
 
@@ -208,29 +212,29 @@ $env:PYTHONPATH="src"; python -m mini_agent "读取 src/mini_agent/agent.py 的�
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：15 个 PASS + "全部 smoke test 通过"。
 
 2. **列目录 + 读文件**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "列出 examples 目录，读取 input.txt"
+   PYTHONPATH=src python -m mini_agent "列出 examples 目录，读取 input.txt"
    ```
 
 3. **精确编辑**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt，把 5 改成 100"
+   PYTHONPATH=src python -m mini_agent "读取 examples/input.txt，把 5 改成 100"
    ```
    跑完后检查 `examples/input.txt` 是否被正确修改。
 
 4. **搜索定位**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "搜索 src 目录下所有包含 PermissionGate 的文件"
+   PYTHONPATH=src python -m mini_agent "搜索 src 目录下所有包含 PermissionGate 的文件"
    ```
 
 ## 本版完整代码
 
-- [`src/mini_agent/tools/file.py`](../../src/mini_agent/tools/file.py) — read_file（加 offset/limit）+ write_file + edit_file + list_dir + grep
-- [`src/mini_agent/permission.py`](../../src/mini_agent/permission.py) — 权限规则（list_dir/grep=ALLOW，edit_file=ASK）
-- [`src/mini_agent/tools/__init__.py`](../../src/mini_agent/tools/__init__.py) — 注册 6 个工具
-- [`tests/test_tools.py`](../../tests/test_tools.py) — 15 个 smoke test
+- [`src/mini_agent/tools/file.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.08/src/mini_agent/tools/file.py) — read_file（加 offset/limit）+ write_file + edit_file + list_dir + grep
+- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.08/src/mini_agent/permission.py) — 权限规则（list_dir/grep=ALLOW，edit_file=ASK）
+- [`src/mini_agent/tools/__init__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.08/src/mini_agent/tools/__init__.py) — 注册 6 个工具
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.08/tests/test_tools.py) — 15 个 smoke test

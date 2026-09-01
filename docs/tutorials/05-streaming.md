@@ -2,6 +2,10 @@
 
 > 版本 v0.05 | [上一课](04-permission-gate.md) | [下一课](06-concurrent-tool-calls.md)
 
+> 代码快照：`v0.05` · 相邻差异：`v0.04..v0.05` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 上一版要等模型生成完整回复后，终端才会显示内容。回复一长，等待会很明显。
@@ -149,21 +153,21 @@ v0.04 的 `agent_loop` 先调用 `call_llm`，再打印 `=== [N] LLM 回复 ===`
 ### 本版可用的命令
 
 ```bash
-# 单次任务（观察打字机效果）
-python -m mini_agent "用一句话介绍你自己"
+# 命令行首条任务（观察打字机效果）
+PYTHONPATH=src python -m mini_agent "用一句话介绍你自己"
 
 # 带工具调用
-python -m mini_agent "计算 123 * 456"
+PYTHONPATH=src python -m mini_agent "计算 123 * 456"
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：观察打字机效果**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "用一句话介绍你自己"
+PYTHONPATH=src python -m mini_agent "用一句话介绍你自己"
 ```
 预期：终端会逐字出现 LLM 的回复，而不是等几秒后一次性弹出。
 注意：回复目前会打印两遍。第一遍来自 `call_llm` 的流式输出，第二遍来自 `__main__.py` 的 `print(reply)`。
@@ -171,7 +175,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "用一句话介绍你自己"
 
 **示例 2：流式 + 工具调用**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "计算 123 * 456"
+PYTHONPATH=src python -m mini_agent "计算 123 * 456"
 ```
 预期输出：
 ```
@@ -190,11 +194,11 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 123 * 456"
 ```bash
 # v0.04（非流式）：等 3-5 秒后一次性弹出
 git checkout v0.04
-$env:PYTHONPATH="src"; python -m mini_agent "详细介绍 Python 的历史"
+PYTHONPATH=src python -m mini_agent "详细介绍 Python 的历史"
 
 # v0.05（流式）：立刻开始逐字出现
 git checkout v0.05
-$env:PYTHONPATH="src"; python -m mini_agent "详细介绍 Python 的历史"
+PYTHONPATH=src python -m mini_agent "详细介绍 Python 的历史"
 ```
 
 ### 本版独有特性
@@ -208,27 +212,27 @@ $env:PYTHONPATH="src"; python -m mini_agent "详细介绍 Python 的历史"
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：8 个 PASS（工具测试不受流式影响）。
 
 2. **观察打字机效果**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "用一句话介绍你自己"
+   PYTHONPATH=src python -m mini_agent "用一句话介绍你自己"
    ```
    预期：终端逐字出现回复。
 
 3. **对比 v0.04 vs v0.05**：
    ```bash
    git checkout v0.04
-   $env:PYTHONPATH="src"; python -m mini_agent "详细介绍 Python 的历史"
+   PYTHONPATH=src python -m mini_agent "详细介绍 Python 的历史"
    # 感受：等几秒后一次性弹出
 
    git checkout v0.05
-   $env:PYTHONPATH="src"; python -m mini_agent "详细介绍 Python 的历史"
+   PYTHONPATH=src python -m mini_agent "详细介绍 Python 的历史"
    # 感受：立刻开始逐字出现
    ```
 
 ## 本版完整代码
 
-- [`src/mini_agent/agent.py`](../../src/mini_agent/agent.py) — 流式 `call_llm` + `agent_loop`
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.05/src/mini_agent/agent.py) — 流式 `call_llm` + `agent_loop`

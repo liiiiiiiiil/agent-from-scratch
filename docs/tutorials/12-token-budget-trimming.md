@@ -2,6 +2,10 @@
 
 > 版本 v0.12 | [上一课](11-context-architecture.md) | [返回教程总览](README.md) | [下一课](13-context-compaction.md)
 
+> 代码快照：`v0.12` · 相邻差异：`v0.11..v0.12` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 对话和工具结果会不断累积。模型的 Context Window（上下文窗口）有限，等到服务端报超限错误时，这一轮请求已经失败了。
@@ -283,7 +287,7 @@ PYTHONPATH=src python -m pytest tests/test_context.py tests/test_loop.py -q
 
 ## 本版完整代码
 
-- `src/mini_agent/context.py` — token 估算、ContextBudget、轮次划分与 TrimPolicy
-- `src/mini_agent/config.py` / `config_example.py` — CONTEXT_WINDOW 配置
-- `tests/test_context.py` — 预算、截断、原子删除和保底行为测试
-- `tests/test_loop.py` — agent loop 与 ContextManager 的集成回归
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.12/src/mini_agent/context.py) — 预算与 TrimPolicy
+- [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.12/src/mini_agent/config.py) — CONTEXT_WINDOW 配置
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.12/tests/test_context.py) — 预算和原子裁剪测试
+- [`tests/test_loop.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.12/tests/test_loop.py) — 集成回归

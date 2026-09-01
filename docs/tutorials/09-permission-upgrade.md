@@ -2,6 +2,10 @@
 
 > 版本 v0.09 | [上一课](08-file-operations.md) | [下一课](10-shell-execution.md)
 
+> 代码快照：`v0.09` · 相邻差异：`v0.08..v0.09` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 上一版只能按工具名决定放行、询问还是拒绝。同一个工具面对不同文件或命令时，往往只能采用同一种处理方式，权限粒度太粗。
@@ -186,11 +190,10 @@ v0.09 的 `approve()` 存 `(tool_name, pattern)` 而不是只存 `tool_name`（`
 
 ```bash
 # 跑测试
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 
 # 验证权限系统
-$env:PYTHONPATH="src"
-python -c "from mini_agent.permission import PermissionPolicy; p = PermissionPolicy({'read_file': {'*': 'allow', '*.env': 'deny'}}); print(p.check('read_file', 'secret.env'))"
+PYTHONPATH=src python -c "from mini_agent.permission import PermissionPolicy; p = PermissionPolicy({'read_file': {'*': 'allow', '*.env': 'deny'}}); print(p.check('read_file', 'secret.env'))"
 # 期望输出: deny
 ```
 
@@ -232,5 +235,5 @@ policy.check("write_file", "anything")  # → allow（approved 追加在末尾�
 
 ## 本版完整代码
 
-- `src/mini_agent/permission.py` — 权限系统核心（Rule 三元组 + check + approve + _extract_pattern）
-- `tests/test_tools.py` — 19 个 smoke test（含 4 个新增二维权限测试）
+- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.09/src/mini_agent/permission.py) — 权限系统核心
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.09/tests/test_tools.py) — 19 个 smoke test

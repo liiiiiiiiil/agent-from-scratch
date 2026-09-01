@@ -23,6 +23,8 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 
 > **当前状态**：最新代码和教程已到 `v0.16`（Plan-driven Execution）。
 
+> **阅读模型**：`docs/tutorials/` 以默认分支上的最新版本为准；每课声明要运行的代码 tag，并把源码索引固定到该 tag。请在主线/网页读教程，在本地 checkout tag 跑代码。历史 tag 不重打，`v0.01` 至 `v0.06` tag 内的旧教程路径只是历史副本。
+
 ## 为什么用这个仓库学 Agent
 
 - **零第三方依赖** —— 全程只用 Python 标准库（`http.client` / `json` / `concurrent.futures`），不装 LangChain、不装 requests。代码自包含，每一行都能读懂。
@@ -91,6 +93,7 @@ python -m mini_agent "帮我算一下 123 * 456"
     <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">上下文架构</a></td><td>将持久执行状态与可裁剪的对话上下文分离。</td></tr>
     <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token 并按完整对话轮次安全裁剪历史。</td></tr>
     <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务的遗忘。</td></tr>
+    <tr><td><strong>v0.13.1</strong></td><td><a href="./docs/tutorials/13-context-compaction.md#v0131-增补context-observability">Context Observability 增补</a></td><td>提供上下文 token 统计、裁剪/压缩事件和结构化快照。</td></tr>
     <tr><th colspan="3">阶段五 · 项目感知与任务编排</th></tr>
     <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">Project Instructions</a></td><td>自动发现并注入项目级 AGENTS.md 指令。</td></tr>
     <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">Todo / Task State</a></td><td>用显式 Todo 状态跟踪多步任务进度。</td></tr>
@@ -111,6 +114,8 @@ git checkout v0.01          # 切到第一版
 git checkout v0.02          # 看差异：git diff v0.01..v0.02
 # 按教程总览中的阶段和版本顺序继续学习
 ```
+
+命令行参数是首条任务，不是一次性模式；处理后仍进入交互循环，可用空行、`exit`、`quit` 或 EOF 退出。教程命令默认使用 Bash/zsh；PowerShell 先设置 `$env:PYTHONPATH="src"`，再运行对应的 `python ...` 命令。
 
 ## 项目结构
 

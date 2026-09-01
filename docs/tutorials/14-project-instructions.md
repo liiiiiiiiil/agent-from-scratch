@@ -2,6 +2,8 @@
 
 > 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | [下一课：v0.15 Todo / Task State](15-task-state.md)
 
+> 代码快照：`v0.14` · 相邻差异：`v0.13.1..v0.14` · 命令环境：Bash/zsh
+
 ## 本课目标
 
 压缩能让对话变短，却不会让模型自动知道仓库的测试命令、代码风格和禁止操作。把这些规则只写在项目文件里，模型就可能看不到。本课让 Agent 启动时读取适用的 `AGENTS.md`，并把内容作为每次 LLM 请求都会携带的项目指令。这里的 Project Instructions（项目指令）有明确边界：它提示模型如何做，不直接授予工具权限。
@@ -15,13 +17,13 @@
 
 ## 前置条件与版本切换
 
-- Python 3.9+，仓库运行时仍然只有标准库依赖。
+- Python 3.10+，仓库运行时仍然只有标准库依赖。该历史 tag 的 `pyproject.toml` 仍写 3.9，但源码已经使用 3.10 语法，应以 3.10+ 运行。
 - 已读 [第 13 课](13-context-compaction.md)，理解 `ContextManager`、`AgentState` 和历史压缩。
 
 ```bash
 git checkout v0.14
-git diff --stat v0.13..v0.14
-git diff v0.13..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_instructions.py tests/test_prompt.py tests/test_context.py
+git diff --stat v0.13.1..v0.14
+git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_instructions.py tests/test_prompt.py tests/test_context.py
 ```
 
 ## 新增与改动文件
@@ -135,13 +137,10 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 
 ## 本版特性、下一课与代码索引
 
-- [instructions.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/instructions.py)
-- [prompt.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/prompt.py)
-- [context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/context.py)
-- [__main__.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/__main__.py)
-- [test_instructions.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_instructions.py)
-- [test_prompt.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_prompt.py)
-- [test_context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_context.py)
+- [`src/mini_agent/instructions.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.14/src/mini_agent/instructions.py)
+- [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.14/src/mini_agent/prompt.py)
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.14/src/mini_agent/context.py)
+- [`tests/test_instructions.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.14/tests/test_instructions.py)
 
 ### 本版独有特性与下一课
 

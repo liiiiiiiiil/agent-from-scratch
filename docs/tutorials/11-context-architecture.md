@@ -2,6 +2,10 @@
 
 > 版本 v0.11 | [上一课](10-shell-execution.md) | [返回教程总览](README.md)
 
+> 代码快照：`v0.11` · 相邻差异：`v0.10..v0.11` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 对话变长后，agent 不能永远把所有内容都发给模型。可是任务进度、改过哪些文件、发生过哪些错误，又不能随着旧消息一起丢掉。
@@ -130,7 +134,7 @@ def agent_loop(context_manager, tool_executor): ...
 
 loop 只向 `context_manager.history` 追加 assistant 和 tool 消息，不把 AgentState 序列化到 messages。
 
-这也消除了 v0.10 的一个隐患：以前达到 `MAX_ITERATIONS` 后提前返回时，messages 可能停在“有 tool_calls、没有对应 tool 结果”的半截状态。现在每轮一定会回灌全部 tool 结果，再进入下一轮或返回，因此协议保持合法。
+这保留了既有协议不变量：同一轮的全部 tool calls 都会得到对应的 `role=tool` 结果，再进入下一轮。v0.11 的变化是把消息准备与执行状态的职责显式拆开，并没有修复一个来自 v0.10 的“半截状态”缺陷。
 
 ## 为什么这样设计
 
@@ -216,9 +220,8 @@ PYTHONPATH=src python -m mini_agent "读取 examples/input.txt 并计算里面�
 
 ## 本版完整代码
 
-- `src/mini_agent/state.py` — AgentState + record_tool + snapshot
-- `src/mini_agent/context.py` — ContextManager（prepare_messages 恒等返回）
-- `src/mini_agent/agent.py` — agent_loop(context_manager, tool_executor)
-- `src/mini_agent/tools/base.py` — ToolExecutor 加 on_result 回调
-- `src/mini_agent/__main__.py` — 组装注入
-- `tests/test_state.py` / `tests/test_context.py` / `tests/test_executor.py` — 29 个新增单测
+- [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.11/src/mini_agent/state.py) — AgentState
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.11/src/mini_agent/context.py) — ContextManager
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.11/src/mini_agent/agent.py) — agent loop
+- [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.11/src/mini_agent/tools/base.py) — Executor 回调
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.11/tests/test_context.py) — 上下文测试

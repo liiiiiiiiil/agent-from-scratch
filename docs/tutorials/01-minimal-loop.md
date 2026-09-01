@@ -2,6 +2,10 @@
 
 > 版本 v0.01 | [下一课](02-first-tool.md)
 
+> 代码快照：`v0.01` · 相邻差异：无（首版） · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.9+。
+
 ## 本课目标
 
 这一课先解决一个最基础的问题：怎样让程序把用户的话交给 LLM，并拿回最终回答。
@@ -114,7 +118,7 @@ def agent_loop(messages):
 
 `src/mini_agent/__main__.py` 支持两种模式：
 
-- **单次任务**：`python -m mini_agent "你的任务"` — 把命令行参数当 user 消息，调一次 loop
+- **命令行首条任务**：`PYTHONPATH=src python -m mini_agent "你的任务"` — 先处理参数，再进入同一个交互循环
 - **交互模式**：`python -m mini_agent` — 进入 `你: ` 提示符，每输一行调一次 loop，`exit`/`quit` 退出
 
 两种模式共用同一个 `messages` 列表，所以交互模式下跨轮有上下文。
@@ -142,23 +146,23 @@ def agent_loop(messages):
 ### 本版可用的命令
 
 ```bash
-# 单次任务模式
-python -m mini_agent "你好"
+# 命令行首条任务模式
+PYTHONPATH=src python -m mini_agent "你好"
 
 # 交互模式
-python -m mini_agent
+PYTHONPATH=src python -m mini_agent
 
 # 跑 smoke test（验证 import 链路）
-$env:PYTHONPATH="src"; python tests/test_loop.py
+PYTHONPATH=src python tests/test_loop.py
 ```
 
-> 未 `pip install -e .` 时需先设 `PYTHONPATH=src`（Windows PowerShell 用 `$env:PYTHONPATH="src"`）。
+> 本课命令按 Bash/zsh 编写；未 `pip install -e .` 时需要显式设置 `PYTHONPATH=src`。处理完命令行首条任务后，程序仍会进入交互循环；输入空行、`exit`、`quit` 或发送 EOF 可退出。
 
 ### 本版典型示例
 
-**示例 1：单次任务**
+**示例 1：命令行首条任务**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "用一句话介绍你自己"
+PYTHONPATH=src python -m mini_agent "用一句话介绍你自己"
 ```
 预期输出：
 ```
@@ -170,7 +174,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "用一句话介绍你自己"
 
 **示例 2：交互模式**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent
+PYTHONPATH=src python -m mini_agent
 ```
 进入后：
 ```
@@ -196,25 +200,25 @@ $env:PYTHONPATH="src"; python -m mini_agent
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_loop.py
+   PYTHONPATH=src python tests/test_loop.py
    ```
-   预期：打印 `PASS: ...` 四行 + `全部 smoke test 通过`。
+   预期：打印 3 个 `PASS: ...` 和 `全部 smoke test 通过`。
 
-2. **单次任务**：
+2. **命令行首条任务**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "1+1等于几"
+   PYTHONPATH=src python -m mini_agent "1+1等于几"
    ```
    预期：LLM 回答"2"（它自己算的，不是调工具——v0.01 没工具）。
 
 3. **交互模式测上下文**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent
+   PYTHONPATH=src python -m mini_agent
    ```
    先输 `我叫张三`，再输 `我叫什么？`，预期 LLM 能答出"张三"。
 
 ## 本版完整代码
 
-- [`src/mini_agent/agent.py`](../../src/mini_agent/agent.py) — `call_llm` + `agent_loop`
-- [`src/mini_agent/__main__.py`](../../src/mini_agent/__main__.py) — CLI 入口
-- [`src/mini_agent/config.py`](../../src/mini_agent/config.py) — 配置
-- [`tests/test_loop.py`](../../tests/test_loop.py) — smoke test
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.01/src/mini_agent/agent.py) — `call_llm` + `agent_loop`
+- [`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.01/src/mini_agent/__main__.py) — CLI 入口
+- [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.01/src/mini_agent/config.py) — 配置
+- [`tests/test_loop.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.01/tests/test_loop.py) — smoke test（预期 3 个 PASS）

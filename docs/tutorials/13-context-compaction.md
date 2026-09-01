@@ -2,6 +2,10 @@
 
 > 版本 v0.13 | [上一课](12-token-budget-trimming.md) | [返回教程总览](README.md)
 
+> 代码快照：`v0.13` · 相邻差异：`v0.12..v0.13` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。`v0.13`/`v0.13.1` 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 v0.12 能把请求压回预算内，但做法是截断或删除旧历史。任务一长，删掉的内容可能正好是模型下一步需要的结论。v0.13 因此加入语义压缩：用一次不带工具的 LLM 请求整理旧轮次，得到 `Historical Summary`（历史摘要）；近期原文仍保留，真实执行状态则单独渲染为 `Structured State`（结构化状态）。
@@ -347,9 +351,17 @@ PYTHONPATH=src python -m pytest tests/test_context.py tests/test_loop.py -q
 - 支持多次压缩，事实锚随真实执行状态刷新。
 - `MAX_ITERATIONS` 从 10 提高到 50，允许长任务跨压缩继续执行。
 
-## Context Observability
+## v0.13.1 增补：Context Observability
 
-只看到最终请求成功时，很难知道预算花在哪里、何时裁剪、哪些轮次被压缩。为了让这些过程可见，v0.13 同时提供 token 统计和上下文事件，供教学和调试使用。
+> 代码快照：`v0.13.1` · 相邻差异：`v0.13..v0.13.1` · 命令环境：Bash/zsh
+
+```bash
+git checkout v0.13.1
+git diff --stat v0.13..v0.13.1
+git diff v0.13..v0.13.1 -- src/mini_agent/context.py tests/test_context.py
+```
+
+只看到最终请求成功时，很难知道预算花在哪里、何时裁剪、哪些轮次被压缩。为了让这些过程可见，v0.13.1 增补 token 统计和上下文事件，供教学和调试使用。
 
 每次主 LLM 请求准备完成后，默认会打印实际发送消息的 token 统计：
 
@@ -387,20 +399,14 @@ CONTEXT_OBSERVABILITY = False
 
 ## 本版特性、下一课与代码索引
 
-到这里，阶段四形成完整链路：v0.11 分离 State 和 Context，v0.12 建立预算和保证协议安全的 trimming，v0.13 用 Summary + State 减少裁剪带来的遗忘，再通过统计和事件展示过程。
+到这里，阶段四形成完整链路：v0.11 分离 State 和 Context，v0.12 建立预算和保证协议安全的 trimming，v0.13 用 Summary + State 减少裁剪带来的遗忘，v0.13.1 再通过统计和事件展示过程。
 
 下一课 v0.14 会加入 Project Instructions，让项目规则作为受保护上下文参与每次请求。后续的规划能力仍应复用 ContextManager 和 AgentState，不应把计划逻辑重新放回核心 loop。
 
 ## 本版完整代码
 
-- `src/mini_agent/context.py` — Structured State、Historical Summary、compact 与自动触发
-- `src/mini_agent/agent.py` — 无工具、无终端流式输出的 summarize_messages
-- `src/mini_agent/config.py` / `config_example.py` — MAX_ITERATIONS = 50
-
-- [context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/context.py)
-- [agent.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/agent.py)
-- [config.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/config.py)
-- [test_context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_context.py)
-- [test_loop.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_loop.py)
-- `tests/test_context.py` — 压缩、降级、自动触发和多次压缩测试
-- `tests/test_loop.py` — 长任务迭代上限回归
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/context.py) — v0.13 压缩实现
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/agent.py) — v0.13 摘要请求
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/tests/test_context.py) — v0.13 压缩测试
+- [`src/mini_agent/context.py @ v0.13.1`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/src/mini_agent/context.py) — Context Observability
+- [`tests/test_context.py @ v0.13.1`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/tests/test_context.py) — 观测性测试

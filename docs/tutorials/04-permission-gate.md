@@ -2,6 +2,10 @@
 
 > 版本 v0.04 | [上一课](03-file-tools.md) | [下一课](05-streaming.md)
 
+> 代码快照：`v0.04` · 相邻差异：`v0.03..v0.04` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 上一课的 `write_file` 收到调用后会直接覆盖文件。模型一旦选错路径，用户没有机会阻止。
@@ -151,18 +155,18 @@ ASK 把决定留到调用发生时。规则只说明这个工具需要确认，�
 ### 本版可用的命令
 
 ```bash
-# 单次任务（可能触发权限交互）
-python -m mini_agent "把'hello'写入 examples/test.txt"
+# 命令行首条任务（可能触发权限交互）
+PYTHONPATH=src python -m mini_agent "把'hello'写入 examples/test.txt"
 
 # 跑 smoke test（不触发交互，用放行策略绕过）
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：write_file 触发权限交互**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "把'测试内容'写入 examples/test.txt"
+PYTHONPATH=src python -m mini_agent "把'测试内容'写入 examples/test.txt"
 ```
 预期输出：
 ```
@@ -177,13 +181,13 @@ $env:PYTHONPATH="src"; python -m mini_agent "把'测试内容'写入 examples/te
 
 **示例 2：read_file 不触发权限**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt"
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt"
 ```
 预期：read_file 是 ALLOW，直接执行，不问。
 
 **示例 3：拒绝后 LLM 的反应**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "把'hello'写入 examples/test.txt"
+PYTHONPATH=src python -m mini_agent "把'hello'写入 examples/test.txt"
 # 在权限提示时输入 reject
 ```
 预期：LLM 收到"权限拒绝"后，会告知用户"你没有授权我写文件"或换方式完成任务。
@@ -198,26 +202,26 @@ $env:PYTHONPATH="src"; python -m mini_agent "把'hello'写入 examples/test.txt"
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：8 个 PASS（含"write_file 被 DENY 策略拒绝"）。
 
 2. **触发权限交互**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "把'hello'写入 examples/test.txt"
+   PYTHONPATH=src python -m mini_agent "把'hello'写入 examples/test.txt"
    ```
    在权限提示时输入 `once`，预期文件被写入。
 
 3. **测试 always**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent
+   PYTHONPATH=src python -m mini_agent
    ```
    输入"把'hello'写入 examples/a.txt"，权限提示时输入 `always`。
    再输入"把'world'写入 examples/b.txt"，预期**不再问权限**直接写。
 
 ## 本版完整代码
 
-- [`src/mini_agent/permission.py`](../../src/mini_agent/permission.py) — PermissionPolicy + PermissionGate
-- [`src/mini_agent/tools/base.py`](../../src/mini_agent/tools/base.py) — ToolExecutor 加 gate 参数
-- [`src/mini_agent/tools/__init__.py`](../../src/mini_agent/tools/__init__.py) — import PermissionGate
-- [`tests/test_tools.py`](../../tests/test_tools.py) — 含权限测试（放行/DENY）
+- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.04/src/mini_agent/permission.py) — PermissionPolicy + PermissionGate
+- [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.04/src/mini_agent/tools/base.py) — ToolExecutor 加 gate 参数
+- [`src/mini_agent/tools/__init__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.04/src/mini_agent/tools/__init__.py) — import PermissionGate
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.04/tests/test_tools.py) — 含权限测试（放行/DENY）

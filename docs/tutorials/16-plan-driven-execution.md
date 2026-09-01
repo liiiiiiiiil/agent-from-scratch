@@ -2,6 +2,8 @@
 
 > 稳定版本 v0.16 | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
 
+> 代码快照：`v0.16` · 相邻差异：`v0.15..v0.16` · 命令环境：Bash/zsh
+
 ## 本课目标
 
 第 15 课的 Todo 能记录计划，但“标记完成”不代表文件真的改过，也不代表改完后检查仍会通过。比如模型可能把“运行测试”设为 completed，却从未执行测试。
@@ -29,6 +31,7 @@ Plan -> Execute -> Observe -> Replan -> Verify -> done
 git checkout v0.15
 git diff --stat v0.15..v0.16
 git diff v0.15..v0.16 -- src/mini_agent/state.py src/mini_agent/agent.py src/mini_agent/context.py src/mini_agent/tools/shell.py
+git checkout v0.16
 ```
 
 切换回工作区版本后再运行本课示例。
@@ -180,14 +183,8 @@ PYTHONPATH=src python tests/test_context.py
 
 v0.16 的独有能力是“generation 绑定的验证证据、一次性完成提醒，以及明确的 done/blocked/failed 状态”。下一版本仍在规划中；运行时不会自动保存计划，也不会替用户决定验证命令。
 
-- [state.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/state.py)
-- [agent.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/agent.py)
-- [context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/context.py)
-- [prompt.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/prompt.py)
-- [shell.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/tools/shell.py)
-- [base.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/tools/base.py)
-- [__main__.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/__main__.py)
-- [test_state.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_state.py)
-- [test_loop.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_loop.py)
-- [test_context.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_context.py)
-- [test_tools.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/tests/test_tools.py)
+- [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/state.py)
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/context.py)
+- [`src/mini_agent/tools/shell.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/tools/shell.py)
+- [`tests/test_stage5_e2e.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_stage5_e2e.py)

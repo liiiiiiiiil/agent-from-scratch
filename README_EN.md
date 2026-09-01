@@ -23,6 +23,8 @@
 
 > **Current status**: The code and tutorials are up to `v0.16` (Plan-driven Execution).
 
+> **Reading model**: The authoritative tutorials are the current files under `docs/tutorials/` on the default branch. Each lesson names one code tag and links source files to that immutable snapshot. Read the current tutorial online, then check out its tag locally to run the code. Historical tags are not rewritten; tutorial paths inside `v0.01` through `v0.06` are historical copies.
+
 ## Why learn agents with this repo
 
 - **Zero third-party dependencies** — Pure Python standard library throughout (`http.client` / `json` / `concurrent.futures`). No LangChain, no requests. Self-contained, every line is readable.
@@ -91,6 +93,7 @@ Tutorials are organized by capability stage, while versions remain the basic uni
     <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">Context architecture</a></td><td>Separate durable execution state from the trimmable conversation context.</td></tr>
     <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">Budget and trimming</a></td><td>Estimate tokens and safely trim complete conversation rounds.</td></tr>
     <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">Context compaction</a></td><td>Use historical summaries and structured state to reduce long-task forgetting.</td></tr>
+    <tr><td><strong>v0.13.1</strong></td><td><a href="./docs/tutorials/13-context-compaction.md#v0131-context-observability">Context Observability addendum</a></td><td>Expose token statistics, trim/compact events, and structured snapshots.</td></tr>
     <tr><th colspan="3">Stage 5 · Project-Aware Task Orchestration</th></tr>
     <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">Project Instructions</a></td><td>Discover and inject project-level AGENTS.md instructions automatically.</td></tr>
     <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">Todo / Task State</a></td><td>Track multi-step progress with explicit Todo state.</td></tr>
@@ -111,6 +114,8 @@ git checkout v0.01          # switch to v0.01
 git checkout v0.02          # see the diff: git diff v0.01..v0.02
 # continue by the stage and version order in the tutorial overview
 ```
+
+A command-line argument supplies the first task; it does not make the process one-shot. The CLI then enters the interactive loop, which you can leave with an empty line, `exit`, `quit`, or EOF. Tutorial commands target Bash/zsh. In PowerShell, set `$env:PYTHONPATH="src"` first and then run the corresponding `python ...` command.
 
 ## Project Structure
 

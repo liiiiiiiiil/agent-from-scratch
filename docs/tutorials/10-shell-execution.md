@@ -2,6 +2,10 @@
 
 > 版本 v0.10 | [上一课](09-permission-upgrade.md) | [返回教程总览](README.md)
 
+> 代码快照：`v0.10` · 相邻差异：`v0.09..v0.10` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 前几课的 agent 能读写文件和调用工具，却不能自己运行测试或脚本。它修改代码后，仍要依赖用户去终端验证结果。
@@ -128,18 +132,18 @@ LLM 一次就能看到全部输出。若分开返回，它还要分别解析两�
 
 ```bash
 # 跑测试（现在可以用 run_shell 跑了！）
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 
 # 验证 run_shell 工具
-$env:PYTHONPATH="src"
-python -c "from mini_agent.tools import executor; print(executor.execute('run_shell', {'command': 'echo hello'}))"
+PYTHONPATH=src python -c "from mini_agent.tools import executor; print(executor.execute('run_shell', {'command': 'echo hello'}))"
 # 期望输出: hello
 
 # 验证二维权限
-$env:PYTHONPATH="src"
-python -c "from mini_agent.permission import PermissionPolicy; p = PermissionPolicy(); print(p.check('run_shell', 'git status'))"
+PYTHONPATH=src python -c "from mini_agent.permission import PermissionPolicy; p = PermissionPolicy(); print(p.check('run_shell', 'git status'))"
 # 期望输出: allow
 ```
+
+在 POSIX（Linux/macOS）上，`test_run_shell_exit_code` 使用命令 `false`。默认权限规则会询问一次；在提示中输入 `once`，测试随后会继续并完成。Windows 使用已放行的 `python -c "exit(1)"`，不会出现这次确认。
 
 ### 本版典型示例
 
@@ -185,7 +189,7 @@ exec_test.execute("run_shell", {"command": "rm -rf /tmp/nonexist"})
 
 ## 本版完整代码
 
-- `src/mini_agent/tools/shell.py` — run_shell 工具（subprocess + 超时 + 截断）
-- `src/mini_agent/permission.py` — 二维权限规则（含 run_shell 命令模式权限）
-- `src/mini_agent/prompt.py` — header 能力描述更新
-- `tests/test_tools.py` — 22 个 smoke test（含 3 个新增 run_shell 测试）
+- [`src/mini_agent/tools/shell.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.10/src/mini_agent/tools/shell.py) — run_shell 工具
+- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.10/src/mini_agent/permission.py) — 二维权限规则
+- [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.10/src/mini_agent/prompt.py) — header 能力描述更新
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.10/tests/test_tools.py) — 22 个 smoke test

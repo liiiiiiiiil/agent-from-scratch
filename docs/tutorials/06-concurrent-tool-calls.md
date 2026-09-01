@@ -2,6 +2,10 @@
 
 > 版本 v0.06 | [上一课](05-streaming.md) | [下一课](07-system-prompt.md)
 
+> 代码快照：`v0.06` · 相邻差异：`v0.05..v0.06` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。`v0.06`/`v0.06.1` 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 上一版同一轮收到多个工具调用时，会一个接一个执行。只要其中一个工具在等待文件或网络，后面的调用也只能等着。
@@ -111,17 +115,17 @@ v0.04 的 `PermissionGate` 已经准备了 `self._ask_lock = threading.Lock()`�
 
 ```bash
 # 让 LLM 一次调多个工具（观察并发）
-python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_tools.py
+PYTHONPATH=src python tests/test_tools.py
 ```
 
 ### 本版典型示例
 
 **示例 1：并发读取两个文件**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt，告诉我两个文件的内容"
+PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt，告诉我两个文件的内容"
 ```
 预期输出：
 ```
@@ -140,7 +144,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
 
 **示例 2：并发计算 + 读取**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "计算 100*200，同时读取 examples/input.txt"
+PYTHONPATH=src python -m mini_agent "计算 100*200，同时读取 examples/input.txt"
 ```
 预期：LLM 一次发 `calculate` + `read_file` 两个 tool_calls，线程池并发执行。
 
@@ -148,11 +152,11 @@ $env:PYTHONPATH="src"; python -m mini_agent "计算 100*200，同时读取 examp
 ```bash
 # v0.05（串行）：两个 read_file 依次执行
 git checkout v0.05
-$env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
 
 # v0.06（并发）：两个 read_file 同时执行
 git checkout v0.06
-$env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
 ```
 
 ### 本版独有特性
@@ -165,36 +169,44 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_tools.py
+   PYTHONPATH=src python tests/test_tools.py
    ```
    预期：8 个 PASS。
 
 2. **并发读取两个文件**：
    ```bash
-   $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+   PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
    ```
    预期：两个 read_file 的 Executor 日志几乎同时出现，结果一起回灌。
 
 3. **对比 v0.05 vs v0.06**：
    ```bash
    git checkout v0.05
-   $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+   PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
    # 串行：第一个 read_file 结果打印后，第二个才开始
 
    git checkout v0.06
-   $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
+   PYTHONPATH=src python -m mini_agent "同时读取 examples/input.txt 和 examples/input2.txt"
    # 并发：两个 read_file 的 Executor 日志几乎同时出现
    ```
 
 ## 本版完整代码
 
-- [`src/mini_agent/agent.py`](../../src/mini_agent/agent.py) — agent_loop 里 tool_calls 并发执行
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.06/src/mini_agent/agent.py) — agent_loop 里 tool_calls 并发执行
 
 ---
 
 ## v0.06.1 修订：多轮上下文状态契约
 
 > 版本 v0.06.1 | v0.06 的 patch，不改功能，只修多轮上下文的隐性 bug。
+
+> 代码快照：`v0.06.1` · 相邻差异：`v0.06..v0.06.1` · 命令环境：Bash/zsh
+
+```bash
+git checkout v0.06.1
+git diff --stat v0.06..v0.06.1
+git diff v0.06..v0.06.1 -- src/mini_agent/agent.py src/mini_agent/__main__.py
+```
 
 ### 发现的问题
 
@@ -205,7 +217,7 @@ $env:PYTHONPATH="src"; python -m mini_agent "同时读取 examples/input.txt 和
 
 1. **`__main__.py` 两条路径分叉**：argv 分支和交互循环分支维护 messages 的方式不同。虽然 argv 分支实际上依靠副作用拿到了完整状态，但读代码时很难确认调用后列表是什么样，后续维护容易出错。
 
-2. **半截状态未文档化**：当 `agent_loop` 因达到 `MAX_ITERATIONS` 提前返回 `"达到最大迭代次数"` 时，messages 会停在 **"有 tool_calls 但无对应 tool 结果"** 的半截状态。下一轮调用前若不处理，OpenAI 协议会因 `tool_calls` 后缺 `role=tool` 消息而报错。此前这个边界完全没文档。
+2. **迭代上限契约未文档化**：达到 `MAX_ITERATIONS` 时，最后一轮的全部 tool results 已回灌，随后函数才返回 `"达到最大迭代次数"`。此前这个顺序没有写入契约。
 
 ### 修复点（方案 A：不改签名）
 
@@ -228,9 +240,8 @@ def agent_loop(messages):
     返回值是最终 assistant 回复的 content 字符串（仅用于打印），
     真正的上下文状态已写入 messages，调用方无需再手动 append assistant 回复。
 
-    注意：若因达到 MAX_ITERATIONS 提前返回，messages 可能停在
-    "有 tool_calls 但无对应 tool 结果"的半截状态，下一轮调用前
-    调用方有责任处理该状态（当前实现未做清理，长任务可能触发协议错误）。
+    每轮带 tool_calls 的 assistant 消息都会先追加全部对应的
+    role=tool 结果，再继续下一轮或因 MAX_ITERATIONS 返回。
     """
 ```
 
@@ -262,8 +273,7 @@ if len(sys.argv) > 1:
 
 ### 遗留问题（未在本版修）
 
-1. **MAX_ITERATIONS 半截状态清理**：docstring 现在会提示风险，但运行时仍不会自动清理。长任务达到上限后，下一轮仍可能触发协议错误。v0.11 的上下文架构才会要求每轮先回灌全部 tool results。
-2. **`agent_loop` 返回值语义**：当前返回的 content 字符串只用于打印，真正的多轮状态保存在 messages 列表中。这个双通道设计暂时保留，改动签名会影响现有调用。
+1. **`agent_loop` 返回值语义**：当前返回的 content 字符串只用于打印，真正的多轮状态保存在 messages 列表中。这个双通道设计暂时保留，改动签名会影响现有调用。
 
 ### 本版改动文件
 
@@ -272,3 +282,6 @@ src/mini_agent/
 ├── agent.py        # 改：agent_loop docstring 契约化
 └── __main__.py     # 改：统一两路径，加 messages 契约注释
 ```
+
+- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.06.1/src/mini_agent/agent.py) — 明确 messages 副作用契约
+- [`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.06.1/src/mini_agent/__main__.py) — 统一 argv 与交互循环路径

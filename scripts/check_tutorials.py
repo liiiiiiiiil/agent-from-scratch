@@ -20,7 +20,7 @@ def check(path: Path):
     if "git checkout" not in text: errors.append("缺少 git checkout 版本切换命令")
     if "git diff --stat" not in text: errors.append("缺少 git diff --stat 差异入口")
     if not re.search(r"\`\`\`(?:bash|sh|shell)[^\n]*\n[\s\S]*?(pytest|python tests/)", text): errors.append("缺少可执行测试命令")
-    if not re.search(r"\[[^]]+\]\(/[^)]+\.py(?::\d+)?\)", text): errors.append("缺少实现文件索引链接")
+    if not re.search(r"\[[^]]+\]\(https://github\.com/liiiiiiiiil/agent-from-scratch/blob/v[^/]+/[^)]+\.py\)", text): errors.append("缺少 tag 固定实现文件索引链接")
     return errors
 def main(argv):
     paths = [ROOT / arg for arg in argv] if argv else [latest_tutorial()]

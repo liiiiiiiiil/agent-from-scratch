@@ -2,6 +2,10 @@
 
 > 版本 v0.07 | [上一课](06-concurrent-tool-calls.md) | [下一课](08-file-operations.md)
 
+> 代码快照：`v0.07` · 相邻差异：`v0.06.1..v0.07` · 命令环境：Bash/zsh
+>
+> 运行要求：Python 3.10+。该 tag 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+
 ## 本课目标
 
 上一版只用一行 system prompt（系统提示词，给模型的固定工作说明）。模型因此可能不知道当前目录、平台和应遵守的工作方式。
@@ -190,20 +194,20 @@ mini_agent 对接 GLM 系列，并不需要它，所以这里不照搬。
 
 ```bash
 # 看 system prompt 完整内容
-$env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
+PYTHONPATH=src python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 
 # 跑 smoke test
-$env:PYTHONPATH="src"; python tests/test_prompt.py
+PYTHONPATH=src python tests/test_prompt.py
 
 # 实跑 agent，观察行为变化
-$env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下你自己"
+PYTHONPATH=src python -m mini_agent "你好，简单介绍下你自己"
 ```
 
 ### 本版典型示例
 
 **示例 1：查看组装后的 system prompt**
 ```bash
-$env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
+PYTHONPATH=src python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
 预期输出：按顺序包含身份描述、`<rules>` 行为规范和 `<env>` 环境信息三段。
 
@@ -211,17 +215,17 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 ```bash
 # v0.06：一行 prompt，模型可能啰嗦或加 emoji
 git checkout v0.06
-$env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下自己"
+PYTHONPATH=src python -m mini_agent "你好，简单介绍下自己"
 
 # v0.07：规范 prompt，模型简洁、无 emoji、Markdown 格式
 git checkout v0.07
-$env:PYTHONPATH="src"; python -m mini_agent "你好，简单介绍下自己"
+PYTHONPATH=src python -m mini_agent "你好，简单介绍下自己"
 ```
 预期：v0.07 的回复通常更简洁、更有结构、不带 emoji，并会说明自己是 mini_agent。模型输出仍可能有差异。
 
 **示例 3：环境信息帮助路径解析**
 ```bash
-$env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt 并告诉我内容"
+PYTHONPATH=src python -m mini_agent "读取 examples/input.txt 并告诉我内容"
 ```
 预期：模型能从 `<env>` 取得工作目录，因此可以正确解析相对路径，而不必猜测。
 
@@ -235,29 +239,29 @@ $env:PYTHONPATH="src"; python -m mini_agent "读取 examples/input.txt 并告诉
 
 1. **跑 smoke test**：
    ```bash
-   $env:PYTHONPATH="src"; python tests/test_prompt.py
+   PYTHONPATH=src python tests/test_prompt.py
    ```
    预期：4 个 PASS（组装成功 / header build / 未知回退 / 环境字段）。
 
 2. **查看 system prompt 内容**：
    ```bash
-   $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
+   PYTHONPATH=src python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
    ```
    预期：输出含 `mini_agent`、`<rules>`、`<env>` 三段。
 
 3. **对比 v0.06 vs v0.07 行为**：
    ```bash
    git checkout v0.06
-   $env:PYTHONPATH="src"; python -m mini_agent "你好"
+   PYTHONPATH=src python -m mini_agent "你好"
    # v0.06：可能啰嗦、加 emoji、不报身份
 
    git checkout v0.07
-   $env:PYTHONPATH="src"; python -m mini_agent "你好"
+   PYTHONPATH=src python -m mini_agent "你好"
    # v0.07：简洁、Markdown、自报 mini_agent 身份
    ```
 
 ## 本版完整代码
 
-- [`src/mini_agent/prompt.py`](../../src/mini_agent/prompt.py) — 分层组装 system prompt
-- [`src/mini_agent/__main__.py`](../../src/mini_agent/__main__.py) — 入口调用 `build_system_prompt()`
-- [`tests/test_prompt.py`](../../tests/test_prompt.py) — smoke test
+- [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.07/src/mini_agent/prompt.py) — 分层组装 system prompt
+- [`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.07/src/mini_agent/__main__.py) — 入口调用 `build_system_prompt()`
+- [`tests/test_prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.07/tests/test_prompt.py) — smoke test
