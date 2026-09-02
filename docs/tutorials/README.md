@@ -72,9 +72,16 @@ PYTHONPATH=src python tests/test_tools.py
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| v0.14 | 项目级指令（Project Instructions） | [14-project-instructions.md](14-project-instructions.md) |
-| v0.15 | 任务清单与状态（Todo / Task State） | [15-task-state.md](15-task-state.md) |
-| v0.16 | 计划驱动执行（Plan-driven Execution） | [16-plan-driven-execution.md](16-plan-driven-execution.md) |
+| v0.14 | 项目级指令 | [14-project-instructions.md](14-project-instructions.md) |
+| v0.15 | 任务清单与状态 | [15-task-state.md](15-task-state.md) |
+| v0.16 | 计划驱动执行 | [16-plan-driven-execution.md](16-plan-driven-execution.md) |
+
+### 阶段六：Reliable Execution
+
+这一阶段聚焦失败事实、受限恢复与验证：Agent 记录可审计的执行失败，基于事实选择边界明确的恢复动作，并用新的验证证据决定继续、阻塞或失败。
+
+| 版本 | 主题 | 状态 |
+|---|---|---|
 | v0.17 | Failure Model | [17-failure-model.md](17-failure-model.md) |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 

@@ -94,9 +94,10 @@ python -m mini_agent "帮我算一下 123 * 456"
     <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token 并按完整对话轮次安全裁剪历史。</td></tr>
     <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务的遗忘。</td></tr>
     <tr><th colspan="3">阶段五 · 项目感知与任务编排</th></tr>
-    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">项目级指令</a>（Project Instructions）</td><td>自动发现并注入 <code>AGENTS.md</code> 中适用的项目级指令。</td></tr>
-    <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">任务清单与状态</a>（Todo / Task State）</td><td>用结构化任务清单与显式状态跟踪多步任务进度。</td></tr>
-    <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">计划驱动执行</a>（Plan-driven Execution）</td><td>通过计划、执行、观察、重排和验证形成执行闭环。</td></tr>
+    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">项目级指令</a></td><td>自动发现并注入 <code>AGENTS.md</code> 中适用的项目级指令。</td></tr>
+    <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">任务清单与状态</a></td><td>用结构化任务清单与显式状态跟踪多步任务进度。</td></tr>
+    <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">计划驱动执行</a></td><td>通过计划、执行、观察、重排和验证形成执行闭环。</td></tr>
+    <tr><th colspan="3">阶段六 · Reliable Execution</th></tr>
     <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">Failure Model</a></td><td>记录 generation、执行尝试与可审计失败事实。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展恢复、记忆、沙箱等能力。</td></tr>
   </tbody>
