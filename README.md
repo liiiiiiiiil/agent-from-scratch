@@ -21,7 +21,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
-> **当前状态**：最新代码和教程已到 `v0.17`（Failure Model）。
+> **当前状态**：最新代码和教程已到 `v0.17`（失败模型）。
 
 > **阅读模型**：`docs/tutorials/` 以默认分支上的最新版本为准；每课声明要运行的代码 tag，并把源码索引固定到该 tag。请在主线/网页读教程，在本地 checkout tag 跑代码。历史 tag 不重打，`v0.01` 至 `v0.06` tag 内的旧教程路径只是历史副本。
 
@@ -98,7 +98,7 @@ python -m mini_agent "帮我算一下 123 * 456"
     <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">任务清单与状态</a></td><td>用结构化任务清单与显式状态跟踪多步任务进度。</td></tr>
     <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">计划驱动执行</a></td><td>通过计划、执行、观察、重排和验证形成执行闭环。</td></tr>
     <tr><th colspan="3">阶段六 · Reliable Execution</th></tr>
-    <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">Failure Model</a></td><td>记录 generation、执行尝试与可审计失败事实。</td></tr>
+    <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">失败模型</a></td><td>记录 generation、执行尝试与可审计失败事实。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展恢复、记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>

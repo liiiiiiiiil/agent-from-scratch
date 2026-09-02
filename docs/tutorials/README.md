@@ -82,7 +82,7 @@ PYTHONPATH=src python tests/test_tools.py
 
 | 版本 | 主题 | 状态 |
 |---|---|---|
-| v0.17 | Failure Model | [17-failure-model.md](17-failure-model.md) |
+| v0.17 | 失败模型 | [17-failure-model.md](17-failure-model.md) |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 ## 版本与 Git tag
