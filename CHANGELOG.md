@@ -5,19 +5,19 @@
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
 
-## [v0.16] - Plan-driven Execution
+## [v0.16] - 计划驱动执行（Plan-driven Execution）
 
 - Added verification evidence, task reset, completion reminders, and blocked/failed task states.
 - Added `run_shell` purpose enum with unified exit status output.
 - Added stage-five end-to-end acceptance coverage for project instructions, Todo replanning, context compaction, and verification closure.
 
-## [v0.15] - Todo / Task State
+## [v0.15] - 任务清单与状态（Todo / Task State）
 
 - Added state-bound `update_todo` with atomic validation and Structured State rendering.
 - Added per-run registries to isolate Todo state between AgentState instances.
 - v0.15 does not auto-plan, persist todos, or block completion.
 
-## [v0.14] - Project Instructions
+## [v0.14] - 项目级指令（Project Instructions）
 
 ### Added
 - `InstructionLoader`：发现并合并适用的 `AGENTS.md`，保留来源并限制长度。
@@ -25,7 +25,7 @@
 - `docs/tutorials/14-project-instructions.md` 与指令加载测试。
 
 ### Changed
-- CLI 启动时加载项目指令；`build_system_prompt()` 支持 `<project_instructions>` 区块。
+- CLI 启动时加载项目级指令；`build_system_prompt()` 支持 `<project_instructions>` 区块。
 - `ContextManager` 支持独立 protected messages，兼容旧 history 调用。
 
 ### Why

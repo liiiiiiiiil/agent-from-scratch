@@ -1,17 +1,17 @@
-# 第 14 课：Project Instructions
+# 第 14 课：项目级指令（Project Instructions，v0.14）
 
-> 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | [下一课：v0.15 Todo / Task State](15-task-state.md)
+> 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | [下一课：任务清单与状态（Todo / Task State）](15-task-state.md)
 
 > 代码快照：`v0.14` · 相邻差异：`v0.13.1..v0.14` · 命令环境：Bash/zsh
 
 ## 本课目标
 
-压缩能让对话变短，却不会让模型自动知道仓库的测试命令、代码风格和禁止操作。把这些规则只写在项目文件里，模型就可能看不到。本课让 Agent 启动时读取适用的 `AGENTS.md`，并把内容作为每次 LLM 请求都会携带的项目指令。这里的 Project Instructions（项目指令）有明确边界：它提示模型如何做，不直接授予工具权限。
+压缩能让对话变短，却不会让模型自动知道仓库的测试命令、代码风格和禁止操作。把这些规则只写在项目文件里，模型就可能看不到。本课让 Agent 启动时读取适用的 `AGENTS.md`，并把内容作为每次 LLM 请求都会携带的项目级指令。这里的项目级指令（Project Instructions）有明确边界：它提示模型如何做，不直接授予工具权限。
 
 读完本课后，你应能：
 
 - 解释 `AGENTS.md` 的发现范围、合并顺序和长度上限；
-- 说明 Project Instructions 为什么不属于 `history`，以及它如何穿过 trimming/compaction；
+- 说明项目级指令（Project Instructions）为什么不属于 `history`，以及它如何穿过 trimming/compaction；
 - 区分“模型行为提示”和 `PermissionGate` 的实际授权；
 - 用无网络示例和测试验证正常路径、缺失文件、读取失败及截断路径。
 
@@ -30,9 +30,9 @@ git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.
 
 | 文件 | 变化 | 作用 |
 |---|---|---|
-| `src/mini_agent/instructions.py` | 新增 `InstructionLoader` | 发现、读取并合并项目指令 |
-| `src/mini_agent/prompt.py` | `build_system_prompt()` 增加项目指令区块 | 保留身份、规则、环境和项目约束的分层 |
-| `src/mini_agent/context.py` | 支持 `protected_messages` | 项目 system context 不进入 history，也不参与历史裁剪 |
+| `src/mini_agent/instructions.py` | 新增 `InstructionLoader` | 发现、读取并合并项目级指令 |
+| `src/mini_agent/prompt.py` | `build_system_prompt()` 增加项目级指令区块 | 保留身份、规则、环境和项目约束的分层 |
+| `src/mini_agent/context.py` | 支持 `protected_messages` | 项目级 system context 不进入 history，也不参与历史裁剪 |
 | `src/mini_agent/__main__.py` | 启动时加载一次指令 | 将 prompt 作为受保护消息交给 ContextManager |
 | `tests/test_instructions.py` | 新增加载器测试 | 覆盖顺序、非 Git、读取和截断 |
 | `tests/test_prompt.py`、`tests/test_context.py` | 增加注入与保留测试 | 验证 prompt 区块和压缩后的存活性 |
@@ -69,7 +69,7 @@ git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.
 4. 读取发生 `OSError` 时跳过正文并保留 `[读取失败，已跳过]`，不会阻止 Agent 启动。
 5. 总字符数最多 12,000。超限时保留来源和截断标记，例如 `[指令已截断，最多保留 12000 个字符]`。
 
-这里有意把范围收窄。运行时不会执行指令文件里的命令，也不会把自然语言规则转换成权限规则；它不读取 `.cursorrules` 或 `CLAUDE.md`，也不会因为工具访问了新目录就重新加载规则。作用域固定为**进程启动时的 cwd**。因此项目指令只能影响模型的选择，文件写入和 shell 执行仍一定由 `PermissionGate` 决定。
+这里有意把范围收窄。运行时不会执行指令文件里的命令，也不会把自然语言规则转换成权限规则；它不读取 `.cursorrules` 或 `CLAUDE.md`，也不会因为工具访问了新目录就重新加载规则。作用域固定为**进程启动时的 cwd**。因此项目级指令只能影响模型的选择，文件写入和 shell 执行仍一定由 `PermissionGate` 决定。
 
 ### CLI 与上下文边界
 
@@ -86,7 +86,7 @@ context.protected_messages = [{"role": "system", "content": system_prompt}]
 
 ## 设计选择与边界
 
-规则只在进程启动时加载一次，所以来源和作用范围始终清楚。相应地，运行期间新增规则或切换目录时，内容不会自动刷新。项目指令可以影响模型行为，但一定不会改变 `PermissionGate` 的 allow/deny/ask 结果。读取失败只留下来源标记，Agent 仍会启动。
+规则只在进程启动时加载一次，所以来源和作用范围始终清楚。相应地，运行期间新增规则或切换目录时，内容不会自动刷新。项目级指令可以影响模型行为，但一定不会改变 `PermissionGate` 的 allow/deny/ask 结果。读取失败只留下来源标记，Agent 仍会启动。
 
 ## 最小无网络示例
 
@@ -132,7 +132,7 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 - 缺失、空文件和读取异常不会让加载失败；
 - 超长内容不超过上限并包含截断标记；
 - `<project_instructions>` 只在有内容时出现；
-- 项目指令不在 `history` 中，并在 trimming/compaction 后仍存在；
+- 项目级指令不在 `history` 中，并在 trimming/compaction 后仍存在；
 - 指令文本不会改变 `PermissionGate` 的 allow/deny/ask 结果。
 
 ## 本版特性、下一课与代码索引
@@ -144,4 +144,4 @@ PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.
 
 ### 本版独有特性与下一课
 
-v0.14 只让静态项目规则进入 Agent 上下文。它不提供任务计划、动态目录规则或权限升级。下一课 v0.15 会把动态 Todo / Task State 从自然语言中拿出来单独保存，这样压缩后也能恢复。
+v0.14 只让静态项目规则进入 Agent 上下文。它不提供任务计划、动态目录规则或权限升级。下一课 v0.15 会把动态任务清单与状态（Todo / Task State）从自然语言中拿出来单独保存，这样压缩后也能恢复。

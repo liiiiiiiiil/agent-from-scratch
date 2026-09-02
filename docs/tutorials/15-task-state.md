@@ -1,6 +1,6 @@
-# 第 15 课：Todo / Task State（v0.15）
+# 第 15 课：任务清单与状态（Todo / Task State，v0.15）
 
-> 版本 v0.15 | [教程总览](README.md) | [上一课：Project Instructions](14-project-instructions.md) | [下一课：Plan-driven Execution](16-plan-driven-execution.md)
+> 版本 v0.15 | [教程总览](README.md) | [上一课：项目级指令（Project Instructions）](14-project-instructions.md) | [下一课：计划驱动执行（Plan-driven Execution）](16-plan-driven-execution.md)
 
 > 代码快照：`v0.15` · 相邻差异：`v0.14..v0.15` · 命令环境：Bash/zsh
 
@@ -8,7 +8,7 @@
 
 第 14 课让模型读到项目规则，但“还要做什么”仍散落在自然语言和可能被裁剪的消息里。对话一长，计划可能不见，模型也可能给出彼此矛盾的下一步。
 
-v0.15 因此引入显式的 Todo / Task State（待办与任务状态）。模型用 `update_todo` 提交完整列表，运行实例先校验，再存入 `AgentState`。每次请求都会从最新快照生成 Structured State（结构化状态），所以计划不依赖旧消息是否还在。
+v0.15 因此引入显式的任务清单与状态（Todo / Task State）。模型用 `update_todo` 提交完整列表，运行实例先校验，再存入 `AgentState`。每次请求都会从最新快照生成 Structured State（结构化状态），所以计划不依赖旧消息是否还在。
 
 读完本课，你应该能够：
 
@@ -21,7 +21,7 @@ v0.15 因此引入显式的 Todo / Task State（待办与任务状态）。模�
 
 ## 前置条件与版本切换
 
-需要 Python 3.10+，运行时仍只使用标准库。请先阅读[第 14 课](14-project-instructions.md)，了解受保护项目指令和 ContextManager。使用已发布 tag 学习时：
+需要 Python 3.10+，运行时仍只使用标准库。请先阅读[第 14 课](14-project-instructions.md)，了解受保护项目级指令和 ContextManager。使用已发布 tag 学习时：
 
 ```bash
 git checkout v0.15
@@ -183,7 +183,7 @@ PYTHONPATH=src python tests/test_context.py
 
 ## 本版特性、下一课与代码索引
 
-v0.15 提供显式、可校验、可恢复的任务状态，但它不是计划生成器。下一课会在此基础上加入 Plan → Execute → Observe → Replan → Verify、验证证据和 `done/blocked/failed` 收口。
+v0.15 提供显式、可校验、可恢复的任务清单与状态，但它不是计划生成器。下一课会在此基础上加入 Plan → Execute → Observe → Replan → Verify、验证证据和 `done/blocked/failed` 收口。
 
 - [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/state.py)
 - [`src/mini_agent/tools/todo.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/tools/todo.py)

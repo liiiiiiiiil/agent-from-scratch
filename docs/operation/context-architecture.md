@@ -21,7 +21,7 @@ view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义
 启动（__main__.py main()，进程内只做一次）
 │
 ├─ InstructionLoader.load()      root→cwd 逐级收集 AGENTS.md，合并截断 ≤12000 字符
-├─ build_system_prompt()         header 身份 + core_rules 规范 + <env> 环境 + 项目指令
+├─ build_system_prompt()         header 身份 + core_rules 规范 + <env> 环境 + 项目级指令
 └─ protected_messages            只读底座：永不变化，裁剪永不触碰
 
 

@@ -1,6 +1,6 @@
-# 第 16 课：Plan-driven Execution（v0.16）
+# 第 16 课：计划驱动执行（Plan-driven Execution，v0.16）
 
-> 稳定版本 v0.16 | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
+> 稳定版本 v0.16 | [教程总览](README.md) | [上一课：任务清单与状态（Todo / Task State）](15-task-state.md) | 下一课：规划中
 
 > 代码快照：`v0.16` · 相邻差异：`v0.15..v0.16` · 命令环境：Bash/zsh
 
@@ -155,7 +155,7 @@ PY
 
 ### 阶段级 E2E 验收
 
-`tests/test_stage5_e2e.py` 在临时 Git 项目中直接组装 runtime，再用脚本化模型响应完成“加载 AGENTS.md → 建立 Todo → 调查 → 错误修改 → 验证失败 → 重排 Todo → 修正 → 验证通过”。测试预置带工具结果的历史来触发 compaction，并记录每次 `prepare_messages()` 快照。它检查项目指令和 Structured State 在压缩后仍存在，失败验证发生在第二次修改前，最终文件与 `[exit=0]` 证据一致，并且每个 tool call 都有对应的 `role=tool` 结果。
+`tests/test_stage5_e2e.py` 在临时 Git 项目中直接组装 runtime，再用脚本化模型响应完成“加载 AGENTS.md → 建立 Todo → 调查 → 错误修改 → 验证失败 → 重排 Todo → 修正 → 验证通过”。测试预置带工具结果的历史来触发 compaction，并记录每次 `prepare_messages()` 快照。它检查项目级指令和 Structured State 在压缩后仍存在，失败验证发生在第二次修改前，最终文件与 `[exit=0]` 证据一致，并且每个 tool call 都有对应的 `role=tool` 结果。
 
 ```bash
 PYTHONPATH=src python -m pytest -q tests/test_stage5_e2e.py
@@ -181,7 +181,7 @@ PYTHONPATH=src python tests/test_context.py
 
 ## 本版特性、下一课与代码索引
 
-v0.16 的独有能力是“generation 绑定的验证证据、一次性完成提醒，以及明确的 done/blocked/failed 状态”。下一版本仍在规划中；运行时不会自动保存计划，也不会替用户决定验证命令。
+v0.16 计划驱动执行（Plan-driven Execution）的独有能力是“generation 绑定的验证证据、一次性完成提醒，以及明确的 done/blocked/failed 状态”。下一版本仍在规划中；运行时不会自动保存计划，也不会替用户决定验证命令。
 
 - [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/state.py)
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)

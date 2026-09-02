@@ -1,8 +1,8 @@
 # 阶段六：Reliable Execution 实施计划
 
 > 状态：规划中
-> 当前基线：`v0.16`（Plan-driven Execution）
-> 前置阶段：阶段五 Project-Aware Task Orchestration（`v0.14`–`v0.16`）
+> 当前基线：`v0.16`（计划驱动执行，Plan-driven Execution）
+> 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 
 ## 1. 目标与定位

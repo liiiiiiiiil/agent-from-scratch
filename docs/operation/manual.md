@@ -6,17 +6,17 @@
 
 每个任务从 generation 0 开始。可能产生副作用的工具（文件写入、编辑和 execution shell）在权限放行后、handler 前原子推进 generation；即使 handler 失败也不会回退。Executor 产出结构化 `ExecutionResult`，State 保存 `ExecutionAttempt`、`FailureEvent` 和绑定 generation 的 verification evidence。参数以 canonical JSON 的 SHA-256 指纹计数，Structured State 仅显示 hash/脱敏摘要。全只读回合可并发，包含副作用的回合按模型顺序串行提交；verification 不得与副作用同轮。
 
-## v0.16 计划驱动执行
+## v0.16 计划驱动执行（Plan-driven Execution）
 
 复杂任务按 Plan → Execute → Observe → Replan → Verify 闭环执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。这种保守策略不依赖第三方库或命令解析。
 
-## v0.15 Todo 状态
+## v0.15 任务清单与状态（Todo / Task State）
 
 模型可调用 `update_todo` 提交完整任务列表。状态为 `pending`、`in_progress` 或 `completed`，最多一个进行中项；更新失败时旧状态不变。Todo 属于 AgentState，Execution State（工具历史、文件、错误）仍由执行器维护；每轮请求通过 Structured State 注入，压缩后也会恢复。v0.15 不自动规划、持久化或阻断完成。
 
-## v0.14 项目指令
+## v0.14 项目级指令（Project Instructions）
 
-启动时 Agent 会从 Git 根目录到当前工作目录按顺序读取 `AGENTS.md`，并将带来源标记的内容作为受保护 system context 注入每次请求。非 Git 目录只检查当前目录；总长度上限为 12,000 字符。项目指令不会放宽权限，也不会因 trimming 或 compaction 消失。
+启动时 Agent 会从 Git 根目录到当前工作目录按顺序读取 `AGENTS.md`，并将带来源标记的内容作为受保护 system context 注入每次请求。非 Git 目录只检查当前目录；总长度上限为 12,000 字符。项目级指令不会放宽权限，也不会因 trimming 或 compaction 消失。
 
 ## 1. 环境准备
 
@@ -81,7 +81,7 @@ python -m mini_agent
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。每次请求默认显示 token 分桶，并记录 trimming/compaction 事件；可在 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False` 关闭日志。
 
-v0.14 在启动时加载适用的 `AGENTS.md`，并将项目指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
+v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
 ### 3.1 上下文架构
 

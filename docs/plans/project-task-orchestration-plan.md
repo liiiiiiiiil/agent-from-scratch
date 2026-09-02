@@ -1,4 +1,4 @@
-# 阶段五：Project-Aware Task Orchestration 实施计划
+# 阶段五：项目感知与任务编排（Project-Aware Task Orchestration）实施计划
 
 > 状态：已完成（v0.14–v0.16 已实现并验收）
 > 版本映射：v0.14 / v0.15 / v0.16
@@ -15,9 +15,9 @@
 
 | 小阶段 | 版本 | 主题 | 核心问题 | 教程 |
 |---|---|---|---|---|
-| 5.1 | v0.14 | Project Instructions | 在当前项目中必须遵守什么规则？ | `14-project-instructions.md` |
-| 5.2 | v0.15 | Todo / Task State | 准备做什么、当前做到哪一步？ | `15-task-state.md` |
-| 5.3 | v0.16 | Plan-driven Execution | 如何根据结果推进、调整并验证计划？ | `16-plan-driven-execution.md` |
+| 5.1 | v0.14 | 项目级指令（Project Instructions） | 在当前项目中必须遵守什么规则？ | `14-project-instructions.md` |
+| 5.2 | v0.15 | 任务清单与状态（Todo / Task State） | 准备做什么、当前做到哪一步？ | `15-task-state.md` |
+| 5.3 | v0.16 | 计划驱动执行（Plan-driven Execution） | 如何根据结果推进、调整并验证计划？ | `16-plan-driven-execution.md` |
 
 阶段主线：
 
@@ -35,14 +35,14 @@ Replan：根据事实推进或调整 Todo
 Verify：执行验证并记录完成证据
 ```
 
-这三个版本不是三个独立功能：Project Instructions 是规划的约束输入，Todo 是 Agent 的动态工作计划，Execution State 是 Runtime 的事实，Verification 是任务完成的证据；Plan-driven Execution 让它们共同参与任务生命周期。
+这三个版本不是三个独立功能：项目级指令（Project Instructions）是规划的约束输入，任务清单（Todo）是 Agent 的动态工作计划，Execution State 是 Runtime 的事实，Verification 是任务完成的证据；计划驱动执行（Plan-driven Execution）让它们共同参与任务生命周期。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
 - 自动发现并注入适用于当前工作目录的 `AGENTS.md`
-- 区分 Project Instructions、Task State、Execution State、Verification 和 LLM Context
+- 区分项目级指令（Project Instructions）、任务清单与状态（Task State）、Execution State、Verification 和 LLM Context
 - 用显式 Todo 表示复杂任务的动态工作计划
 - 由模型通过受控工具更新 Todo，而不是从自然语言中猜测进度
 - 在 Context compaction 后重新注入准确的项目规则与任务状态
@@ -54,7 +54,7 @@ Verify：执行验证并记录完成证据
 - 不做 `--plan` 只读模式及计划审批/交接协议
 - 不加载 `.cursorrules`、`CLAUDE.md` 等多种指令文件，首版只认 `AGENTS.md`
 - 不做跨进程 Todo 持久化，进程退出后状态仍然消失
-- 不让 Project Instructions 修改 `PermissionGate` 的运行时权限
+- 不让项目级指令（Project Instructions）修改 `PermissionGate` 的运行时权限
 - 不做失败自动重试框架、checkpoint、事务回滚或沙箱隔离
 - 不引入第三方依赖
 
@@ -66,10 +66,10 @@ Verify：执行验证并记录完成证据
 
 | # | 决策 | 理由 |
 |---|---|---|
-| D1 | **Project Instructions 是受保护上下文，不是 history** | 项目规则不应随老对话一起被 trimming 或 compaction 删除 |
+| D1 | **项目级指令（Project Instructions）是受保护上下文，不是 history** | 项目规则不应随老对话一起被 trimming 或 compaction 删除 |
 | D2 | **首版只加载 `AGENTS.md`，作用域为启动时工作目录** | 一个版本只引入一个概念；目标文件级动态指令发现留待真实需求出现后扩展 |
 | D3 | **多层指令按 root → cwd 合并，越近的文件越靠后** | 顺序清晰，便于模型将更具体的规则视为高优先级；不在代码中尝试解析自然语言冲突 |
-| D4 | **Project Instructions 不能放宽 PermissionGate** | 提示词是行为约束，不是安全授权；权限仍只由 `PermissionGate` 决定 |
+| D4 | **项目级指令（Project Instructions）不能放宽 PermissionGate** | 提示词是行为约束，不是安全授权；权限仍只由 `PermissionGate` 决定 |
 | D5 | **Execution State 与 Task State 共享 `AgentState`，但字段所有权不同** | 避免再造平行 `PlanState`；同时防止模型篡改工具执行事实 |
 | D6 | **Execution State 由 Executor 回调维护；Task State 由模型通过 Todo 工具维护** | 事实来自真实执行，计划来自模型意图，两者来源可审计 |
 | D7 | **Todo 是复杂任务的工作机制，不强迫简单任务先规划** | 保持简单任务的最短路径，避免为一次读取或计算增加无意义调用 |
@@ -86,7 +86,7 @@ Verify：执行验证并记录完成证据
 ```text
 System Identity + Core Rules
 + Environment
-+ Project Instructions       # 静态约束，受保护
++ 项目级指令（Project Instructions） # 静态约束，受保护
 + Current Task
 + Structured State
   ├── Task State             # current_goal + dynamic todos
@@ -100,7 +100,7 @@ System Identity + Core Rules
 
 | 信息 | 来源 | 谁维护 | 是否可被压缩 |
 |---|---|---|---|
-| Project Instructions | `AGENTS.md` | `InstructionLoader` | 否 |
+| 项目级指令（Project Instructions） | `AGENTS.md` | `InstructionLoader` | 否 |
 | Task State | Todo / 当前目标 / 阻塞原因 | LLM 经 Todo 工具 | 可重渲染或无损结构化压缩，必须语义保真 |
 | Execution State | 工具结果 / 文件改动 / 错误 | Executor 回调 | 否，事实不可由摘要替代 |
 | Verification | 测试、构建、检查等完成证据 | 工具结果记录，ContextManager 渲染 | 否，证据内容必须准确 |
@@ -108,7 +108,7 @@ System Identity + Core Rules
 
 `AgentState` 是运行时事实、任务进度和验证证据的容器，但不能整体开放给模型修改。Todo 工具只允许更新 Task State 字段，Executor 仍独占 Execution State 与 Verification 的原始执行记录；compaction 只负责重新渲染这些结构化信息。
 
-## 5. v0.14 Project Instructions（5.1）
+## 5. v0.14 项目级指令（Project Instructions，5.1）
 
 ### 5.1 目标
 
@@ -120,8 +120,8 @@ System Identity + Core Rules
 |---|---|---|
 | `src/mini_agent/instructions.py` | 新增 | `InstructionLoader`：发现、读取、合并 `AGENTS.md` |
 | `src/mini_agent/prompt.py` | 修改 | 新增 `<project_instructions>` 分层渲染 |
-| `src/mini_agent/__main__.py` | 修改 | 启动时加载一次项目指令并注入组装流程 |
-| `src/mini_agent/context.py` | 修改 | 明确 Project Instructions 属于 protected context |
+| `src/mini_agent/__main__.py` | 修改 | 启动时加载一次项目级指令并注入组装流程 |
+| `src/mini_agent/context.py` | 修改 | 明确项目级指令（Project Instructions）属于 protected context |
 | `tests/test_instructions.py` | 新增 | 发现顺序、缺失文件、读取失败、边界测试 |
 | `tests/test_prompt.py` | 修改 | prompt 注入 smoke test |
 
@@ -166,7 +166,7 @@ Source: /repo/subdir/AGENTS.md
 1. `InstructionLoader.discover()` + 临时目录单测
 2. 多层 `AGENTS.md` 的 root → cwd 合并 + 来源标记
 3. 空文件、无文件、非 git 目录和读取错误路径
-4. `prompt.py` 增加 Project Instructions 分层
+4. `prompt.py` 增加项目级指令（Project Instructions）分层
 5. `ContextManager` 将指令视为 protected context，预算超限也不删除
 6. CLI 组装接入，手工验证模型能复述并遵守仓库特定规则
 7. 教程、CHANGELOG、README、版本号与 tag `v0.14`（运行时约束变化时同步 AGENTS.md）
@@ -176,12 +176,12 @@ Source: /repo/subdir/AGENTS.md
 - [ ] 当前工作目录适用的 `AGENTS.md` 会被自动发现
 - [ ] 多层文件按 root → cwd 稳定合并，并保留来源信息
 - [ ] 无 `AGENTS.md` 时行为与 v0.13 一致
-- [ ] Project Instructions 不进入 history，不被 trimming/compaction 删除
+- [ ] 项目级指令（Project Instructions）不进入 history，不被 trimming/compaction 删除
 - [ ] 指令不能绕过 `PermissionGate`
 - [ ] 加载上限和截断行为有测试且可观察
 - [ ] 单测不依赖真实用户目录或网络
 
-## 6. v0.15 Todo / Task State（5.2）
+## 6. v0.15 任务清单与状态（Todo / Task State，5.2）
 
 ### 6.1 目标
 
@@ -266,13 +266,13 @@ Todo 工具是内存状态工具，不应触发文件写入权限；它也不能
 - [ ] Structured State 每轮反映最新 Todo，且不会重复膨胀
 - [ ] 简单任务无需 Todo 即可直接完成
 
-## 7. v0.16 Plan-driven Execution（5.3）
+## 7. v0.16 计划驱动执行（Plan-driven Execution，5.3）
 
 ### 7.1 目标
 
 一句话：**让 Todo 从静态 checklist 升级为动态工作协议，使复杂任务按“Plan → Execute → Observe → Replan → Verify”循环推进。**
 
-v0.15 解决“计划存在哪里”，v0.16 解决“什么时候建计划、如何维护，以及何时算完成”。本版仍是单 agent，不增加新的 agent 角色。
+v0.15 解决“计划存在哪里”，v0.16 计划驱动执行（Plan-driven Execution）解决“什么时候建计划、如何维护，以及何时算完成”。本版仍是单 agent，不增加新的 agent 角色。
 
 ### 7.2 动态任务生命周期
 
@@ -364,7 +364,7 @@ class AgentState:
 - [ ] Todo 完成状态不能替代验证证据；最终收口以 Verification 为依据
 - [ ] 未完成 Todo 的最终回复最多触发一次提醒，不会无限循环
 - [ ] 无法完成时能保留未完成状态并如实收口
-- [ ] Project Instructions、Task State、Execution State 和 Verification 经 compaction 后仍准确
+- [ ] 项目级指令（Project Instructions）、任务清单与状态（Task State）、Execution State 和 Verification 经 compaction 后仍准确
 
 ## 8. 测试与验证总表
 
@@ -381,7 +381,7 @@ class AgentState:
 
 最终断言：
 
-- 修改符合 Project Instructions
+- 修改符合项目级指令（Project Instructions）
 - Todo 在多轮执行和 compaction 后保持准确，且作为动态计划可被重排或扩展
 - `files_changed`、`errors`、`tool_history` 与实际执行一致
 - Verification 记录包含实际测试/构建/检查结果，能够支撑完成结论
@@ -396,7 +396,7 @@ class AgentState:
 | 能力 | v0.14 | v0.15 | v0.16 |
 |---|---:|---:|---:|
 | 加载 `AGENTS.md` | 是 | 是 | 是 |
-| Project Instructions 受保护 | 是 | 是 | 是 |
+| 项目级指令（Project Instructions）受保护 | 是 | 是 | 是 |
 | Todo 存入 AgentState |  | 是 | 是 |
 | Todo 工具更新 |  | 是 | 是 |
 | Structured State 渲染 Todo |  | 是 | 是 |
@@ -407,11 +407,11 @@ class AgentState:
 依赖方向必须保持单向：
 
 ```text
-v0.14 Project Instructions
+v0.14 项目级指令（Project Instructions）
     ↓ 提供规划约束
-v0.15 Todo / Task State
+v0.15 任务清单与状态（Todo / Task State）
     ↓ 提供可持久化计划
-v0.16 Plan-driven Execution
+v0.16 计划驱动执行（Plan-driven Execution）
     ↓ 形成任务闭环
 ```
 
@@ -423,7 +423,7 @@ v0.16 Plan-driven Execution
 
 - `AGENTS.md`
   - 阶段五改为 v0.14–v0.16
-  - 路线图替换为 Project Instructions / Todo Task State / Plan-driven Execution
+  - 路线图替换为 项目级指令 / 任务清单与状态 / 计划驱动执行（英文标识保留为 Project Instructions / Todo Task State / Plan-driven Execution）
   - 每版完成时更新“当前架构”和勾选状态
 - `docs/plans/teaching-repo-plan.md`
   - 版本切片表增加 v0.14–v0.16
@@ -434,7 +434,7 @@ v0.16 Plan-driven Execution
   - 教学路径同步阶段五的名称、目标和三个版本
 - `docs/operation/manual.md`
   - v0.14 增加指令加载规则
-  - v0.15 增加 Todo 状态说明
+- v0.15 增加任务清单与状态（Todo / Task State）说明
   - v0.16 增加复杂任务生命周期说明
 - `docs/plans/README.md`
   - 索引加入本计划

@@ -1,6 +1,6 @@
 # 第 17 课：Failure Model（v0.17）
 
-> 稳定版本 v0.17 | [教程总览](README.md) | [上一课：Plan-driven Execution](16-plan-driven-execution.md) | 下一课：规划中
+> 稳定版本 v0.17 | [教程总览](README.md) | [上一课：计划驱动执行（Plan-driven Execution）](16-plan-driven-execution.md) | 下一课：规划中
 >
 > 代码快照：`v0.17` · 相邻差异：`v0.16..v0.17` · 命令环境：Bash/zsh
 

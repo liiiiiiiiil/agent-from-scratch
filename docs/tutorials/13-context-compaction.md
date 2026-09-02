@@ -401,7 +401,7 @@ CONTEXT_OBSERVABILITY = False
 
 到这里，阶段四形成完整链路：v0.11 分离 State 和 Context，v0.12 建立预算和保证协议安全的 trimming，v0.13 用 Summary + State 减少裁剪带来的遗忘，v0.13.1 再通过统计和事件展示过程。
 
-下一课 v0.14 会加入 Project Instructions，让项目规则作为受保护上下文参与每次请求。后续的规划能力仍应复用 ContextManager 和 AgentState，不应把计划逻辑重新放回核心 loop。
+下一课 v0.14 会加入项目级指令（Project Instructions），让项目规则作为受保护上下文参与每次请求。后续的规划能力仍应复用 ContextManager 和 AgentState，不应把计划逻辑重新放回核心 loop。
 
 ## 本版完整代码
 
