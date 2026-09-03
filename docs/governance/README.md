@@ -10,3 +10,4 @@
 - 文件名用小写 + 连字符，如 `http-client-constraint.md`。
 - 每篇文档开头写明：约束内容、原因、违反后果。
 - [教程作者规范](tutorial-authoring.md) 规定版本课程的内容结构与验收要求。
+- [主 README 编写规范](readme-authoring.md) 规定中文命名、章节职责和同步要求。
