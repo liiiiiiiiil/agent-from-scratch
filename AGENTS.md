@@ -37,6 +37,7 @@
 ```bash
 PYTHONPATH=src python -m pytest -q
 PYTHONPATH=src python scripts/check_tutorials.py
+PYTHONPATH=src python scripts/check_readme.py
 ```
 
 未安装 pytest 时，可直接运行 `tests/` 中带标准库入口的 smoke test；运行方式见操作手册。
@@ -45,5 +46,5 @@ PYTHONPATH=src python scripts/check_tutorials.py
 
 - [操作手册](docs/operation/manual.md)：配置、运行、工具和故障排查。
 - [教程索引](docs/tutorials/README.md)：按版本和阶段学习、复现与验收。
-- [治理文档](docs/governance/README.md)：约束、规范和决策记录（含[教程作者规范](docs/governance/tutorial-authoring.md)）。
+- [治理文档](docs/governance/README.md)：约束、规范和决策记录（含[教程作者规范](docs/governance/tutorial-authoring.md)与[主 README 编写规范](docs/governance/readme-authoring.md)）。
 - [计划文档](docs/plans/README.md)：路线图、功能计划和任务拆解。
