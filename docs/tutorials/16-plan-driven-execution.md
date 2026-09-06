@@ -1,6 +1,6 @@
 # 第 16 课：计划驱动执行（Plan-driven Execution，v0.16）
 
-> 稳定版本 v0.16 | [教程总览](README.md) | [上一课：任务清单与状态（Todo / Task State）](15-task-state.md) | 下一课：规划中
+上一课：[任务清单与状态](15-task-state.md) · [教程总览](README.md) · 下一课：规划中
 
 > 代码快照：`v0.16` · 相邻差异：`v0.15..v0.16` · 命令环境：Bash/zsh
 
@@ -19,7 +19,7 @@ Plan -> Execute -> Observe -> Replan -> Verify -> done
 - 解释 `generation` 为什么会让旧验证证据失效。
 - 区分 `run_shell` 的 `execution` 与 `verification`，以及它们对状态的不同影响。
 - 看懂“最终文本回复”出现后，agent loop 如何提醒一次、阻止过早完成并最终收口为 `blocked`。
-- 使用零网络示例和现有测试验证正常路径、失败验证、任务重置和最大迭代失败路径。
+- 能沿着正常路径解释失败验证、任务重置和最大迭代收口。
 
 本课的核心原则是：**计划表达意图，状态记录事实，独立验证才算完成证据。**
 
@@ -48,7 +48,19 @@ git checkout v0.16
 | `src/mini_agent/__main__.py` | 每项任务调用 `begin_task()`；结束时设置 `done`/`failed` | CLI 任务边界和状态生命周期 |
 | `tests/test_state.py`、`test_loop.py`、`test_context.py`、`test_tools.py` | 覆盖 generation、提醒、协议和 shell schema | 本版本的可执行验收 |
 
-## 为什么需要本版
+## 版本变更定位
+
+v0.15 只保存 Todo 意图；v0.16 在 `AgentState` 增加 generation 与验证证据，在 shell 工具中区分 execution/verification，并由 agent loop 在最终回复前执行完成提醒。
+
+```text
+update_todo -> execution 工具 -> generation 递增、证据失效
+           -> verification shell -> 绑定当前 generation 的 evidence
+           -> completion_reminder -> done / blocked / failed
+```
+
+主要消费者是 agent loop 的收口逻辑；本版不自动规划、重试或回滚。
+
+## 为什么这样设计
 
 Todo 的状态变化不等于环境变化。即使测试曾经通过，后面一次写文件也可能破坏结果。因此运行时必须区分“命令已经执行”和“当前代码已经验证”。v0.16 用下面两条规则实现这个区分：
 
@@ -129,55 +141,9 @@ CLI 的 `run_task()` 正常返回且状态仍为 `running` 时会设为 `done`�
 - **不持久化、不撤回流式输出**：任务状态只在当前进程中保存；已经打印的草稿不会被运行时收回。
 - **提醒只一次**：这是防止过早结束的闸门，不是重试策略；缺口持续存在时，状态最终明确为 `blocked`。
 
-## 最小无网络示例
+## 运行与观察
 
-下面直接操作状态层，观察写入为何要求验证、验证如何恢复完成条件，以及新写入如何让旧证据失效：
-
-```bash
-PYTHONPATH=src python - <<'PY'
-from mini_agent.state import AgentState
-
-s = AgentState(task="修改并检查 a.py")
-s.update_todos([{"content": "运行检查", "status": "in_progress"}])
-s.record_tool("write_file", {"path": "a.py"}, True, "written")
-print(s.completion_reminder())                 # verification_required=True
-s.record_tool("run_shell", {"command": "python -m py_compile a.py",
-                             "purpose": "verification"}, True, "[exit=0] ok")
-print(s.has_verification_evidence())            # True
-s.record_tool("edit_file", {"path": "a.py"}, True, "edited")
-print(s.has_verification_evidence())            # False（generation 已改变）
-PY
-```
-
-典型过程是：模型先建立 Todo，写入后看到 `verification_required`，再运行 verification 命令。若命令返回 `[exit=1]` 或 `[timeout]`，状态仍是待验证；模型应根据输出调整 Todo 并重试。
-
-## 测试与验收
-
-### 阶段级 E2E 验收
-
-`tests/test_stage5_e2e.py` 在临时 Git 项目中直接组装 runtime，再用脚本化模型响应完成“加载 AGENTS.md → 建立 Todo → 调查 → 错误修改 → 验证失败 → 重排 Todo → 修正 → 验证通过”。测试预置带工具结果的历史来触发 compaction，并记录每次 `prepare_messages()` 快照。它检查项目级指令和 Structured State 在压缩后仍存在，失败验证发生在第二次修改前，最终文件与 `[exit=0]` 证据一致，并且每个 tool call 都有对应的 `role=tool` 结果。
-
-```bash
-PYTHONPATH=src python -m pytest -q tests/test_stage5_e2e.py
-```
-
-完整测试和本课核心测试都可直接运行：
-
-```bash
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python tests/test_state.py
-PYTHONPATH=src python tests/test_loop.py
-PYTHONPATH=src python tests/test_tools.py
-PYTHONPATH=src python tests/test_context.py
-```
-
-重点验收以下行为：
-
-- execution 不产生通过证据；写入、execution 失败和超时都会使旧证据失效，权限拒绝不会。
-- verification 的零退出码、非零退出码和超时分别得到正确 evidence。
-- 新任务 `begin_task()` 清空运行态但不要求清空会话 history。
-- 最终回复的提醒只注入一次；仍有缺口时状态为 `blocked`；达到迭代上限时为 `failed`。
-- tool call 协议、并发执行和结果顺序保持第 11 课以来的不变量。
+运行一项包含修改和检查的真实任务：写入或 execution shell 后，Agent 会把旧验证标为过期；只有针对当前 generation 的 verification 通过，最终回复才不会收到提醒。提醒最多纠正一次，仍有缺口时进入 `blocked`；命令行首条任务处理后仍继续交互。
 
 ## 本版特性、下一课与代码索引
 
