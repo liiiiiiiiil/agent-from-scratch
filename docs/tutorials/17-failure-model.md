@@ -1,6 +1,6 @@
 # 第 17 课：失败模型（v0.17）
 
-> 稳定版本 v0.17 | [教程总览](README.md) | [上一课：计划驱动执行（Plan-driven Execution）](16-plan-driven-execution.md) | 下一课：规划中
+上一课：[计划驱动执行](16-plan-driven-execution.md) · [教程总览](README.md) · 下一课：规划中
 >
 > 代码快照：`v0.17` · 相邻差异：`v0.16..v0.17` · 命令环境：Bash/zsh
 
@@ -21,7 +21,7 @@ v0.17 为这些问题建立最小的“失败事实模型”（Failure Model）�
 - 解释为什么允许执行的 `possible` 工具即使最终报错，也会先推进 generation。
 - 看懂权限拒绝、参数错误、超时、非零退出和验证失败会如何分类。
 - 解释为何全只读工具调用可以并发，而同一回合出现可能副作用时必须串行。
-- 运行不需要 API Key 或网络的示例和测试，观察失败记录与终态。
+- 根据工具结果和 Structured State 判断失败记录与终态。
 
 本课的原则可以概括为：**模型给出意图，工具给出结果，State 保存可核对的事实。**
 
@@ -48,7 +48,19 @@ git checkout v0.17
 | `src/mini_agent/context.py` | Structured State 显示最近失败、generation、预算和恢复提示 | 历史裁剪或压缩后，关键事实仍可见 |
 | `src/mini_agent/config.py` | 增加失败、重复调用和 repair cycle 的上限配置 | 为后续受限恢复保留可观察的预算边界 |
 
-## 为什么需要本版
+## 版本变更定位
+
+v0.16 已有 generation 和验证证据，但工具失败仍以文本表示。v0.17 在 Executor 产出 `ExecutionResult`，由 State 固化为 attempt/failure，并让 agent loop 按 effect class 决定并发或串行。
+
+```text
+tool call -> 参数校验 -> PermissionGate -> effect class 分流
+          -> ExecutionResult -> AgentState attempt/failure/generation
+          -> role=tool 回灌 -> loop 按事实收口
+```
+
+入口是 `ToolExecutor.execute_result()`；主要消费者是 `AgentState`、ContextManager 的 Structured State 和 agent loop。恢复、重试、回滚仍不在本版范围内。
+
+## 为什么这样设计
 
 假设模型请求写文件，权限通过后工具开始工作，但写到一半抛出异常。返回给模型的文本可能只是“工具执行失败”。这条文本不能说明文件是否已经创建，也不能说明旧的测试是否仍然可信。
 
@@ -176,6 +188,10 @@ State 会保留最后一次 failure，并在以下情况下保守收口：
 - **并发服从确定性**：只读调用可以并发；含可能副作用的回合牺牲一点并发度，换来稳定的因果顺序和可复现的状态。
 - **没有自动恢复**：v0.17 不会自动重试超时、修正参数、询问用户、保存检查点或回滚文件。这些都属于后续版本要在明确规则下处理的行为。
 - **状态只在当前进程内**：失败模型让一次运行中的事实可审计，但本版尚不持久化，也不能跨进程恢复任务。
+
+## 运行与观察
+
+运行包含文件修改、shell 检查或权限受限操作的任务，观察 Structured State 中的 generation、最近失败、失败类别和终止原因。权限拒绝与参数错误不会推进 generation；已获准但可能改变环境的调用即使抛错也会让旧验证失效。只读回合可以并发，混合可能副作用的回合则按顺序执行。命令行首条任务处理后，程序仍进入交互循环。
 
 ## 本版特性、下一课与代码索引
 

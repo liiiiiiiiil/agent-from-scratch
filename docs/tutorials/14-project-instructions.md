@@ -1,6 +1,6 @@
 # 第 14 课：项目级指令（Project Instructions，v0.14）
 
-> 版本 v0.14 | [返回教程总览](README.md) | [上一课：上下文压缩](13-context-compaction.md) | [下一课：任务清单与状态（Todo / Task State）](15-task-state.md)
+上一课：[上下文压缩](13-context-compaction.md) · [教程总览](README.md) · 下一课：[任务清单与状态](15-task-state.md)
 
 > 代码快照：`v0.14` · 相邻差异：`v0.13.1..v0.14` · 命令环境：Bash/zsh
 
@@ -13,7 +13,7 @@
 - 解释 `AGENTS.md` 的发现范围、合并顺序和长度上限；
 - 说明项目级指令（Project Instructions）为什么不属于 `history`，以及它如何穿过 trimming/compaction；
 - 区分“模型行为提示”和 `PermissionGate` 的实际授权；
-- 用无网络示例和测试验证正常路径、缺失文件、读取失败及截断路径。
+- 能沿着正常路径解释缺失文件、读取失败和截断时的行为。
 
 ## 前置条件与版本切换
 
@@ -21,9 +21,10 @@
 - 已读 [第 13 课](13-context-compaction.md)，理解 `ContextManager`、`AgentState` 和历史压缩。
 
 ```bash
-git checkout v0.14
+git checkout v0.13.1
 git diff --stat v0.13.1..v0.14
-git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_instructions.py tests/test_prompt.py tests/test_context.py
+git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.py src/mini_agent/context.py src/mini_agent/__main__.py
+git checkout v0.14
 ```
 
 ## 新增与改动文件
@@ -37,7 +38,21 @@ git diff v0.13.1..v0.14 -- src/mini_agent/instructions.py src/mini_agent/prompt.
 | `tests/test_instructions.py` | 新增加载器测试 | 覆盖顺序、非 Git、读取和截断 |
 | `tests/test_prompt.py`、`tests/test_context.py` | 增加注入与保留测试 | 验证 prompt 区块和压缩后的存活性 |
 
-## 为什么需要本版
+## 版本变更定位
+
+v0.13.1 已有 ContextManager 的受保护前缀；v0.14 新增 `InstructionLoader`，并在启动入口把加载结果注入 system prompt，再交给 ContextManager。规则不进入 history，也不改变权限闸门。
+
+```text
+启动 cwd -> InstructionLoader.discover/load
+          -> build_system_prompt(project_instructions)
+          -> ContextManager.protected_messages
+          -> prepare_messages() 保留规则 + 裁剪/压缩 history
+          -> call_llm()
+```
+
+主要消费者是每次主 LLM 请求；本版不负责动态刷新、外部规则格式或权限授权。
+
+## 为什么这样设计
 
 普通上下文管理只能保留已经发给模型的内容，不能发现仓库规则。若把规则塞进普通 `history`，对话变长后它可能被裁剪或写进摘要，原文就不一定还在。
 
@@ -88,52 +103,13 @@ context.protected_messages = [{"role": "system", "content": system_prompt}]
 
 规则只在进程启动时加载一次，所以来源和作用范围始终清楚。相应地，运行期间新增规则或切换目录时，内容不会自动刷新。项目级指令可以影响模型行为，但一定不会改变 `PermissionGate` 的 allow/deny/ask 结果。读取失败只留下来源标记，Agent 仍会启动。
 
-## 最小无网络示例
+## 运行与观察
 
-下面不调用 LLM，直接查看规则的发现顺序、来源和截断结果：
-
-```bash
-PYTHONPATH=src python - <<'PY'
-import os
-import tempfile
-from mini_agent.instructions import InstructionLoader
-
-with tempfile.TemporaryDirectory() as root:
-    os.mkdir(os.path.join(root, ".git"))
-    child = os.path.join(root, "src")
-    os.mkdir(child)
-    open(os.path.join(root, "AGENTS.md"), "w", encoding="utf-8").write("运行 pytest\n")
-    open(os.path.join(child, "AGENTS.md"), "w", encoding="utf-8").write("禁止修改 fixtures\n")
-    loaded = InstructionLoader(child, max_chars=300).load()
-    print(loaded)
-PY
-```
-
-输出一定先列出根目录的 `Source` 和规则，再列出 `src/AGENTS.md` 的规则。正文超过上限时，末尾会有截断标记。真实 CLI 示例仍需先配置 `config_local.py`：
+真实 CLI 示例需先配置 `config_local.py`：
 
 ```bash
 PYTHONPATH=src python -m mini_agent "读取项目规则并列出当前目录"
 ```
-
-## 测试与验收
-
-运行以下直接相关的测试：
-
-```bash
-PYTHONPATH=src python tests/test_instructions.py
-PYTHONPATH=src python tests/test_prompt.py
-PYTHONPATH=src python -m pytest -q tests/test_instructions.py tests/test_prompt.py tests/test_context.py
-```
-
-验收点：
-
-- Git 仓库中的多层文件按 root → cwd 合并并保留 `Source:`；
-- 非 Git 目录不读取父目录文件；
-- 缺失、空文件和读取异常不会让加载失败；
-- 超长内容不超过上限并包含截断标记；
-- `<project_instructions>` 只在有内容时出现；
-- 项目级指令不在 `history` 中，并在 trimming/compaction 后仍存在；
-- 指令文本不会改变 `PermissionGate` 的 allow/deny/ask 结果。
 
 ## 本版特性、下一课与代码索引
 

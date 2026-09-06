@@ -1,6 +1,6 @@
 # 第 15 课：任务清单与状态（Todo / Task State，v0.15）
 
-> 版本 v0.15 | [教程总览](README.md) | [上一课：项目级指令（Project Instructions）](14-project-instructions.md) | [下一课：计划驱动执行（Plan-driven Execution）](16-plan-driven-execution.md)
+上一课：[项目级指令](14-project-instructions.md) · [教程总览](README.md) · 下一课：[计划驱动执行](16-plan-driven-execution.md)
 
 > 代码快照：`v0.15` · 相邻差异：`v0.14..v0.15` · 命令环境：Bash/zsh
 
@@ -24,9 +24,9 @@ v0.15 因此引入显式的任务清单与状态（Todo / Task State）。模型
 需要 Python 3.10+，运行时仍只使用标准库。请先阅读[第 14 课](14-project-instructions.md)，了解受保护项目级指令和 ContextManager。使用已发布 tag 学习时：
 
 ```bash
-git checkout v0.15
+git checkout v0.14
 git diff --stat v0.14..v0.15
-git diff v0.14..v0.15 -- src/mini_agent/state.py src/mini_agent/tools/todo.py src/mini_agent/tools/__init__.py src/mini_agent/context.py src/mini_agent/__main__.py tests/test_state.py tests/test_tools.py tests/test_context.py
+git diff v0.14..v0.15 -- src/mini_agent/state.py src/mini_agent/tools/todo.py src/mini_agent/tools/__init__.py src/mini_agent/context.py src/mini_agent/__main__.py
 git checkout v0.15
 ```
 
@@ -41,7 +41,20 @@ git checkout v0.15
 | `src/mini_agent/__main__.py` | 创建 state、registry、executor 并连接回调 | 保证 CLI 运行实例隔离 |
 | `tests/test_state.py`、`test_tools.py`、`test_context.py` | 校验、隔离和重渲染测试 | 覆盖本版本不变量 |
 
-## 为什么需要本版
+## 版本变更定位
+
+v0.14 已有受保护项目规则和 ContextManager；v0.15 在 `AgentState` 增加 Todo 校验与快照，并通过 state-bound registry 暴露 `update_todo`，最后由 Structured State 注入每次请求。
+
+```text
+模型 tool call(update_todo)
+  -> state-bound handler -> AgentState.update_todos（校验并原子替换）
+  -> snapshot() -> ContextManager._render_state()
+  -> 下一次请求看到最新 Todos
+```
+
+入口是 `update_todo` 工具，主要消费者是 Structured State；本版不自动生成计划、不持久化 Todo，也不把 Todo 当作执行证据。
+
+## 为什么这样设计
 
 只用 assistant 文本记录“还剩哪些步骤”会遇到两个实际问题：trimming/compaction 可能删掉旧计划，模型也可能同时写出多个进行中步骤。把任务意图单独保存后，每轮都能重新生成状态，不必赌摘要保留了计划。
 
@@ -125,61 +138,9 @@ Tools executed: 0
 - **不自动规划、不阻断完成、不持久化**：v0.15 不会替模型生成 Todo，不会因未完成项自动阻止最终回复，也不会写入磁盘。验证和 blocked/failed 的收口留给下一课。
 - **权限保持独立**：`update_todo` 只更新内存；文件和 shell 的副作用仍走原有 PermissionGate。
 
-## 最小可运行示例
+## 运行与观察
 
-下面演示成功更新、自动得出的当前目标，以及非法提交后旧快照仍保持不变：
-
-```bash
-PYTHONPATH=src python - <<'PY'
-from mini_agent.state import AgentState
-from mini_agent.tools.todo import make_update_todo_tool
-
-state = AgentState(task="修复回归")
-tool = make_update_todo_tool(state)
-print(tool.handler(todos=[
-    {"content": "定位失败测试"},
-    {"content": "修改实现", "status": "in_progress"},
-]))
-print(state.snapshot()["current_goal"])
-before = state.snapshot()
-print(tool.handler(todos=[{"content": ""}]))
-print(state.snapshot() == before)
-PY
-```
-
-输出会包含更新成功、`修改实现`、`Todo 更新失败: ...` 和 `True`。最后的 `True` 表示失败提交没有覆盖原列表。
-
-## 实例隔离示例
-
-同一进程创建两个 registry 时，每个工具只会捕获自己的 state：
-
-```python
-from mini_agent.state import AgentState
-from mini_agent.tools import create_registry
-
-first, second = AgentState(), AgentState()
-create_registry(first).get("update_todo").handler(todos=[{"content": "first"}])
-assert first.snapshot()["todos"][0]["content"] == "first"
-assert second.snapshot()["todos"] == []
-```
-
-这也是 `tests/test_tools.py` 的核心验收点：不同任务绝不能通过模块级可变 Todo 共享进度。
-
-## 测试与验收
-
-```bash
-PYTHONPATH=src python -m pytest -q tests/test_state.py tests/test_tools.py tests/test_context.py
-PYTHONPATH=src python tests/test_state.py
-PYTHONPATH=src python tests/test_tools.py
-PYTHONPATH=src python tests/test_context.py
-```
-
-重点检查以下行为：
-
-- 非 list、空内容、超长内容、非法状态、超过 50 项和重复 `in_progress` 都拒绝，且旧快照不变。
-- `current_goal` 始终由唯一的 `in_progress` 项派生；Todo 不进入执行历史。
-- 两个 state 的 registry 互不影响，工具 schema 包含 `update_todo` 且权限放行。
-- 更新 Todo 后，`prepare_messages()` 立即显示新列表；trimming/compaction 后仍从最新 Structured State 重建。
+配置好 LLM 后运行一项需要多步处理的任务，观察模型通过 `update_todo` 提交完整列表。下一轮请求会在 `[Structured State]` 中显示最新 Todo；即使上下文发生 trimming 或 compaction，列表仍从当前 State 重建。命令行首条任务处理后，程序继续进入交互循环。
 
 ## 本版特性、下一课与代码索引
 
