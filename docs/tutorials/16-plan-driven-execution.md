@@ -54,15 +54,76 @@ git checkout v0.16
 
 ## 版本变更定位
 
-v0.15 只保存 Todo 意图；v0.16 在 `AgentState` 增加 generation 与验证证据，在 shell 工具中区分 execution/verification，并由 agent loop 在最终回复前执行完成提醒。
+图例：`[旧]` v0.15 已有，`[+]` v0.16 新增，`[~]` v0.16 修改，`[C]` 主要消费者，`[B]` 本版边界。
+
+v0.15 的相关基线是“工具执行后记录摘要，最终文本直接交给 CLI 收口”；v0.16 在同一条链上加入任务重置、验证证据生命周期和最终完成闸门。
+
+v0.15 基线图：
 
 ```text
-update_todo -> execution 工具 -> generation 递增、证据失效
-           -> verification shell -> 绑定当前 generation 的 evidence
-           -> completion_reminder -> done / blocked / failed
+[旧] CLI run_task
+  -> [旧] AgentState.task/status
+  -> [旧] history: user message
+  -> [旧] agent_loop
+       -> [旧] call_llm
+       -> [旧] ToolExecutor.execute
+            -> [旧] PermissionGate
+            -> [旧] tool.handler
+            -> [旧] state.record_tool
+       -> [旧] history: role=tool
+       -> [旧] 下一轮 LLM
+  -> [旧] 最终文本
+  -> [旧] CLI 直接收口为 done
 ```
 
-主要消费者是 agent loop 的收口逻辑；本版不自动规划、重试或回滚。
+v0.16 变更图：
+
+```text
+[+] CLI run_task
+  -> [+] state.begin_task(task)
+       清空上一任务的 Todo、文件、错误和证据
+       初始化当前任务 generation
+  -> [旧] agent_loop
+       -> [旧] call_llm
+       -> [+] update_todo
+            -> [+] state-bound handler
+            -> [+] AgentState.update_todos()
+            -> [C] ContextManager._render_state()
+       -> [旧] ToolExecutor.execute
+            -> [旧] PermissionGate
+            -> [旧] tool.handler
+            -> [~] state.record_tool()
+                 ├─ [~] write_file/edit_file 或 run_shell(execution)
+                 │    -> generation 递增
+                 │    -> 旧 verification evidence 失效
+                 └─ [+] run_shell(verification)
+                      -> VerificationEvidence
+                      -> 当前 generation 的通过/失败证据
+       -> [旧] role=tool 回灌
+       -> [C] ContextManager.prepare_messages()
+            ├─ [~] Structured State 增加验证字段
+            └─ [+] Runtime Notice（只进入下一次请求视图）
+       -> [+] 最终文本 completion_reminder()
+            ├─ 无缺口 -> [C] CLI 收口为 done
+            ├─ 首次有缺口 -> [+] set_runtime_notice()
+            │                 -> 下一轮 LLM
+            └─ 再次仍有缺口 -> [+] status=blocked
+
+[B] 本版不负责：自动生成 Todo、自动选择验证命令、自动重试、回滚或持久化计划。
+```
+
+变更映射：
+
+| 图中节点/边 | 类型 | 对应代码 | 主要消费者/作用 |
+|---|---|---|---|
+| `run_task -> begin_task()` | `[+]` | `src/mini_agent/__main__.py` | `AgentState`；明确任务边界并重置运行事实 |
+| `update_todo -> update_todos()` | `[+]` | `src/mini_agent/state.py`、`src/mini_agent/tools/todo.py` | Structured State；保存模型计划意图 |
+| `run_shell(purpose=...)` | `[+]` | `src/mini_agent/tools/shell.py` | `state.record_tool()`；区分执行和验证 |
+| `record_tool()` 的 generation/evidence 分支 | `[~]` | `src/mini_agent/state.py` | `completion_reminder()`；维护证据生命周期 |
+| Structured State 与 Runtime Notice | `[~]/[+]` | `src/mini_agent/context.py` | 下一次 LLM 请求；保留最新验证事实并传递一次提醒 |
+| 最终文本 `completion_reminder()` | `[+]` | `src/mini_agent/agent.py` | `done`、`blocked` 收口；防止未经验证直接完成 |
+
+入口是 `run_task()` 和模型发出的 `update_todo`/`run_shell` 调用；主要消费者是 `AgentState`、`ContextManager` 和 agent loop 的收口逻辑。本课不自动规划、重试、回滚或持久化计划；`ExecutionResult`、`effect_class` 等后续失败模型能力不属于 v0.16。
 
 ## 为什么这样设计
 
