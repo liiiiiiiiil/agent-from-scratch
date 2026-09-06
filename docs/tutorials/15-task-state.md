@@ -19,6 +19,10 @@ v0.15 引入显式任务清单（Todo）和独立的 `AgentState`。读完本课
 
 本课的学习主线是：**Todo 记录可校验的任务意图，不是执行证据，也不是规划器。**
 
+## 上一版的问题
+
+v0.14 能加载项目规则并保护 system prompt，却没有结构化的任务进度。若 Todo 只写在 assistant 消息中，长对话的 trimming 或 compaction 可能移除它；若把工具结果也混入计划，模型的意图和环境事实又会混在一起。v0.15 要把这两类信息分开，并让每轮请求都能重新得到一致的状态视图。
+
 ## 前置条件与版本切换
 
 先阅读[第 14 课](14-project-instructions.md)，了解受保护项目指令和 `ContextManager`。下面命令均适用于 Bash/zsh；`git diff` 只查看本课涉及的实现：
@@ -31,6 +35,8 @@ git checkout v0.15
 ```
 
 ## 新增与改动文件
+
+先用 `git diff --stat v0.14..v0.15` 确认本版范围；下表只列与本课主线直接相关的文件。
 
 | 文件 | 相对 v0.14 的变化 | 作用 |
 |---|---|---|
@@ -59,6 +65,20 @@ v0.15：模型调用 update_todo
 入口：update_todo                  主要消费者：ContextManager
 本版不负责：自动生成计划、持久化 Todo、以 Todo 自动判定 done/blocked/failed
 ```
+
+## 核心概念与数据结构
+
+### Todo 意图与执行事实
+
+Todo 是模型提交的任务意图；`tool_history`、`files_changed` 和 `errors` 是工具执行后记录的事实。二者分别由 `update_todos()` 和 `record_tool()` 更新，避免“计划做了什么”和“实际上发生了什么”相互伪装。
+
+### 可校验的完整列表
+
+`AgentState.todos` 保存 `TodoItem` 列表，单项是不可变数据对象。`update_todos(todos)` 接收完整数组，而不是增量操作；成功时替换旧列表并从唯一的 `in_progress` 项推导 `current_goal`，失败时旧列表和目标保持不变。
+
+### 可重建的 Structured State
+
+`snapshot()` 返回独立字典；`ContextManager._render_state()` 每轮从该快照生成 `[Structured State]` system 消息。消息不写入 history，压缩后仍会重新生成，因此 Todo 不依赖历史原文。
 
 ## 为什么这样设计
 
@@ -133,7 +153,13 @@ Tools executed: 0
 
 ## 运行与观察（按需）
 
-配置好 LLM 后，用一项包含多个步骤的真实任务启动 CLI。观察模型调用 `update_todo` 提交完整数组，再观察下一轮请求的 `[Structured State]` 显示新列表。命令行首条任务处理完后，程序仍进入交互循环；若继续输入新任务，Todo 会保留，直到模型再次完整提交列表。
+配置好 LLM 后，用一项包含多个步骤的真实任务启动 CLI（命令环境：Bash/zsh）：
+
+```bash
+PYTHONPATH=src python -m mini_agent "实现一个包含多个步骤的任务，并维护 Todo"
+```
+
+观察模型调用 `update_todo` 提交完整数组，再观察下一轮请求的 `[Structured State]` 显示新列表。命令行首条任务处理完后，程序仍进入交互循环；若继续输入新任务，Todo 会保留，直到模型再次完整提交列表。
 
 ## 本版特性、下一课与代码索引
 
@@ -143,6 +169,7 @@ v0.15 提供实例隔离、严格校验、原子替换和可重建的任务清�
 - [Todo 工具](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/tools/todo.py)
 - [工具 registry](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/tools/__init__.py)
 - [Structured State](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/context.py)
+- [Prompt 变更](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/prompt.py)
 - [权限规则](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/permission.py)
 - [CLI 运行入口](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/src/mini_agent/__main__.py)
 - [状态测试](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.15/tests/test_state.py)
