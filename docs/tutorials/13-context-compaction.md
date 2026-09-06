@@ -4,93 +4,113 @@
 
 > 代码快照：`v0.13` · 相邻差异：`v0.12..v0.13` · 命令环境：Bash/zsh
 >
-> 运行要求：Python 3.10+。`v0.13`/`v0.13.1` 的 `pyproject.toml` 仍标 3.9，但源码已使用 3.10 语法。
+> 运行要求：Python 3.10+。历史 tag 的 `pyproject.toml` 仍标记 Python 3.9，但源码已使用 3.10 语法。
 
 ## 本课目标
 
-v0.12 能把请求压回预算内，但做法是截断或删除旧历史。任务一长，删掉的内容可能正好是模型下一步需要的结论。v0.13 因此加入语义压缩：用一次不带工具的 LLM 请求整理旧轮次，得到 `Historical Summary`（历史摘要）；近期原文仍保留，真实执行状态则单独渲染为 `Structured State`（结构化状态）。
+第 12 课的 trimming（裁剪）能让请求回到预算内，但会截断工具结果或删除旧轮次。长任务因此可能丢失已经验证过的结论。本课介绍 v0.13 的 compaction（压缩）：把较老的完整轮次交给一次不带工具的 LLM 请求整理成 `Historical Summary`（历史摘要），同时保留近期原文，并从 `AgentState` 重新生成 `Structured State`（结构化状态）。
 
 读完本课，你应该能够：
 
-- 区分完整 history、Historical Summary 与 Structured State 的职责。
-- 解释自动压缩从预算检查到失败降级的完整调用顺序。
-- 看懂摘要请求为什么不提供 tools，也不输出到终端。
-- 理解 summarizer 注入点如何隔离摘要调用，便于本地调试不同压缩场景。
+- 区分完整 `history`、历史摘要、结构化状态和近期原文的职责；
+- 按顺序解释预算超限时 trimming、compaction 和失败回退；
+- 说明摘要请求为什么关闭 tools（工具定义）和终端流式输出；
+- 理解摘要器注入点、重复压缩以及 `keep_rounds` 的边界。
 
-本课的核心原则是：**Summary 可以遗漏细节，State 必须准确。**
+本课的核心不变量是：**摘要允许有损，执行状态必须来自真实工具结果。**
 
 ## 前置条件与版本切换
 
-- 已读第 11、12 课，理解 State 与 Context 分离、预算计算和轮次原子性。
-- 使用 Bash/zsh，在 tag 间切换并查看本课差异：
+- 已读第 11、12 课，理解 `AgentState` 与消息历史分离、预算计算和工具轮次原子性。
+- 以下命令均适用于 Bash/zsh。`git diff` 用于观察相邻 tag 的真实改动；阅读完成后切回 v0.13。
 
 ```bash
 git checkout v0.12
 git diff --stat v0.12..v0.13
-git diff v0.12..v0.13 -- src/mini_agent/context.py src/mini_agent/agent.py
+git diff v0.12..v0.13 -- src/mini_agent/context.py src/mini_agent/agent.py src/mini_agent/config.py src/mini_agent/config_example.py
 git checkout v0.13
 ```
 
 ## 新增与改动文件
 
-| 文件 | 改动 |
-|---|---|
-| `src/mini_agent/context.py` | 新增摘要器注入、Structured State 渲染、消息重建与 `compact()` |
-| `src/mini_agent/agent.py` | 新增 `summarize_messages()`，复用 LLM 通道但关闭 tools 和终端流式输出 |
-| `src/mini_agent/config.py` | `MAX_ITERATIONS` 从 10 提高到 50 |
-| `src/mini_agent/config_example.py` | 同步迭代上限示例配置 |
-| `tests/test_context.py` | 新增压缩、失败降级、自动触发和多次压缩测试 |
-| `tests/test_loop.py` | 验证超过十轮的任务可以继续执行 |
+| 文件 | 变化 | 作用 |
+|---|---|---|
+| `src/mini_agent/context.py` | 增加摘要器注入、状态渲染、`compact()` 和压缩后的消息重建 | 在统一的 `prepare_messages()` 入口内完成压缩与回退 |
+| `src/mini_agent/agent.py` | 增加 `summarize_messages()` | 复用已有 HTTP/LLM 通道执行一次内部摘要请求 |
+| `src/mini_agent/config.py` | `MAX_ITERATIONS` 从 10 调为 50 | 允许长任务跨越多次上下文压缩 |
+| `src/mini_agent/config_example.py` | 同步迭代上限示例 | 展示默认配置 |
+| `tests/test_context.py` | 增加压缩、失败、多次压缩和自动触发覆盖 | 固化 ContextManager 的行为边界 |
+| `tests/test_loop.py` | 增加长任务覆盖 | 验证提高上限后 loop 可以继续运行 |
+
+## 上一版的问题
+
+v0.12 的 `prepare_messages()` 始终从完整 `history` 构造发送副本，然后按“截断工具结果、删除最老完整轮次”的顺序处理。它解决了请求过长，却无法保留被删除轮次中的决策和结论：
+
+```text
+完整 history --trimming--> 较短请求
+     |
+     +-- 旧方案没有语义记录，模型可能忘记已经尝试过什么
+```
+
+无限保留原文会再次超过窗口，只保留摘要又会丢失当前局部推理所需的工具调用关系。因此本版需要三种信息共同工作：摘要补回较老的语义、近期轮次保留原文、State 锚定执行事实。
 
 ## 版本变更定位
 
-v0.12 的入口和裁剪策略仍然保留；v0.13 在同一个 `ContextManager.prepare_messages()` 入口前后增加摘要路径，并由 `agent.summarize_messages()` 提供一次独立的 LLM 摘要请求。
+v0.13 不改变 v0.12 的 trimming 策略，也不修改主 loop 的调用方式。新增入口仍是 `ContextManager.prepare_messages()`；它在判断初始视图超预算后调用 `compact()`，摘要请求由 `agent.summarize_messages()` 提供。
 
 ```text
-v0.12：agent loop -> prepare_messages() -> TrimPolicy.trim() -> call_llm()
-                                      |
-                                      +-> 完整 history（仅构建发送副本）
+v0.12：agent_loop -> prepare_messages() -> TrimPolicy.trim() -> call_llm()
 
-v0.13：agent loop -> prepare_messages()
-                       |
-                       +-> 先 trim（可回退结果）
-                       +-> 超预算且有旧轮次：compact()
-                              |
-                              +-> summarize_messages（无 tools、无终端流）
-                              +-> State + Summary + Recent rounds
-                       +-> 再 trim -> call_llm()
+v0.13：agent_loop -> prepare_messages()
+                       |-- TrimPolicy.trim()        (先生成兜底副本)
+                       |-- compact()                (超预算且存在旧轮次)
+                       |     |-- summarizer(prompt)  (无 tools、无终端流)
+                       |     +-- 保存 Summary，标记压缩状态
+                       +-- 重建 State + Summary + Recent rounds
+                       -> TrimPolicy.trim() -> call_llm()
 ```
 
-新增能力的主要消费者仍是主 LLM 请求；`AgentState` 是摘要之外的事实来源。v0.13 不负责持久化摘要、检索外部记忆或评价摘要质量。
+主要消费者仍是主 LLM 请求。`AgentState` 是摘要之外的事实来源；本版不负责摘要持久化、外部记忆或摘要质量评分。
 
 ## 为什么这样设计
 
-v0.12 的 trimming（裁剪）解决了“请求太长”，却没有解决“旧信息仍然有价值”：
+本版选择“摘要 + 近期原文 + 结构化状态”，而不是只保留一种信息：
 
-```text
-旧 tool result 被截断  -> 细节消失
-旧 round 被删除        -> 决策和结论一起消失
-```
+- **摘要**降低旧历史带来的遗忘，但它由模型转述，可能遗漏或改写细节；
+- **近期原文**保留当前 tool calling（工具调用）所需的 assistant/tool 配对，避免模型只依赖摘要继续推理；
+- **Structured State**由执行器记录的真实结果生成，不从摘要猜测文件、错误或工具成败。
 
-短任务通常不受影响。长任务中，模型可能忘记试过的方案、改过的文件或下一步计划。全部保留又会再次超限，所以需要把旧历史从原始消息改成更短的语义记录。
+摘要复用已有 `call_llm()` 通道，保持标准库 HTTP 客户端和配置单一；代价是预算超限时多一次网络请求。摘要失败、返回空字符串或非字符串时回退到 v0.12 的 trimming，因此压缩是增强能力，不是主 loop 的新单点故障。
 
-摘要不是事实数据库。模型可能漏掉内容，多次摘要还可能逐渐改写原意。因此 v0.11 建立的 `AgentState` 在这里作为事实锚：它记录真实工具结果，不从摘要中猜测。
-
-本版选择“摘要 + 近期原文 + 结构化状态”，而不是只保留摘要或继续无限裁剪：前者能降低遗忘，后者保留当前推理所需的细节，State 则约束事实准确性。代价是多一次 LLM 请求，且摘要仍可能有损；因此摘要失败时必须回退到 v0.12 的 trimming。
+本版也把容错放在 `ContextManager`：loop 只需要调用 `prepare_messages()`，不需要理解摘要格式或失败原因。完整 `history` 始终保留在本地，发送副本的裁剪不会破坏后续摘要来源。
 
 ## 关键流程
 
-压缩成功后，主模型收到的消息会按以下顺序重新组成：
+压缩成功后的请求视图按如下顺序组成：
 
 ```text
-Original System
-+ Structured State        <- 每次 prepare 时从 AgentState.snapshot() 重新渲染
-+ Historical Summary      <- summarizer 返回的有损语义摘要
-+ Current Task            <- 原始首条 user task
-+ Recent Messages         <- 最近 N 个完整 rounds，默认 6
+Original System       <- 原始 system 消息
++ Structured State    <- 每次构建时从 state.snapshot() 重新渲染
++ Historical Summary  <- summarizer 返回的有损摘要（可没有）
++ Current Task        <- 原始首条 user 消息
++ Recent Messages     <- 最近 keep_rounds 个完整轮次，默认 6
 ```
 
-`_build_messages()` 的代码如下：
+自动触发的具体顺序是：
+
+1. `_build_messages()` 构造当前视图并计算受保护前缀；
+2. 记录该视图是否超过 `message_limit`；
+3. `TrimPolicy.trim()` 先返回协议安全的降级副本；
+4. 初始视图超限时调用 `compact()`；
+5. 压缩成功则按 State、Summary 和近期轮次重建，再 trimming 一次；失败或不满足条件则直接使用第 3 步结果。
+
+只有“初始视图超预算”且“完整 history 的轮次数量多于 `keep_rounds`”才会自动压缩。也可以主动调用 `context.compact(keep_rounds=6)`。
+
+## 实现拆解
+
+### 1. 保留事实锚
+
+压缩模式下，`_render_state()` 每次读取最新的 `AgentState.snapshot()`：
 
 ```python
 messages = prefix[:1] + [self._render_state()]
@@ -103,52 +123,11 @@ messages.extend(prefix[1:])
 messages.extend(recent_messages)
 ```
 
-这里要注意两点：
+因此新发生的文件修改和工具错误会出现在下一次请求中。Summary 只负责延续语义，不能替代 State 的事实记录；近期消息仍由 `_split_rounds()` 按完整轮次选取，assistant 的 `tool_calls` 与对应 `role=tool` 结果不会被拆开。
 
-- 完整 `history` 没有被替换或删除。ContextManager 只在构建请求时选择 summary 和近期轮次。
-- Recent Messages 仍通过 `_split_rounds()` 选取，所以 assistant tool calls 和相应 tool results 不会被拆散。
+### 2. 隔离摘要请求
 
-## 实现拆解
-
-### Structured State：压缩后不失忆的事实锚
-
-`_render_state()` 调用 `AgentState.snapshot()`，生成一条 system 消息：
-
-```text
-[Structured State]
-Task: 修复登录失败
-Current goal: 运行回归测试
-Files changed: src/auth.py
-Errors: run_shell: exit code 1
-Status: running
-Tools executed: 8
-```
-
-这些字段来自 Executor 回调记录的真实工具结果，不是从 summary 反推：
-
-| 信息 | 来源 | 可靠性定位 |
-|---|---|---|
-| `Historical Summary` | LLM 对老消息的转述 | 允许有损，用于延续语义 |
-| `Structured State` | `AgentState.snapshot()` | 执行事实锚，不能依赖摘要猜测 |
-| Recent Messages | 完整 history 的近期轮次 | 原文保留，用于当前局部推理 |
-
-State 不只在 `compact()` 成功时生成一次。只要 ContextManager 进入压缩模式，后续每次 `_build_messages()` 都会重新调用 `_render_state()`。因此压缩后新修改的文件和新出现的错误，仍会出现在下一次请求中。
-
-### Historical Summary：一次独立的无工具请求
-
-`ContextManager` 接受一个可注入的 summarizer（摘要器）：
-
-```python
-def __init__(
-    self,
-    state,
-    history,
-    summarizer: Callable[[list[Message]], str] | None = None,
-    keep_rounds: int = 6,
-): ...
-```
-
-生产环境默认延迟导入 `agent.summarize_messages()`。这样 `agent.py` 和 `context.py` 在模块加载时不会形成循环依赖：
+`ContextManager` 接受可注入的 `summarizer`，生产默认值采用延迟导入，避免 `context.py` 与 `agent.py` 在加载时循环依赖：
 
 ```python
 def summarizer(messages):
@@ -156,7 +135,7 @@ def summarizer(messages):
     return summarize_messages(messages)
 ```
 
-`summarize_messages()` 仍复用已有的 `call_llm()` 和 `http.client` 通道，只调整两个参数：
+摘要函数只改变两个调用选项，仍复用 `call_llm()` 的 `http.client` 通道：
 
 ```python
 def summarize_messages(messages):
@@ -167,182 +146,95 @@ def summarize_messages(messages):
     ).get("content", "") or ""
 ```
 
-- `include_tools=False`：摘要器只整理文本，不应在摘要过程中执行文件或 shell 工具。
-- `stream_output=False`：摘要是内部上下文处理，不应把中间产物打印成 Agent 的最终回复。
+关闭 tools 防止摘要过程产生文件或 shell 副作用；关闭流式输出则让内部摘要不显示为 Agent 的终端回复。HTTP 层仍按流式协议收集完整内容。
 
-HTTP 请求仍使用流式协议，代码会完整收集内容；这里只是不逐块打印到终端。
+### 3. `compact()` 的输入、输出和失败路径
 
-### compact() 的执行过程
-
-`compact(keep_rounds=None)` 返回 bool，表示这次是否成功生成新摘要：
+`compact(keep_rounds=None)` 返回布尔值。它从完整 history 划分轮次，只把“旧轮次”组成摘要 prompt，近期轮次不送入本次摘要：
 
 ```text
-完整 history
-    |
-    +-- _split_rounds()
-    |
-    +-- rounds 数量 <= keep_rounds? -- 是 --> False
-    |
-    +-- 旧 rounds + State + 已有摘要组成摘要 prompt
-    |
-    +-- summarizer(prompt)
-          | 异常、空字符串、非字符串 --> False
-          | 有效字符串
-          v
-       保存 _summary
-       更新 keep_rounds
-       _compacted = True
-       return True
+rounds <= keep_rounds       -> False，什么也不改变
+keep_rounds < 0             -> ValueError
+summarizer 异常/空/非字符串  -> False，保留旧 summary，继续 trimming
+有效字符串                  -> 保存 summary，标记压缩成功，返回 True
 ```
 
-摘要 prompt 要求按“任务、已完成、已执行工具、已修改文件、错误、结论、下一步”组织，并明确禁止虚构。它还提供两类校正信息：
+摘要 prompt 要求按任务、已完成步骤、工具调用、修改文件、错误、当前进度和下一步组织，并禁止虚构。多次压缩时还会带上已有摘要，让新增的旧轮次接续之前的语义。
 
-- 当前 Structured State：帮助摘要器以真实执行记录为准。
-- 已有摘要：多次压缩时保留前一次已经提炼出的语义。
+成功后 `_summary` 更新、`_compacted` 设为真、`_summarized_rounds` 前移；原始 history 不会被删除或改写。`keep_rounds=0` 表示所有轮次都进入摘要，发送视图只保留前缀、State 和 Summary。
 
-`keep_rounds` 默认是 6。传入负数一定抛出 `ValueError`；传入 0 表示所有历史 rounds 都进入摘要，请求中不保留近期原文。
-
-### 自动触发的真实顺序
-
-每次主循环调用 `prepare_messages()` 时，顺序如下：
-
-```text
-1. _build_messages() 构造当前请求视图
-2. 计算该视图是否超过预算，记为 over_budget
-3. TrimPolicy.trim() 先生成可用的降级结果
-4. 如果初始视图超限，调用 compact()
-5. compact 成功：按 State + Summary + Recent Messages 重建，再 trim 一次
-6. compact 未执行或失败：返回第 3 步的 trimming 结果
-```
-
-先 trim 不会损坏摘要来源。第 3 步只改发送副本，`compact()` 始终从完整 `self.history` 读取旧轮次。因为先得到了 trimming 结果，所以摘要不可用时，系统仍有一个协议合法且尽量符合预算的请求可交给主模型。
-
-自动触发有两个条件：初始请求视图超过预算，并且完整 history 中的历史轮次多于 `keep_rounds`。也可以主动调用：
+实现只在摘要返回有效文本后改变压缩状态；这也是失败回退能够保持旧状态的原因：
 
 ```python
-did_compact = context.compact(keep_rounds=6)
-```
-
-### 失败降级为什么放在 ContextManager
-
-摘要会增加一次网络调用，可能抛异常、返回空内容或返回非字符串。`compact()` 在上下文层处理这些失败，并返回 `False`：
-
-```python
-try:
-    summary = self.summarizer(prompt)
-    if not isinstance(summary, str) or not summary.strip():
-        return False
-except Exception:
-    print("[Context] compaction failed; falling back to trimming")
+summary = self.summarizer(prompt)
+if not isinstance(summary, str) or not summary.strip():
     return False
+self._summary = summary.strip()
+self.keep_rounds = keep
+self._compacted = True
+return True
 ```
 
-这不违反“agent loop 不加 try/except 兜底”的约束。因为容错属于上下文策略，所以放在 ContextManager；loop 仍只调用 `prepare_messages()`，不需要理解摘要和降级细节。
+### 4. 多次压缩的不变量
 
-失败时不会发生以下变化：
+长任务在首次压缩后仍会追加新消息。再次超限时，只摘要尚未处理的旧轮次，近期轮次继续保留。由于摘要是有损的，不能要求多次摘要逐字稳定；实现必须保持以下不变量：
 
-- 原始 history 不变。
-- `_summary` 不会被空结果覆盖。
-- ContextManager 不会因为失败进入新的压缩状态。
+- State 每次从最新 snapshot 渲染；
+- 完整 history 始终可用于下一次压缩；
+- 近期 assistant/tool 消息保持协议合法；
+- 摘要失败不会覆盖已有有效摘要。
 
-主请求会继续使用 v0.12 已生成的 trimming 结果。
+## 设计边界
 
-### 多次压缩
-
-长任务第一次压缩后仍会向完整 history 追加轮次。请求再次超限时，`compact()` 会重新读取 history 中最近 N 轮以外的旧轮次，并把已有摘要也放入新的摘要 prompt。
-
-多次摘要可能遗漏或改写语义。因此不要求 summary 逐字稳定；实现应始终保证：
-
-- Structured State 每次从最新 snapshot 重新渲染。
-- 新发生的成功写入会出现在 `Files changed`。
-- 新失败的工具调用会出现在 `Errors`。
-- Recent Messages 仍然保持 tool calling 协议合法。
+- 估算仍使用 v0.12 的启发式 token 计数，不保证与服务端 tokenizer 完全一致。
+- `_summary` 只存在当前进程，不写磁盘，也不提供向量检索或外部记忆。
+- State 只包含现有执行字段，不是完整事件日志；摘要器不会凭空补齐缺失事实。
+- 受保护的 system、任务、State 和 Summary 本身若超过模型窗口，compaction 也无法解决；系统会保留它们并允许预算超限日志出现。
+- `MAX_ITERATIONS` 提高到 50 只提供更长的执行机会，不能保证任务一定收敛。
 
 ## 运行与观察
 
-在配置好 LLM 后，以真实任务运行 Agent；命令行参数只是命令行首条任务，处理后程序仍进入交互循环。任务足够长且请求视图超出预算时，终端会显示上下文裁剪或压缩提示；压缩后的请求中可以观察到 `[Structured State]`、`[Historical Summary]` 和最近的完整工具轮次。若摘要请求失败，主任务仍继续使用 trimming 结果。
+配置好本地 LLM 后运行真实任务。命令行首条任务处理完成后，程序仍进入交互循环：
 
-## 设计边界与取舍
+```bash
+PYTHONPATH=src python -m mini_agent "检查登录流程并运行回归测试"
+```
 
-- **摘要复用同一个 LLM 通道**：不需要第二套客户端或配置。
-- **摘要请求不带 tools**：内部整理一定不能产生副作用。
-- **State 与 Summary 双层信息**：State 提供事实，Summary 补充较丰富的语义连续性。
-- **近期轮次保留原文**：当前局部推理不必完全依赖有损摘要。
-- **失败回退 trimming**：摘要只是增强能力，不能成为主循环的新单点故障。
-- **迭代上限提高到 50**：上下文能收缩后，Agent 才可能安全执行更长任务；硬上限仍负责阻止无限循环。
+当请求视图超出预算且存在足够旧轮次时，可以在后续请求中观察到 `[Structured State]`、`[Historical Summary]` 和最近的完整工具轮次。摘要请求失败时，主任务继续使用 trimming 结果。
 
-### 本版边界
+## v0.13.1 补丁：Context Observability
 
-- 不会自动评分摘要质量，也不保证多次摘要逐字稳定。
-- `_summary` 只存在当前 ContextManager 进程中，不会写入磁盘。
-- 不提供向量检索、外部记忆或按需召回；这些留给后续阶段。
-- `AgentState` 只保存现有字段，不是完整事件日志。
-- protected prefix（原始 system、任务以及压缩后注入的 State/Summary）本身超过模型窗口时，compaction 也无法解决；系统只会保留并记录超限。
-
-## 本版独有特性
-
-- 老历史可压缩成 Historical Summary，近期轮次保留原文。
-- AgentState 以 Structured State 形式进入压缩后的请求。
-- 自动压缩、主动压缩和失败降级走同一个 ContextManager 边界。
-- 支持多次压缩，事实锚随真实执行状态刷新。
-- `MAX_ITERATIONS` 从 10 提高到 50，允许长任务跨压缩继续执行。
-
-## v0.13.1 增补：Context Observability
+v0.13.1 是本课的补丁 tag，增加上下文统计和生命周期事件，不改变压缩策略：
 
 > 代码快照：`v0.13.1` · 相邻差异：`v0.13..v0.13.1` · 命令环境：Bash/zsh
 
 ```bash
-git checkout v0.13.1
+git checkout v0.13
 git diff --stat v0.13..v0.13.1
 git diff v0.13..v0.13.1 -- src/mini_agent/context.py tests/test_context.py
+git checkout v0.13.1
 ```
 
-只看到最终请求成功时，很难知道预算花在哪里、何时裁剪、哪些轮次被压缩。为了让这些过程可见，v0.13.1 增补 token 统计和上下文事件，供教学和调试使用。
-
-每次主 LLM 请求准备完成后，默认会打印实际发送消息的 token 统计：
-
-```text
-[Context]
-tokens: 82,341 / 128,000
-system:       2,100
-task:         1,200
-state:        1,500
-history:     65,000
-tool_result: 12,541
-reserve:     19,200
-```
-
-五个输入分桶不会重叠，合计一定等于 `tokens`。`reserve` 是输出预留，不算在输入总和中。发生裁剪或压缩时，还会打印 `[Context Trim]` 和 `[Context Compact]`，说明轮次、对象和节省的 token。
-
-代码也提供结构化快照，调用方不必解析终端文本：
+`ContextManager.prepare_messages()` 现在会为实际发送的消息保存 `ContextStats`，并可发出 `prepared`、`trimmed` 和 `compacted` 事件。五个输入分桶互不重叠：`system`、`task`、`state`、`history`、`tool_result`；`reserve` 是输出预留，不计入输入 token 总和。
 
 ```python
-from mini_agent.context import ContextManager
-
-context = ContextManager(state, history)
 context.prepare_messages()
 stats = context.stats_snapshot()
 print(stats.tokens, stats.tool_result)
 ```
 
-需要关闭终端观测时，在 `config_local.py` 中设置：
+默认 observer 会打印上下文、裁剪和压缩日志；`CONTEXT_OBSERVABILITY = False` 只关闭默认日志，不影响预算或 `stats_snapshot()`。也可以传入 `observer=callback`，observer 抛出的异常会被隔离，不影响 Agent 执行。
 
-```python
-CONTEXT_OBSERVABILITY = False
-```
-
-关闭只影响默认日志，不影响预算、trimming、compaction 或 `stats_snapshot()`。也可以向 `ContextManager(..., observer=callback)` 传入回调接收 `ContextEvent`；回调即使抛异常，也不会影响 agent。
+补丁仍不负责持久化统计、远程指标或摘要质量评估。它只是让本课已经存在的上下文决策可观察。
 
 ## 本版特性、下一课与代码索引
 
-到这里，阶段四形成完整链路：v0.11 分离 State 和 Context，v0.12 建立预算和保证协议安全的 trimming，v0.13 用 Summary + State 减少裁剪带来的遗忘，v0.13.1 再通过统计和事件展示过程。
+v0.13 在 v0.12 的预算与 trimming 之上增加历史摘要、Structured State 注入、自动/主动压缩、失败回退和多次压缩；同时把迭代上限调到 50。v0.13.1 补充可选的统计和事件观测。下一课 v0.14 会把项目级指令作为新的受保护上下文注入，每次压缩都应继续保留它们。
 
-下一课 v0.14 会加入项目级指令（Project Instructions），让项目规则作为受保护上下文参与每次请求。后续的规划能力仍应复用 ContextManager 和 AgentState，不应把计划逻辑重新放回核心 loop。
+完整实现固定在对应 tag：
 
-## 本版完整代码
-
-- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/context.py) — v0.13 压缩实现
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/context.py) — v0.13 压缩与消息重建
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/agent.py) — v0.13 摘要请求
-- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/tests/test_context.py) — v0.13 压缩测试
-- [`src/mini_agent/context.py @ v0.13.1`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/src/mini_agent/context.py) — Context Observability
-- [`tests/test_context.py @ v0.13.1`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/tests/test_context.py) — 观测性测试
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/tests/test_context.py) — v0.13 压缩边界
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/src/mini_agent/context.py) — v0.13.1 统计与事件
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/tests/test_context.py) — v0.13.1 观测性覆盖
