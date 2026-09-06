@@ -6,8 +6,6 @@
 
 ## 本课目标
 
-第 15 课的 Todo 能记录计划，但“标记完成”不代表文件真的改过，也不代表改完后检查仍会通过。比如模型可能把“运行测试”设为 completed，却从未执行测试。
-
 v0.16 不加入自动规划器或持久化数据库，而是把 Todo、真实工具结果和验证结果连成一个保守的完成闭环：
 
 ```text
@@ -23,6 +21,10 @@ Plan -> Execute -> Observe -> Replan -> Verify -> done
 
 本课的核心原则是：**计划表达意图，状态记录事实，独立验证才算完成证据。**
 
+## 上一版的问题
+
+第 15 课的 Todo 能记录计划，但“标记完成”不代表文件真的改过，也不代表改完后检查仍会通过。模型可能把“运行测试”设为 `completed`，却从未执行测试。v0.16 要把 Todo、真实工具结果和验证结果连成一个保守的完成闭环，同时不把验证命令或计划交给运行时自动生成。
+
 ## 前置条件与版本切换
 
 需要 Python 3.10+，运行时只有标准库。建议先阅读第 15 课，了解 Todo 的完整替换和 Structured State。在对应 tag 查看差异：
@@ -37,6 +39,8 @@ git checkout v0.16
 切换回工作区版本后再运行本课示例。
 
 ## 新增与改动文件
+
+先用 `git diff --stat v0.15..v0.16` 确认本版范围；下表只列与本课主线直接相关的文件。
 
 | 文件 | 相对 v0.15 的变化 | 作用 |
 |---|---|---|
@@ -69,7 +73,13 @@ Todo 的状态变化不等于环境变化。即使测试曾经通过，后面一
 
 执行命令即使非零退出或超时，也会让旧证据失效，因为环境已经可能变化。权限拒绝没有进入 handler，所以不会无故使证据失效。验证失败或超时会保留失败证据，并继续要求重试。
 
-## 数据结构与状态不变量
+## 核心概念与数据结构
+
+### 计划、执行与验证
+
+Todo 表达模型的任务意图；工具回调记录执行事实；只有绑定当前 generation（代次）的验证证据，才可能满足完成条件。三者互相独立，避免把“计划已完成”误当成“环境已验证”。
+
+### 状态不变量与证据生命周期
 
 `AgentState` 在 messages 之外维护运行事实：
 
@@ -133,7 +143,7 @@ CLI run_task
 
 CLI 的 `run_task()` 正常返回且状态仍为 `running` 时会设为 `done`；顶层异常或达到最大迭代结果时设为 `failed`。loop 不会兜底 LLM 或 CLI 顶层异常；工具边界的异常仍由 Executor/loop 转成可回灌的工具结果。
 
-## 设计选择与边界
+## 设计边界
 
 - **不自动规划**：模型负责调用 `update_todo`。运行时只检查状态，不替模型生成计划。
 - **保守地把 execution 当作可能变更**：运行时无法可靠判断任意 shell 命令是否改了环境，所以即使命令看起来只读或非零退出，也会让证据失效。
@@ -143,7 +153,13 @@ CLI 的 `run_task()` 正常返回且状态仍为 `running` 时会设为 `done`�
 
 ## 运行与观察
 
-运行一项包含修改和检查的真实任务：写入或 execution shell 后，Agent 会把旧验证标为过期；只有针对当前 generation 的 verification 通过，最终回复才不会收到提醒。提醒最多纠正一次，仍有缺口时进入 `blocked`；命令行首条任务处理后仍继续交互。
+配置好本地 LLM 后，用包含修改和检查的真实任务启动 CLI（命令环境：Bash/zsh）：
+
+```bash
+PYTHONPATH=src python -m mini_agent "修改实现并运行检查，维护 Todo"
+```
+
+写入或 execution shell 后，Agent 会把旧验证标为过期；只有针对当前 generation 的 verification 通过，最终回复才不会收到提醒。提醒最多纠正一次，仍有缺口时进入 `blocked`；命令行首条任务处理后仍继续交互。
 
 ## 本版特性、下一课与代码索引
 
@@ -153,4 +169,11 @@ v0.16 计划驱动执行（Plan-driven Execution）的独有能力是“generati
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)
 - [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/context.py)
 - [`src/mini_agent/tools/shell.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/tools/shell.py)
+- [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/prompt.py)
+- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/permission.py)
+- [`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/__main__.py)
 - [`tests/test_stage5_e2e.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_stage5_e2e.py)
+- [`tests/test_state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_state.py)
+- [`tests/test_loop.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_loop.py)
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_context.py)
+- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_tools.py)
