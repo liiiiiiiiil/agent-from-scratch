@@ -19,18 +19,6 @@
 
 本课的核心不变量是：**摘要允许有损，执行状态必须来自真实工具结果。**
 
-## 前置条件与版本切换
-
-- 已读第 11、12 课，理解 `AgentState` 与消息历史分离、预算计算和工具轮次原子性。
-- 以下命令均适用于 Bash/zsh。`git diff` 用于观察相邻 tag 的真实改动；阅读完成后切回 v0.13。
-
-```bash
-git checkout v0.12
-git diff --stat v0.12..v0.13
-git diff v0.12..v0.13 -- src/mini_agent/context.py src/mini_agent/agent.py src/mini_agent/config.py src/mini_agent/config_example.py
-git checkout v0.13
-```
-
 ## 新增与改动文件
 
 | 文件 | 变化 | 作用 |
@@ -54,6 +42,18 @@ v0.12 的 `prepare_messages()` 始终从完整 `history` 构造发送副本，�
 
 无限保留原文会再次超过窗口，只保留摘要又会丢失当前局部推理所需的工具调用关系。因此本版需要三种信息共同工作：摘要补回较老的语义、近期轮次保留原文、State 锚定执行事实。
 
+## 前置条件与版本切换
+
+- 已读第 11、12 课，理解 `AgentState` 与消息历史分离、预算计算和工具轮次原子性。
+- 以下命令均适用于 Bash/zsh。`git diff` 用于观察相邻 tag 的真实改动；阅读完成后切回 v0.13。
+
+```bash
+git checkout v0.12
+git diff --stat v0.12..v0.13
+git diff v0.12..v0.13 -- src/mini_agent/context.py src/mini_agent/agent.py src/mini_agent/config.py src/mini_agent/config_example.py
+git checkout v0.13
+```
+
 ## 版本变更定位
 
 v0.13 不改变 v0.12 的 trimming 策略，也不修改主 loop 的调用方式。新增入口仍是 `ContextManager.prepare_messages()`；它在判断初始视图超预算后调用 `compact()`，摘要请求由 `agent.summarize_messages()` 提供。
@@ -71,6 +71,21 @@ v0.13：agent_loop -> prepare_messages()
 ```
 
 主要消费者仍是主 LLM 请求。`AgentState` 是摘要之外的事实来源；本版不负责摘要持久化、外部记忆或摘要质量评分。
+
+## 核心概念与数据结构
+
+压缩不是删除 `history`，而是生成一次发送给 LLM 的新视图。`ContextManager` 保留三类数据：完整 `history`（后续压缩的事实来源）、`_summary`（较老轮次的有损语义）和 `AgentState`（执行器记录的结构化事实）。
+
+`_split_rounds()` 将首个 user 消息之前的内容视为受保护前缀，把之后的消息分成完整轮次。assistant 的 `tool_calls` 与连续的 `role=tool` 结果必须在同一轮中，这是工具协议不变量。
+
+压缩视图的字段顺序固定如下：
+
+```text
+Original System -> Structured State -> Historical Summary
+                 -> Current Task -> Recent Messages
+```
+
+其中 `Structured State` 每次从 `state.snapshot()` 重新渲染；`Historical Summary` 可能不存在；`Recent Messages` 是最近 `keep_rounds` 个完整轮次（默认 6）。`keep_rounds=0` 表示所有轮次都交给摘要器。
 
 ## 为什么这样设计
 
@@ -124,6 +139,8 @@ messages.extend(recent_messages)
 ```
 
 因此新发生的文件修改和工具错误会出现在下一次请求中。Summary 只负责延续语义，不能替代 State 的事实记录；近期消息仍由 `_split_rounds()` 按完整轮次选取，assistant 的 `tool_calls` 与对应 `role=tool` 结果不会被拆开。
+
+`_build_messages()` 只构造发送副本，不改变完整历史；这使摘要失败后仍可沿用 v0.12 的裁剪结果。
 
 ### 2. 隔离摘要请求
 
@@ -192,7 +209,7 @@ return True
 - 受保护的 system、任务、State 和 Summary 本身若超过模型窗口，compaction 也无法解决；系统会保留它们并允许预算超限日志出现。
 - `MAX_ITERATIONS` 提高到 50 只提供更长的执行机会，不能保证任务一定收敛。
 
-## 运行与观察
+## 运行与观察（按需）
 
 配置好本地 LLM 后运行真实任务。命令行首条任务处理完成后，程序仍进入交互循环：
 
