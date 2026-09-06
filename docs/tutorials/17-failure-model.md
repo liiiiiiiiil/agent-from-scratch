@@ -47,7 +47,6 @@ git checkout v0.17
 | `src/mini_agent/agent.py` | 按工具 effect class 选择串行或并发，并拒绝混合 verification | 保持 generation 和工具结果顺序确定 |
 | `src/mini_agent/context.py` | Structured State 显示最近失败、generation、预算和恢复提示 | 历史裁剪或压缩后，关键事实仍可见 |
 | `src/mini_agent/config.py` | 增加失败、重复调用和 repair cycle 的上限配置 | 为后续受限恢复保留可观察的预算边界 |
-| `tests/test_executor.py`、`tests/test_loop.py`、`tests/test_context.py` | 增加结构化结果、调度和脱敏测试 | 覆盖本课的关键不变量 |
 
 ## 为什么需要本版
 
@@ -169,92 +168,6 @@ State 会保留最后一次 failure，并在以下情况下保守收口：
 
 `RecoveryAction` 数据结构在本版已经预留，是为了让后续版本能沿用相同的因果链；v0.17 不提供 `recover` 工具，不自动 retry，也不做 checkpoint 或 rollback。
 
-## 最小离线示例
-
-下面的示例人为制造一个“可能写入后抛异常”的工具。它不访问网络，也不会写文件。重点是观察 generation 在 handler 运行前已经从 0 变成 1，以及失败被保存为 `unknown`：
-
-```bash
-PYTHONPATH=src python - <<'PY'
-from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
-from mini_agent.state import AgentState
-from mini_agent.tools.base import Tool, ToolExecutor, ToolRegistry
-
-state = AgentState()
-state.begin_task("演示失败记录")
-
-def partial_write(path):
-    print("handler 看到的 generation:", state.current_generation_id)
-    raise RuntimeError("写入中断")
-
-registry = ToolRegistry()
-registry.register(Tool(
-    "demo_write", "模拟写文件",
-    {"type": "object", "properties": {"path": {"type": "string"}},
-     "required": ["path"]},
-    partial_write,
-    effect_class="possible",
-))
-executor = ToolExecutor(
-    registry,
-    PermissionGate(PermissionPolicy({"demo_write": ALLOW})),
-)
-
-result = executor.execute_result("demo_write", {"path": "demo.txt"}, state)
-state.record_execution_result(result)
-snapshot = state.snapshot()
-
-print("outcome:", result.outcome)
-print("generation:", snapshot["current_generation_id"])
-print("attempt:", snapshot["attempts"][0]["attempt_id"])
-print("failure:", snapshot["latest_failure"])
-print("status:", snapshot["status"])
-PY
-```
-
-输出中的关键部分应当类似：
-
-```text
-handler 看到的 generation: 1
-outcome: failed
-generation: 1
-attempt: a-1
-failure: {... 'category': 'unknown', 'caused_by_attempt_id': 'a-1' ...}
-status: blocked
-```
-
-再看一个不会推进 generation 的例子。这里工具因缺少必填参数而在 schema 校验阶段失败，handler 没有机会执行：
-
-```bash
-PYTHONPATH=src python - <<'PY'
-from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
-from mini_agent.state import AgentState
-from mini_agent.tools.base import Tool, ToolExecutor, ToolRegistry
-
-state = AgentState()
-state.begin_task("演示参数错误")
-registry = ToolRegistry()
-registry.register(Tool(
-    "demo_write", "模拟写文件",
-    {"type": "object", "properties": {"path": {"type": "string"}},
-     "required": ["path"]},
-    lambda path: "不会被调用",
-    effect_class="possible",
-))
-executor = ToolExecutor(
-    registry,
-    PermissionGate(PermissionPolicy({"demo_write": ALLOW})),
-)
-
-result = executor.execute_result("demo_write", {}, state)
-state.record_execution_result(result)
-print(result.outcome, result.handler_admitted)
-print(state.snapshot()["current_generation_id"])
-print(state.snapshot()["latest_failure"]["category"])
-PY
-```
-
-它会输出 `invalid False`、`0` 和 `protocol`。同样地，权限拒绝会记录为 `permission`，但不会开启新 generation，因为 handler 从未进入。
-
 ## 设计选择与边界
 
 - **记录事实，不假装理解原因**：例如 handler 异常后的副作用范围通常无法从异常文本推断，因此归为 `unknown` 并 `blocked`，而不是武断地说“可以重试”。
@@ -264,33 +177,6 @@ PY
 - **没有自动恢复**：v0.17 不会自动重试超时、修正参数、询问用户、保存检查点或回滚文件。这些都属于后续版本要在明确规则下处理的行为。
 - **状态只在当前进程内**：失败模型让一次运行中的事实可审计，但本版尚不持久化，也不能跨进程恢复任务。
 
-## 测试与验收
-
-先运行本课直接相关的离线测试：
-
-```bash
-PYTHONPATH=src python -m pytest -q tests/test_executor.py tests/test_loop.py tests/test_context.py
-PYTHONPATH=src python tests/test_executor.py
-PYTHONPATH=src python tests/test_loop.py
-PYTHONPATH=src python tests/test_context.py
-```
-
-然后按项目约定运行完整验证：
-
-```bash
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python scripts/check_tutorials.py
-```
-
-验收时重点确认：
-
-- 获准的 `possible` 调用在 handler 前推进 generation；handler 异常后 attempt、failure 和 `blocked` 状态都存在。
-- 参数不合法和权限拒绝不调用 handler，也不推进 generation。
-- 同一份参数对象无论键顺序如何，hash 相同；数字和字符串等不同 JSON 类型不会被混淆。
-- 全 `none` 回合可以并发，但 State 按模型顺序提交结果；混入 `possible` 时整回合串行。
-- 与 `possible` 同回合的 verification 只得到 `invalid` 工具结果，不执行 verification handler。
-- Structured State 会显示最近 failure、generation 和预算；在 compaction 后仍不泄露敏感参数。
-
 ## 本版特性、下一课与代码索引
 
 v0.17 的独有能力是把每次工具执行记录成有因果关系的 attempt 和 failure，同时把验证证据绑定到可能变化的环境版本。它为后续的受限恢复提供数据基础，但当前版本只负责记录、展示和保守收口。
@@ -299,6 +185,3 @@ v0.17 的独有能力是把每次工具执行记录成有因果关系的 attempt
 - [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/tools/base.py)
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/agent.py)
 - [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/context.py)
-- [`tests/test_executor.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/tests/test_executor.py)
-- [`tests/test_loop.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/tests/test_loop.py)
-- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/tests/test_context.py)

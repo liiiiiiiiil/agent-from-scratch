@@ -5,10 +5,9 @@
 ```bash
 git checkout v0.08
 git diff v0.07..v0.08
-PYTHONPATH=src python tests/test_tools.py
 ```
 
-教程命令默认适用于 Bash/zsh。PowerShell 的免安装等价写法是先执行 `$env:PYTHONPATH="src"`，再执行同一条 `python ...` 命令。需要 LLM 的示例依赖本地配置和网络；每课还应提供无需网络的标准库 smoke test。命令行参数只是首条任务，处理后程序仍进入交互循环；用空行、`exit`、`quit` 或 EOF 退出。
+教程命令默认适用于 Bash/zsh。PowerShell 的免安装等价写法是先执行 `$env:PYTHONPATH="src"`，再执行同一条 `python ...` 命令。需要 LLM 的示例依赖本地配置和网络；教程不承担测试或版本验收说明。命令行参数只是首条任务，处理后程序仍进入交互循环；用空行、`exit`、`quit` 或 EOF 退出。
 
 新增课程请先复制 [`_template.md`](_template.md)。提交前运行 `PYTHONPATH=src python scripts/check_tutorials.py`；检查器默认验证最新版本课程，也支持传入具体教程路径。
 
