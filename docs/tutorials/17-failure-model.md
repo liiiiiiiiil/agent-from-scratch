@@ -4,6 +4,8 @@
 >
 > 代码快照：`v0.17` · 相邻差异：`v0.16..v0.17` · 命令环境：Bash/zsh
 
+> 本课只讨论 `v0.17` 相对 `v0.16` 的失败事实模型；`v0.18` 的恢复策略不属于本课。
+
 ## 本课目标
 
 第 16 课已经能让 agent 在修改后运行验证，并用 `generation` 防止它拿旧测试结果冒充新结果。不过，当工具出错时，当时的状态仍然比较粗糙：一条错误文本很难回答下面这些问题：
@@ -24,6 +26,12 @@ v0.17 为这些问题建立最小的“失败事实模型”（Failure Model）�
 - 根据工具结果和 Structured State 判断失败记录与终态。
 
 本课的原则可以概括为：**模型给出意图，工具给出结果，State 保存可核对的事实。**
+
+## 上一版的问题
+
+第 16 课已经用 `generation` 绑定验证证据，但 Executor 仍主要把结果作为文本回调给 State。于是“参数不合法”“权限拒绝”“handler 已进入后抛错”和“验证命令非零”都可能只剩一段错误文字，运行时无法可靠回答：handler 是否执行过、环境是否可能改变、旧验证是否还能使用，以及失败对应哪一次调用。
+
+v0.17 只解决事实记录和保守收口，不自动修复失败。它把 Executor 的观察结果、State 中的执行记录和模型可见的 Structured State 分开，给每个失败建立稳定的因果链接。
 
 ## 前置条件与版本切换
 
@@ -50,15 +58,54 @@ git checkout v0.17
 
 ## 版本变更定位
 
-v0.16 已有 generation 和验证证据，但工具失败仍以文本表示。v0.17 在 Executor 产出 `ExecutionResult`，由 State 固化为 attempt/failure，并让 agent loop 按 effect class 决定并发或串行。
+图例：`[旧]` v0.16 已有，`[+]` v0.17 新增，`[~]` v0.17 修改，`[C]` 主要消费者，`[B]` 本版边界。
+
+v0.16 基线图：
 
 ```text
-tool call -> 参数校验 -> PermissionGate -> effect class 分流
-          -> ExecutionResult -> AgentState attempt/failure/generation
-          -> role=tool 回灌 -> loop 按事实收口
+[旧] agent_loop
+  -> [旧] ToolExecutor.execute
+       -> [旧] 参数/权限检查 -> [旧] handler
+       -> [旧] 文本结果回调 -> [旧] AgentState.record_tool
+  -> [旧] role=tool 回灌
+  -> [旧] generation / verification evidence
+  -> [旧] completion_reminder 收口
 ```
 
-入口是 `ToolExecutor.execute_result()`；主要消费者是 `AgentState`、ContextManager 的 Structured State 和 agent loop。恢复、重试、回滚仍不在本版范围内。
+v0.17 变更图：
+
+```text
+[旧] agent_loop
+  -> [~] 解析 tool calls
+       -> [+] 全 none effect：并发执行
+       -> [+] 含 possible：按原顺序串行执行和提交
+       -> [+] 混合 possible + verification：verification 记 invalid，不进 handler
+  -> [~] ToolExecutor.execute_result()
+       -> [旧] 参数校验 -> [旧] PermissionGate -> [旧] handler
+       -> [+] ExecutionResult
+       -> [+] AgentState.reserve_attempt()
+       -> [+] AgentState.record_execution_result()
+            -> [+] ExecutionAttempt / FailureEvent / ExecutionGeneration
+            -> [~] verification evidence 绑定 generation
+  -> [旧] role=tool 回灌
+  -> [~] ContextManager._render_state()
+       -> [C] 最近失败、generation、脱敏摘要和预算
+  -> [旧] loop 按事实收口
+
+[B] 本版不负责：自动 retry、参数修正、recover 工具、checkpoint、rollback 或跨进程持久化。
+```
+
+变更映射：
+
+| 图中节点/边 | 类型 | 对应代码 | 作用 |
+|---|---|---|---|
+| `ToolExecutor.execute_result()` -> `ExecutionResult` | `[+]` | [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/tools/base.py) | 统一输出权限、handler、耗时、退出码和错误种类 |
+| `reserve_attempt()` -> generation | `[+]` | [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/state.py) | possible handler 前原子推进代次 |
+| `record_execution_result()` -> attempt/failure | `[+]` | [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/state.py) | 保存事实并建立因果链接 |
+| effect class 分流 | `[+]` | [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/agent.py) | 并发只读调用，串行可能副作用调用 |
+| Structured State 渲染 | `[~]` | [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/context.py) | 裁剪或压缩后仍暴露关键事实 |
+
+入口是 `ToolExecutor.execute_result()`；主要消费者是 `AgentState`、`ContextManager._render_state()` 和 agent loop。恢复、重试、回滚仍不在本版范围内。
 
 ## 为什么这样设计
 
@@ -91,6 +138,18 @@ generation 不是 Git commit，也不是文件版本号。它只是任务运行�
 即使 handler 随后异常，这个 generation 也不会回退。因为“handler 报错”不等于“它什么也没改”。这是一个刻意保守的选择：宁可要求多做一次验证，也不能把旧验证当作仍然有效。
 
 相反，参数校验失败或权限拒绝时 handler 根本没有被调用，所以不会推进 generation。
+
+对应的状态入口是 `reserve_attempt()`：
+
+```python
+before = self._verification_generation
+if effect_class == "possible":
+    self._verification_generation += 1
+    self.verification_evidence.clear()
+return AttemptReservation(attempt_id, before, self._verification_generation)
+```
+
+返回值同时携带调用前后的 generation；handler 抛错时 reservation 仍然存在，因此失败记录不会把代次回滚。
 
 ## 关键流程
 
@@ -131,6 +190,21 @@ generation 不是 Git commit，也不是文件版本号。它只是任务运行�
 
 这不是权限系统。`effect_class` 只描述“执行后环境是否可能变化”，PermissionGate 仍然单独决定是否允许执行。
 
+关键实现只有一个小字段和一个特殊覆盖规则：
+
+```python
+@dataclass
+class Tool:
+    effect_class: EffectClass = "none"
+
+    def effect_for(self, arguments):
+        if self.name == "run_shell" and arguments.get("purpose", "execution") == "verification":
+            return "none"
+        return self.effect_class
+```
+
+它把“工具声明的默认风险”和“本次 verification 调用的实际风险”分开，输入是规范化参数，输出只能是 `none` 或 `possible`。
+
 ### 2. 先校验，再授权，再执行
 
 `ToolExecutor.execute_result()` 先做参数校验：必填字段、默认值、基本 JSON 类型、枚举值和 `maxItems`。它使用项目中工具 schema 所需的那个小型 JSON Schema 子集，不试图实现完整 JSON Schema。
@@ -141,6 +215,21 @@ generation 不是 Git commit，也不是文件版本号。它只是任务运行�
 - 获准：`permission="allowed"`、`handler_admitted=True`；若是 `possible`，此时先预留 generation。
 
 handler 返回后，Executor 会识别 `run_shell` 的两类特殊输出：`[timeout]` 记为 `timeout`，`[exit=N]` 且 `N != 0` 记为 `failed`，同时保留 `exit_code`。普通 handler 异常则记为 `failed` 和 `handler_exception`。
+
+核心顺序由 `execute_result()` 固定：
+
+```python
+normalized = validate_arguments(tool.parameters, arguments)
+effect_class = tool.effect_for(normalized)
+denied = self.gate.guard(name, normalized)
+if denied:
+    return ExecutionResult(..., "denied", False, ...)
+reservation = state.reserve_attempt(effect_class) if state else None
+output = tool.handler(**normalized)
+return ExecutionResult(..., reservation=reservation)
+```
+
+因此 invalid 不会询问权限，denied 不会进入 handler；只有获准的 possible 调用才会拿到 generation reservation。
 
 ### 3. State 负责分类和因果链接
 
@@ -158,6 +247,15 @@ State 不在 Structured State 中渲染原始参数。它只保留 hash 和脱�
 | verification 返回非零或失败 | `validation` | 是 |
 | `possible` handler 抛异常，副作用范围不明 | `unknown` | 否 |
 | 其他执行失败，例如 shell 非零退出 | `deterministic` | 否 |
+
+State 的提交入口保持单一：
+
+```python
+attempt = state.record_execution_result(result)
+failure = state.failure_events[-1] if attempt.failure_id else None
+```
+
+`result` 是 Executor 观察到的输入，返回值是带 `attempt_id` 的不可变记录；失败记录通过 `caused_by_attempt_id` 回链，不能由 `update_todo` 伪造。
 
 每个 `FailureEvent` 都带有 `caused_by_attempt_id`，每个可能副作用开启的 generation 都带有 `opened_by_attempt_id`。因此不需要依赖日志时间或自然语言猜测“这条失败来自哪里”。
 
@@ -180,7 +278,7 @@ State 会保留最后一次 failure，并在以下情况下保守收口：
 
 `RecoveryAction` 数据结构在本版已经预留，是为了让后续版本能沿用相同的因果链；v0.17 不提供 `recover` 工具，不自动 retry，也不做 checkpoint 或 rollback。
 
-## 设计选择与边界
+## 设计边界
 
 - **记录事实，不假装理解原因**：例如 handler 异常后的副作用范围通常无法从异常文本推断，因此归为 `unknown` 并 `blocked`，而不是武断地说“可以重试”。
 - **先推进再执行**：对可能副作用的调用，即使失败也让旧验证过期。代价是部分纯只读 shell 命令会被保守对待，但不会误用旧证据。
@@ -188,6 +286,8 @@ State 会保留最后一次 failure，并在以下情况下保守收口：
 - **并发服从确定性**：只读调用可以并发；含可能副作用的回合牺牲一点并发度，换来稳定的因果顺序和可复现的状态。
 - **没有自动恢复**：v0.17 不会自动重试超时、修正参数、询问用户、保存检查点或回滚文件。这些都属于后续版本要在明确规则下处理的行为。
 - **状态只在当前进程内**：失败模型让一次运行中的事实可审计，但本版尚不持久化，也不能跨进程恢复任务。
+
+正常路径是“校验 -> 授权 -> 执行 -> 记录 -> 回灌”；失败路径分别落到 `invalid`、`denied`、`timeout`、`failed` 或 `blocked`。工具异常在 Executor 边界转换为 `ExecutionResult`，agent loop 继续完成对应的 `role=tool` 回灌；LLM 和 CLI 顶层异常仍由上层处理。本版不保证能判断 partial write 的实际影响，也不把退出码 0 解释为业务正确性。
 
 ## 运行与观察
 
@@ -201,3 +301,4 @@ v0.17 的独有能力是把每次工具执行记录成有因果关系的 attempt
 - [`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/tools/base.py)
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/agent.py)
 - [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/context.py)
+- [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.17/src/mini_agent/config.py)
