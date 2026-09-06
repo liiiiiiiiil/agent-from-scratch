@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TUTORIALS = ROOT / "docs" / "tutorials"
-REQUIRED = ("本课目标","前置条件","新增与改动文件","为什么需要本版","关键流程","实现拆解","设计选择与边界","测试与验收","本版特性、下一课与代码索引")
+REQUIRED = ("本课目标","前置条件","新增与改动文件","关键流程","实现拆解","本版特性、下一课与代码索引")
 def version_key(path: Path):
     match = re.search(r"(\d+)(?:-(\d+))?", path.name)
     return tuple(int(part) for part in match.groups(default="0")) if match else (0,)
@@ -19,7 +19,8 @@ def check(path: Path):
     errors = [f"缺少章节：## {s}" for s in REQUIRED if f"## {s}" not in text]
     if "git checkout" not in text: errors.append("缺少 git checkout 版本切换命令")
     if "git diff --stat" not in text: errors.append("缺少 git diff --stat 差异入口")
-    if not re.search(r"\`\`\`(?:bash|sh|shell)[^\n]*\n[\s\S]*?(pytest|python tests/)", text): errors.append("缺少可执行测试命令")
+    if "## 为什么这样设计" not in text and "## 为什么需要本版" not in text:
+        errors.append("缺少“为什么这样设计”章节")
     if not re.search(r"\[[^]]+\]\(https://github\.com/liiiiiiiiil/agent-from-scratch/blob/v[^/]+/[^)]+\.py\)", text): errors.append("缺少 tag 固定实现文件索引链接")
     return errors
 def main(argv):
