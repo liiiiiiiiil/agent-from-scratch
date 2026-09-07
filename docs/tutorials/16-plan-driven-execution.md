@@ -1,240 +1,276 @@
 # 第 16 课：计划驱动执行（Plan-driven Execution，v0.16）
 
-上一课：[任务清单与状态](15-task-state.md) · [教程总览](README.md) · 下一课：规划中
+上一课：[任务清单与状态](15-task-state.md) · [教程总览](README.md) · 下一课：[失败事实模型](17-failure-model.md)
 
 > 代码快照：`v0.16` · 相邻差异：`v0.15..v0.16` · 命令环境：Bash/zsh
 
+> 运行要求：Python 3.10+；运行时只使用标准库。
+
 ## 本课目标
 
-v0.16 不加入自动规划器或持久化数据库，而是把 Todo、真实工具结果和验证结果连成一个保守的完成闭环：
+第 15 课让 agent 能保存 Todo（任务清单），但 Todo 只表示模型的计划，不能证明任务真的完成。本课为复杂任务补上完成闭环：模型建立计划、执行工具、根据结果调整计划，最后用独立命令留下验证证据。
+
+读完后，你应能解释下列规则：
 
 ```text
-Plan -> Execute -> Observe -> Replan -> Verify -> done
+Plan -> Execute -> Observe -> Verify -> 最终回复
+                         └─ 发现问题时 Replan -> Execute
 ```
 
-读完本课，你应该能够：
+这里的 `Replan`（重排计划）是条件分支，不是每一轮都必须经过的阶段。观察结果已经足够明确时可以直接验证；发现失败、遗漏或新工作时，模型才调整 Todo 并继续执行。
 
-- 解释 `generation` 为什么会让旧验证证据失效。
-- 区分 `run_shell` 的 `execution` 与 `verification`，以及它们对状态的不同影响。
-- 看懂“最终文本回复”出现后，agent loop 如何提醒一次、阻止过早完成并最终收口为 `blocked`。
-- 能沿着正常路径解释失败验证、任务重置和最大迭代收口。
+- 为什么 Todo 全部标为 `completed` 仍不一定能结束；
+- 为什么一次可能改动环境的操作会让旧验证失效；
+- 为什么最终回复前最多只提醒一次，第二次仍不满足条件时状态为 `blocked`。
 
-本课的核心原则是：**计划表达意图，状态记录事实，独立验证才算完成证据。**
+本课的学习主线是：**计划记录意图，工具结果记录事实，当前代次的验证记录才是完成证据。**
 
 ## 上一版的问题
 
-第 15 课的 Todo 能记录计划，但“标记完成”不代表文件真的改过，也不代表改完后检查仍会通过。模型可能把“运行测试”设为 `completed`，却从未执行测试。v0.16 要把 Todo、真实工具结果和验证结果连成一个保守的完成闭环，同时不把验证命令或计划交给运行时自动生成。
+v0.15 已经把 Todo 放进独立的 `AgentState`，模型可以持续更新计划。但模型自己把“运行测试”改为完成，不代表测试实际运行过；即使测试刚通过，随后一次写文件也可能让结果过期。
+
+因此，单靠消息历史或 Todo 状态无法回答“现在这份工作区是否已验证”。v0.16 不试图自动替模型制定计划或挑选测试命令，而是让运行时保存工具产生的事实，并在模型准备结束时检查完成条件。
 
 ## 前置条件与版本切换
 
-需要 Python 3.10+，运行时只有标准库。建议先阅读第 15 课，了解 Todo 的完整替换和 Structured State。在对应 tag 查看差异：
+建议先阅读第 15 课，了解 `AgentState`、Todo 的完整替换规则，以及状态为何不直接写入消息历史。以下命令适用于 Bash/zsh：
 
 ```bash
 git checkout v0.15
 git diff --stat v0.15..v0.16
-git diff v0.15..v0.16 -- src/mini_agent/state.py src/mini_agent/agent.py src/mini_agent/context.py src/mini_agent/tools/shell.py
+git diff v0.15..v0.16 -- src/mini_agent/state.py src/mini_agent/agent.py src/mini_agent/context.py src/mini_agent/tools/shell.py src/mini_agent/prompt.py
 git checkout v0.16
 ```
 
-切换回工作区版本后再运行本课示例。
+`git diff --stat` 先给出本版范围；第二条 diff 可直接定位本课的主要调用链。阅读和运行都应在 `v0.16` 快照中进行。
 
 ## 新增与改动文件
 
-先用 `git diff --stat v0.15..v0.16` 确认本版范围；下表只列与本课主线直接相关的文件。
-
-| 文件 | 相对 v0.15 的变化 | 作用 |
+| 文件 | 变化 | 作用 |
 |---|---|---|
-| `src/mini_agent/state.py` | 增加 `VerificationEvidence`、generation、完成条件、`begin_task()` | 保存验证事实并使状态转换有依据 |
-| `src/mini_agent/tools/shell.py` | `run_shell(command, purpose=...)` | 区分可能改变环境的执行命令和验证命令 |
-| `src/mini_agent/context.py` | Structured State 增加验证字段；增加 Runtime Notice | 将缺口只注入下一次 LLM 请求 |
-| `src/mini_agent/agent.py` | 最终回复检查 reminder；支持 `blocked`/`failed` 收口 | 防止模型未经验证就结束，达到上限时明确失败 |
-| `src/mini_agent/prompt.py` | core rules 增加 Plan → Verify 规则 | 让模型知道何时建立 Todo、何时验证 |
-| `src/mini_agent/__main__.py` | 每项任务调用 `begin_task()`；结束时设置 `done`/`failed` | CLI 任务边界和状态生命周期 |
-| `tests/test_state.py`、`test_loop.py`、`test_context.py`、`test_tools.py` | 覆盖 generation、提醒、协议和 shell schema | 本版本的可执行验收 |
+| `src/mini_agent/state.py` | 增加验证证据、代次和完成条件 | 将计划和实际执行结果分开保存 |
+| `src/mini_agent/tools/shell.py` | `run_shell` 增加 `purpose` | 区分执行命令与验证命令 |
+| `src/mini_agent/agent.py` | 最终文本前检查完成条件 | 一次提醒后正常收口或标记阻塞 |
+| `src/mini_agent/context.py` | 渲染验证状态与 Runtime Notice | 把最新事实和提醒交给下一轮模型 |
+| `src/mini_agent/prompt.py` | 增加计划—验证规则 | 告知模型复杂任务的工作协议 |
+| `src/mini_agent/__main__.py` | 每项任务先调用 `begin_task()` | 明确任务边界，重置本任务的运行事实 |
 
 ## 版本变更定位
 
 图例：`[旧]` v0.15 已有，`[+]` v0.16 新增，`[~]` v0.16 修改，`[C]` 主要消费者，`[B]` 本版边界。
 
-v0.15 的相关基线是“工具执行后记录摘要，最终文本直接交给 CLI 收口”；v0.16 在同一条链上加入任务重置、验证证据生命周期和最终完成闸门。
-
-v0.15 基线图：
+v0.15 的入口已经能执行工具、把结果回灌模型，并让 Todo 跟随会话存在；模型给出不带工具调用的文本后，CLI 会直接将任务收口。
 
 ```text
+v0.15 基线：
+
 [旧] CLI run_task
-  -> [旧] AgentState.task/status
-  -> [旧] history: user message
+  -> [旧] state.task/status + history
   -> [旧] agent_loop
        -> [旧] call_llm
        -> [旧] ToolExecutor.execute
-            -> [旧] PermissionGate
-            -> [旧] tool.handler
+            -> [旧] PermissionGate -> tool handler
             -> [旧] state.record_tool
-       -> [旧] history: role=tool
+       -> [旧] 全部 role=tool 结果回灌
        -> [旧] 下一轮 LLM
-  -> [旧] 最终文本
-  -> [旧] CLI 直接收口为 done
+  -> [旧] 无 tool_calls 的最终文本
+  -> [旧] CLI 将 running 收口为 done
 ```
 
-v0.16 变更图：
+v0.16 在工具结果与最终收口之间插入“验证事实”和“完成检查”。正常路径是当前代次验证通过后结束；重要的降级路径是模型两次试图过早结束后标记为 `blocked`。重规划由模型根据观察或验证结果决定，运行时不强制阶段顺序。
 
 ```text
-[+] CLI run_task
-  -> [+] state.begin_task(task)
-       清空上一任务的 Todo、文件、错误和证据
-       初始化当前任务 generation
-  -> [旧] agent_loop
-       -> [旧] call_llm
-       -> [+] update_todo
-            -> [+] state-bound handler
-            -> [+] AgentState.update_todos()
-            -> [C] ContextManager._render_state()
-       -> [旧] ToolExecutor.execute
-            -> [旧] PermissionGate
-            -> [旧] tool.handler
-            -> [~] state.record_tool()
-                 ├─ [~] write_file/edit_file 或 run_shell(execution)
-                 │    -> generation 递增
-                 │    -> 旧 verification evidence 失效
-                 └─ [+] run_shell(verification)
-                      -> VerificationEvidence
-                      -> 当前 generation 的通过/失败证据
-       -> [旧] role=tool 回灌
+v0.16 变更：
+
+[+] CLI run_task -> [C] state.begin_task(task)
+                     └-> 清空 Todo、错误、文件和旧验证证据
+  -> [旧] agent_loop -> [旧] call_llm
+       -> [+] update_todo -> [C] state.update_todos()        (计划意图，可按需更新)
+       -> [旧] ToolExecutor.execute -> handler
+            -> [~] state.record_tool()                       (执行事实)
+                 ├-> write_file/edit_file 或 run_shell(execution)
+                 │    -> [+] generation 加一，旧证据失效
+                 └-> run_shell(verification)
+                      -> [+] VerificationEvidence
+                      -> [C] 当前 generation 的通过/失败状态
+       -> [旧] role=tool 全量回灌 -> 下一轮 LLM
        -> [C] ContextManager.prepare_messages()
-            ├─ [~] Structured State 增加验证字段
-            └─ [+] Runtime Notice（只进入下一次请求视图）
-       -> [+] 最终文本 completion_reminder()
-            ├─ 无缺口 -> [C] CLI 收口为 done
-            ├─ 首次有缺口 -> [+] set_runtime_notice()
-            │                 -> 下一轮 LLM
-            └─ 再次仍有缺口 -> [+] status=blocked
+            -> [~] Structured State
+            -> [+] Runtime Notice（只供下一次请求）
+  -> [~] 无 tool_calls 的最终文本
+       ├-> 条件满足 -> CLI 收口为 done
+       ├-> 首次有缺口 -> Runtime Notice -> 再请求一次 LLM
+       └-> 仍有缺口 -> status=blocked                         (降级路径)
 
-[B] 本版不负责：自动生成 Todo、自动选择验证命令、自动重试、回滚或持久化计划。
+[B] 不自动生成 Todo、选择验证命令、重试、回滚或持久化计划。
 ```
-
-变更映射：
-
-| 图中节点/边 | 类型 | 对应代码 | 主要消费者/作用 |
-|---|---|---|---|
-| `run_task -> begin_task()` | `[+]` | `src/mini_agent/__main__.py` | `AgentState`；明确任务边界并重置运行事实 |
-| `update_todo -> update_todos()` | `[+]` | `src/mini_agent/state.py`、`src/mini_agent/tools/todo.py` | Structured State；保存模型计划意图 |
-| `run_shell(purpose=...)` | `[+]` | `src/mini_agent/tools/shell.py` | `state.record_tool()`；区分执行和验证 |
-| `record_tool()` 的 generation/evidence 分支 | `[~]` | `src/mini_agent/state.py` | `completion_reminder()`；维护证据生命周期 |
-| Structured State 与 Runtime Notice | `[~]/[+]` | `src/mini_agent/context.py` | 下一次 LLM 请求；保留最新验证事实并传递一次提醒 |
-| 最终文本 `completion_reminder()` | `[+]` | `src/mini_agent/agent.py` | `done`、`blocked` 收口；防止未经验证直接完成 |
-
-入口是 `run_task()` 和模型发出的 `update_todo`/`run_shell` 调用；主要消费者是 `AgentState`、`ContextManager` 和 agent loop 的收口逻辑。本课不自动规划、重试、回滚或持久化计划；`ExecutionResult`、`effect_class` 等后续失败模型能力不属于 v0.16。
-
-## 为什么这样设计
-
-Todo 的状态变化不等于环境变化。即使测试曾经通过，后面一次写文件也可能破坏结果。因此运行时必须区分“命令已经执行”和“当前代码已经验证”。v0.16 用下面两条规则实现这个区分：
-
-1. 成功的 `write_file`/`edit_file`，以及真正执行的 `run_shell(purpose="execution")`，都视为可能改变环境的操作。
-2. 只有当前 generation 中、`run_shell(purpose="verification")` 返回明确 `[exit=0]` 且未超时的证据，才算验证通过。
-
-执行命令即使非零退出或超时，也会让旧证据失效，因为环境已经可能变化。权限拒绝没有进入 handler，所以不会无故使证据失效。验证失败或超时会保留失败证据，并继续要求重试。
 
 ## 核心概念与数据结构
 
-### 计划、执行与验证
+### 1. Todo 不是完成证据
 
-Todo 表达模型的任务意图；工具回调记录执行事实；只有绑定当前 generation（代次）的验证证据，才可能满足完成条件。三者互相独立，避免把“计划已完成”误当成“环境已验证”。
+问题是：模型可以更新 Todo，却无法仅从这个动作证明任何文件或命令真的发生。
 
-### 状态不变量与证据生命周期
+直观地说，Todo 像待办纸条；`record_tool()` 才像执行日志。v0.16 继续让 `update_todo` 只更新计划，不把它混入工具历史、错误或改动文件列表：
 
-`AgentState` 在 messages 之外维护运行事实：
-
-```text
-task / current_goal / todos
-files_changed / errors / tool_history
-status: running | done | blocked | failed
-verification_evidence[]
-_verification_generation
-_last_verified_generation
-_verification_required
+```python
+# src/mini_agent/state.py（v0.16）
+def record_tool(self, name, args, ok, brief):
+    # Todo 是任务意图，不是执行事实。
+    if name == "update_todo":
+        return
+    ...
 ```
 
-`VerificationEvidence` 保存 `command`、`outcome`（`passed`/`failed`）、解析出的 `exit_code` 和截断后的 `output`。`has_verification_evidence()` 只有在证据非空、最后一次验证通过且 generation 相等时才返回 True。它不会判断测试是否覆盖了正确业务场景。
+因此，模型调用 `update_todo` 后仍须调用真实工具。工具执行器通过 `on_result=state.record_tool` 把每个工具结果交给状态；agent loop 不需要知道每种工具如何改变状态。工具 handler 的异常仍在工具边界转为可回灌结果，LLM 与 CLI 顶层异常不由 loop 吞掉。
 
-`record_tool()` 由 `ToolExecutor(on_result=state.record_tool)` 回调触发，所以 agent loop 不必理解每个工具怎样改状态。`update_todo` 有意不进入 `tool_history`、错误或文件列表，因为它只是计划意图。`begin_task(task)` 会清空上一任务的 todos、文件、错误和证据，递增 generation，但会保留会话 history 供后续对话使用。
+### 2. 用 generation 让旧验证自动过期
 
-## 关键流程
+问题是：一次验证成功后，后续修改可能破坏它。若只保存“测试曾通过”，就会把旧结果误当成当前工作区的结果。
 
-一次典型任务的消息和状态变化如下：
+`generation`（代次）是“可能改动环境”后的计数。成功的 `write_file`、`edit_file`，以及实际进入 handler 的 `run_shell(purpose="execution")` 都会调用 `_invalidate_verification()`：
 
-```text
-CLI run_task
-  -> state.begin_task(task)
-  -> LLM: update_todo（Plan）
-  -> LLM: read/edit/write/run_shell execution（Execute）
-       -> Executor on_result -> record_tool（Observe）
-  -> LLM 根据结果更新 Todo（Replan）
-  -> LLM: run_shell verification
-       -> [exit=0] 才设置 last_verified_generation
-  -> LLM 最终文本
-       -> 无缺口：返回；有缺口：Runtime Notice 后再请求一次
+```python
+# src/mini_agent/state.py（v0.16）
+def _invalidate_verification(self) -> None:
+    self._verification_generation += 1
+    self.verification_evidence.clear()
+    self._last_verified_generation = -1
+    self._verification_required = True
+
+if name == "run_shell" and args_copy.get("purpose", "execution") == "execution":
+    if "权限拒绝" not in brief:
+        self._invalidate_verification()
 ```
 
-`ContextManager.prepare_messages()` 每轮都会重新生成 Structured State。因此压缩、裁剪或长对话都不会把最新验证状态留在旧摘要里。Runtime Notice（运行时提示）不写入 `history`，只出现在下一次请求视图中；即使这次请求触发压缩，它也会保留到最终构建完成后再消费。
+运行时无法可靠判断任意 shell 命令是否只读，所以即使 execution 命令非零退出，也保守地使旧证据失效。权限拒绝意味着 handler 没有运行，因而不使证据失效。这样，“先测试、再改文件、直接回复”一定会被视为尚未验证。
 
-## 实现拆解
+`begin_task(task)` 则在每个 CLI 任务开始时清空 Todo、工具历史、错误和证据，重置为 `running`，并推进 generation。它保留会话 `history`，所以命令行首条任务结束后仍可在交互循环中追问。
 
-### `run_shell` 的 purpose 与输出协议
+### 3. `verification` 是可检查的独立证据
 
-`purpose` 可以是 `execution` 或 `verification`，省略时一定是 `execution`，所以兼容 v0.10 及更早调用。工具仍通过 `subprocess.run(shell=True)` 在当前工作目录执行，超时为 30 秒，stdout/stderr 合并后最多保留 2000 字符：
+问题是：普通 shell 命令与“用来确认最终结果的命令”语义不同。v0.16 在工具 schema 中增加 `purpose`，默认是 `execution`，从而保持旧调用兼容：
 
-- 正常结束始终带 `[exit=N]`，无输出时为 `[exit=N] (无输出)`。
-- 超时返回 `[timeout] ...`，没有 exit code。
+```python
+# src/mini_agent/tools/shell.py（v0.16）
+def run_shell(command: str, purpose: str = "execution"):
+    ...
 
-`purpose` 只影响状态怎样记录，不改变命令的执行权限；权限仍由 PermissionGate 决定。
+"purpose": {
+    "type": "string",
+    "enum": ["execution", "verification"],
+    "default": "execution",
+}
+```
 
-### generation 绑定验证
+当 `purpose="verification"` 时，`record_tool()` 从工具结果读取 `[exit=N]`。`ok` 为真、没有超时且退出码为 0，才生成当前 generation 的通过证据；其他结果都记录为失败并继续要求验证：
 
-成功写入或 execution shell 都会调用 `_invalidate_verification()`。它会递增 generation、清空旧证据，并设置 `verification_required=True`。verification shell 会解析结果：只有 `[exit=0]`、`ok` 且未超时时才记为 passed，并把 `_last_verified_generation` 绑定到当前 generation；其他情况都记为 failed。
+```python
+passed = bool(ok and not timeout and code == 0)
+evidence = VerificationEvidence(
+    command=str(args_copy.get("command", "")),
+    outcome="passed" if passed else "failed",
+    exit_code=code,
+    output=text,
+)
+```
 
-所以“先验证、再执行、最后直接回复”一定仍会触发提醒，因为最后一次执行已经让证据过期。最终测试或检查应作为最后一个 verification 调用。
+`VerificationEvidence` 保存命令、`passed`/`failed`、退出码和截断后的输出。shell 工具超时返回 `[timeout]`；正常结束无论退出码是否为 0 都带 `[exit=N]`。证据只说明该进程成功退出，并不保证测试覆盖充分、验证命令正确或业务一定正确。
 
-### 完成提醒与 loop 收口
+### 4. 完成提醒是一次纠正，不是自动重试器
 
-`completion_reminder()` 遇到未完成 Todo 或待验证的可能变更时会返回消息。简单的只读任务没有这些缺口，所以可以直接结束。agent loop 收到不含 `tool_calls` 的 assistant 消息后会按以下规则处理：
+问题是：模型可能在 Todo 未完成或验证仍需要时发出最终文本。完全相信文本会过早结束；无限阻止又会让状态忘记更新的模型永远循环。
 
-1. 第一次发现 reminder：设置 Runtime Notice，继续下一轮；提醒最多纠正一次，不会自动替模型规划或重试。
-2. 第二次仍有缺口：将 `state.status` 设为 `blocked`，返回当前文本，避免无限循环。
-3. 有工具调用则继续正常执行；达到 `MAX_ITERATIONS`（默认 50）后返回“达到最大迭代次数”，并把状态设为 `failed`。
+状态把缺口集中成一个检查：
 
-CLI 的 `run_task()` 正常返回且状态仍为 `running` 时会设为 `done`；顶层异常或达到最大迭代结果时设为 `failed`。loop 不会兜底 LLM 或 CLI 顶层异常；工具边界的异常仍由 Executor/loop 转成可回灌的工具结果。
+```python
+# src/mini_agent/state.py（v0.16）
+def completion_reminder(self) -> dict[str, object] | None:
+    missing = [t.content for t in self.todos if t.status != "completed"]
+    needs_verify = self._verification_required
+    if not missing and not needs_verify:
+        return None
+    return {
+        "unfinished_todos": missing,
+        "verification_required": needs_verify,
+        "message": "任务尚未满足完成条件，请继续执行并验证。",
+    }
+```
+
+agent loop 首次看到缺口时调用 `set_runtime_notice()`，继续请求模型；第二次仍有缺口时设 `status="blocked"` 并返回该文本。这个提示不写入 `history`，只在下一次 `prepare_messages()` 构建的请求视图中出现；即使该次构建触发上下文压缩，提示也会在最终视图完成后才被消费。
+
+## 为什么这样设计
+
+可以把“验证通过”直接塞进 Todo 状态，或者由 Python 自动从命令文本猜测哪些命令是测试。v0.16 没有这样做：前者会再次把模型意图和运行事实混在一起，后者既容易误判，也会替用户选择项目特定的验证方式。
+
+当前设计把责任分开：模型维护简短、可调整的计划并显式标注验证命令；运行时只做保守记录和完成检查。收益是证据与最近一次潜在环境变化绑定，且在裁剪、压缩消息历史后仍由 `AgentState` 提供。代价是简单但实际只读的 execution shell 也会要求再次验证，且系统不能判断验证是否足够全面。
+
+一次提醒是另一项取舍。它给模型纠正遗漏的机会，但不把 Todo 的小错误变成无限循环。它刻意不是重试策略，更不会自行补建 Todo、执行测试或回滚修改。
 
 ## 设计边界
 
-- **不自动规划**：模型负责调用 `update_todo`。运行时只检查状态，不替模型生成计划。
-- **保守地把 execution 当作可能变更**：运行时无法可靠判断任意 shell 命令是否改了环境，所以即使命令看起来只读或非零退出，也会让证据失效。
-- **证据不是业务正确性证明**：`[exit=0]` 只代表进程成功退出；测试覆盖不足、命令选错仍需要模型判断。
-- **不持久化、不撤回流式输出**：任务状态只在当前进程中保存；已经打印的草稿不会被运行时收回。
-- **提醒只一次**：这是防止过早结束的闸门，不是重试策略；缺口持续存在时，状态最终明确为 `blocked`。
+- 复杂任务由 prompt 建议先建 Todo；简单问答、一次读取或简单计算可直接完成，运行时不强制生成计划。
+- `run_shell` 的 `purpose` 只改变状态记录方式，不改变权限。权限仍由 `PermissionGate` 决定。
+- 验证失败、超时或没有退出码都会留下失败证据，并要求模型根据结果调整 Todo；运行时不自动选择下一条命令。
+- 只有“所有 Todo 已完成”且没有待验证的潜在变化，最终文本才可直接收口。没有修改的只读任务通常不需要验证。
+- 达到 `MAX_ITERATIONS`（默认 50）时 loop 返回“达到最大迭代次数”并设状态为 `failed`；CLI 正常返回且仍为 `running` 时才设为 `done`。
+- 状态只存活于当前进程；流式输出过的草稿不会被撤回。
+
+## 关键流程
+
+下面是一项“修改并检查”的正常路径，以及验证失败时的回路。箭头表示当前 v0.16 的调用或数据流。
+
+```text
+CLI 收到任务
+  -> state.begin_task()
+  -> LLM 调用 update_todo：调查 / 修改 / 验证
+  -> LLM 调用读写工具或 run_shell(execution)
+  -> ToolExecutor 的 on_result -> state.record_tool()
+       -> generation 变化，verification_required=true
+  -> ContextManager 将最新 Structured State 注入下一轮
+  -> LLM 按需更新 Todo，再调用 run_shell(verification)
+       ├-> [exit=0]：当前 generation 的验证通过
+       │    -> Todo 全完成 -> 最终文本 -> done
+       └-> 非零 / timeout：失败证据
+            -> Replan：更新 Todo
+            -> Execute：修复
+            -> 再次 verification
+```
+
+如果观察阶段已经发现计划需要变化，也可以在验证前先 Replan；这只是模型选择的执行路径，不是运行时硬编码的状态转换。
+
+若模型在验证前给出最终文本，读者会先看到该文本已流式输出，然后下一轮请求收到 `[Runtime Notice]`。这证明提醒是请求视图中的纠正信息，而不是对已打印内容的撤回；第二次仍未满足条件才收口为 `blocked`。
+
+## 实现拆解
+
+`ContextManager._render_state()` 每轮基于 `state.snapshot()` 重新生成 Structured State，其中包括 `Verification` 和 `Verification required: true`。因此状态不是旧对话的一段文本：上下文被裁剪或压缩时，最新验证事实仍会再次注入。
+
+prompt 负责告诉模型复杂任务采用 `Plan -> Execute -> Observe -> Verify`，并在观察或验证发现问题时调整 Todo；Python 不实现复杂任务分类器，也不强制 Replan 的调用时机。Todo 工具每次提交完整列表，最多一个条目可为 `in_progress`，这些 v0.15 规则继续有效。
+
+最终收口的调用顺序也值得注意：带 `tool_calls` 的 assistant 消息必须先执行并按原顺序回灌全部 `role=tool` 结果，下一轮才可能看到更新后的 State。只有没有 `tool_calls` 的消息才进入 `completion_reminder()` 检查，所以验证结果不会在同一轮被跳过。
+
+完整实现可在固定快照中阅读：[state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/state.py)、[agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)、[context.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/context.py)、[shell.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/tools/shell.py)。
 
 ## 运行与观察
 
-配置好本地 LLM 后，用包含修改和检查的真实任务启动 CLI（命令环境：Bash/zsh）：
+配置本地 LLM 后，可在 Bash/zsh 中用一项需要修改和检查的真实任务启动程序：
 
 ```bash
 PYTHONPATH=src python -m mini_agent "修改实现并运行检查，维护 Todo"
 ```
 
-写入或 execution shell 后，Agent 会把旧验证标为过期；只有针对当前 generation 的 verification 通过，最终回复才不会收到提醒。提醒最多纠正一次，仍有缺口时进入 `blocked`；命令行首条任务处理后仍继续交互。
+程序会把这段参数作为“命令行首条任务”，处理后仍进入交互循环。观察模型是否先更新 Todo；任何写入或 execution shell 后，Structured State 应出现 `Verification required: true`。只有最后一次 `run_shell(purpose="verification")` 返回 `[exit=0]` 后，这个字段才消失；这正是验证证据绑定当前 generation 的表现。
 
 ## 本版特性、下一课与代码索引
 
-v0.16 计划驱动执行（Plan-driven Execution）的独有能力是“generation 绑定的验证证据、一次性完成提醒，以及明确的 done/blocked/failed 状态”。下一版本仍在规划中；运行时不会自动保存计划，也不会替用户决定验证命令。
+v0.16 新增了 generation 绑定的验证证据、一次性完成提醒，以及 `done`、`blocked`、`failed` 三种任务收口状态。它仍是单 agent 的轻量协议，不会自动规划或自动恢复失败。
 
-- [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/state.py)
-- [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)
-- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/context.py)
-- [`src/mini_agent/tools/shell.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/tools/shell.py)
-- [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/prompt.py)
-- [`src/mini_agent/permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/permission.py)
-- [`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/__main__.py)
-- [`tests/test_stage5_e2e.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_stage5_e2e.py)
-- [`tests/test_state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_state.py)
-- [`tests/test_loop.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_loop.py)
-- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_context.py)
-- [`tests/test_tools.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/tests/test_tools.py)
+下一课：[失败事实模型](17-failure-model.md) 会进一步区分“工具没有运行”“可能产生副作用”“验证失败”等不同失败事实。
+
+- [src/mini_agent/state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/state.py)
+- [src/mini_agent/agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/agent.py)
+- [src/mini_agent/context.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/context.py)
+- [src/mini_agent/tools/shell.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/tools/shell.py)
+- [src/mini_agent/prompt.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/prompt.py)
+- [src/mini_agent/__main__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/__main__.py)
+

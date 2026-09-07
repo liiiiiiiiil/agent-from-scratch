@@ -30,9 +30,8 @@ Execute：执行工具
         ↓
 Observe：读取工具结果、错误和环境变化
         ↓
-Replan：根据事实推进或调整 Todo
-        ↓
 Verify：执行验证并记录完成证据
+        └── 发现问题或验证失败 → Replan：根据事实推进或调整 Todo → Execute
 ```
 
 这三个版本不是三个独立功能：项目级指令（Project Instructions）是规划的约束输入，任务清单（Todo）是 Agent 的动态工作计划，Execution State 是 Runtime 的事实，Verification 是任务完成的证据；计划驱动执行（Plan-driven Execution）让它们共同参与任务生命周期。
@@ -46,7 +45,7 @@ Verify：执行验证并记录完成证据
 - 用显式 Todo 表示复杂任务的动态工作计划
 - 由模型通过受控工具更新 Todo，而不是从自然语言中猜测进度
 - 在 Context compaction 后重新注入准确的项目规则与任务状态
-- 建立“Plan → Execute → Observe → Replan → Verify”的最小闭环
+- 建立“Plan → Execute → Observe → Verify”的最小闭环，并在发现问题或验证失败时 Replan 后继续执行
 
 ### 2.2 本阶段不做
 
@@ -270,7 +269,7 @@ Todo 工具是内存状态工具，不应触发文件写入权限；它也不能
 
 ### 7.1 目标
 
-一句话：**让 Todo 从静态 checklist 升级为动态工作协议，使复杂任务按“Plan → Execute → Observe → Replan → Verify”循环推进。**
+一句话：**让 Todo 从静态 checklist 升级为动态工作协议，使复杂任务按“Plan → Execute → Observe → Verify”推进，并在需要时 Replan 后继续执行。**
 
 v0.15 解决“计划存在哪里”，v0.16 计划驱动执行（Plan-driven Execution）解决“什么时候建计划、如何维护，以及何时算完成”。本版仍是单 agent，不增加新的 agent 角色。
 
@@ -285,14 +284,14 @@ v0.15 解决“计划存在哪里”，v0.16 计划驱动执行（Plan-driven Ex
                    ↓
                 Observe：读取结果、错误和环境变化
                    ↓
-             Replan：推进、重排、删除或新增 Todo
-                   ↓
                 Verify：运行测试/构建/检查并记录证据
-                   ├── 未通过 → 回到 Replan
-                   └── 通过且无未完成项 → 最终回复
+                   ├── 通过且无未完成项 → 最终回复
+                   └── 发现问题或未通过 → Replan：推进、重排、删除或新增 Todo
+                                             ↓
+                                          Execute
 ```
 
-Todo 是动态工作计划，不是一次性 checklist。执行结果可能使步骤完成、失败、重排、删除或产生新的必要步骤；模型必须根据 Observe 阶段的事实重新规划，而不是机械地按初始顺序逐项勾选。
+Todo 是动态工作计划，不是一次性 checklist。执行或验证结果可能使步骤完成、失败、重排、删除或产生新的必要步骤；模型应根据事实决定是否重新规划，而不是机械地按初始顺序逐项勾选。Replan 是条件动作，不是每轮必经阶段。
 
 ### 7.3 复杂任务判断
 
