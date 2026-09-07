@@ -8,7 +8,7 @@
 
 ## v0.16 计划驱动执行（Plan-driven Execution）
 
-复杂任务按 Plan → Execute → Observe → Replan → Verify 闭环执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。这种保守策略不依赖第三方库或命令解析。
+复杂任务通常按 Plan → Execute → Observe → Verify 推进；如果观察结果或验证结果暴露问题，模型再 Replan（重排 Todo）并继续执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。这种保守策略不依赖第三方库或命令解析。
 
 ## v0.15 任务清单与状态（Todo / Task State）
 
