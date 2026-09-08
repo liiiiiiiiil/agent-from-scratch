@@ -73,6 +73,9 @@ class AttemptReservation:
     attempt_id: str
     pre_generation_id: int
     generation_id: int
+    caused_by_failure_id: str | None = None
+    caused_by_attempt_id: str | None = None
+    recovery_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,7 @@ class ExecutionAttempt:
     error_kind: str | None = None
     output_excerpt: str = ""
     failure_id: str | None = None
+    recovery_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,9 @@ class AgentState:
     _next_failure: int = field(default=1, init=False, repr=False)
     _fingerprint_counts: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     _repair_cycles: int = field(default=0, init=False, repr=False)
+    _failure_retry_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _next_recovery: int = field(default=1, init=False, repr=False)
     _lock: Any = field(default_factory=Lock, init=False, repr=False, compare=False)
 
     @property
@@ -191,6 +198,66 @@ class AgentState:
                 self._verification_required = True
             return AttemptReservation(attempt_id, before, self._verification_generation)
 
+    def reserve_recovery(self, action: str, caused_by_failure_id: str, reason: str,
+                         requested_attempt: str | None = None,
+                         requested_tool: str | None = None,
+                         requested_arguments: dict[str, Any] | None = None) -> tuple[RecoveryAction | None, str | None, dict[str, Any] | None]:
+        """Atomically validate and reserve one recovery action and successor generation."""
+        with self._lock:
+            failure = next((f for f in self.failures if f.failure_id == caused_by_failure_id), None)
+            if failure is None:
+                return self._reject_recovery(action, caused_by_failure_id, reason, "未知 failure") + (None,)
+            if self.status in ("failed", "blocked"):
+                return self._reject_recovery(action, caused_by_failure_id, reason, "任务已终态") + (None,)
+            if action not in ("retry", "adjust", "ask", "block"):
+                return self._reject_recovery(action, caused_by_failure_id, reason, "不支持的 action") + (None,)
+            if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
+                self._terminal("blocked", "恢复动作预算已耗尽", caused_by_failure_id)
+                return self._reject_recovery(action, caused_by_failure_id, reason, "恢复动作预算已耗尽") + (None,)
+            source_attempt = next((a for a in self.attempts if a.attempt_id == requested_attempt), None)
+            if action == "retry":
+                if source_attempt is None or source_attempt.failure_id != caused_by_failure_id:
+                    return self._reject_recovery(action, caused_by_failure_id, reason, "retry 必须引用直接失败 attempt") + (None,)
+                count = self._failure_retry_counts.get(caused_by_failure_id, 0)
+                if count >= MAX_FAILURE_RETRIES:
+                    return self._reject_recovery(action, caused_by_failure_id, reason, "failure retry 预算已耗尽") + (None,)
+                self._failure_retry_counts[caused_by_failure_id] = count + 1
+                requested_tool = source_attempt.tool
+                requested_arguments = deepcopy(self._original_attempt_arguments.get(source_attempt.attempt_id, {}))
+            elif action == "adjust":
+                if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
+                    return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 需要目标工具和参数") + (None,)
+            elif requested_attempt or requested_tool or requested_arguments is not None:
+                return self._reject_recovery(action, caused_by_failure_id, reason, "ask/block 不接受目标参数") + (None,)
+            rid = f"r-{self._next_recovery}"; self._next_recovery += 1
+            gid = self._verification_generation + 1
+            self._verification_generation = gid
+            self.verification_evidence.clear(); self._last_verified_generation = -1; self._verification_required = True
+            action_record = RecoveryAction(rid, gid, action, reason[:500], caused_by_failure_id, "reserved",
+                requested_attempt, requested_tool,
+                canonical_arguments_hash(requested_arguments) if isinstance(requested_arguments, dict) else None,
+                redacted_arguments(requested_arguments) if isinstance(requested_arguments, dict) else None,
+                gid)
+            self.recovery_actions.append(action_record)
+            self.generations.append(ExecutionGeneration(gid, opened_by_failure_id=caused_by_failure_id,
+                opened_by_recovery_id=rid, open_reason="recovery"))
+            self.recovery_notice = f"Recovery {rid} reserved: {action}; verify generation {gid} independently."
+            if action in ("ask", "block"):
+                self.status = "blocked"
+                self.terminal_reason = ("等待外部条件" if action == "ask" else "按恢复策略保守停止") + f"; last_failure={caused_by_failure_id}"
+                self.recovery_actions[-1] = RecoveryAction(**{**asdict(action_record), "status": "terminal"})
+                return self.recovery_actions[-1], None, requested_arguments
+            ar = AttemptReservation(f"a-{self._next_attempt}", gid - 1, gid, caused_by_failure_id, failure.caused_by_attempt_id, rid)
+            self._next_attempt += 1
+            return action_record, ar, requested_arguments
+
+    def _reject_recovery(self, action, failure_id, reason, detail):
+        rid = f"r-{self._next_recovery}"; self._next_recovery += 1
+        rec = RecoveryAction(rid, self._verification_generation, action, (reason or "")[:500], failure_id, "rejected")
+        self.recovery_actions.append(rec)
+        self.recovery_notice = f"Recovery {rid} rejected: {detail}."
+        return rec, detail
+
     def record_execution_result(self, result: Any) -> ExecutionAttempt:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
         with self._lock:
@@ -229,8 +296,16 @@ class AgentState:
                 redacted_arguments(args), result.outcome, result.duration_ms,
                 result.effect_class, result.handler_admitted, result.permission,
                 exit_code=result.exit_code, error_kind=result.error_kind,
-                output_excerpt=result.output_excerpt, failure_id=failure_id)
+                output_excerpt=result.output_excerpt, failure_id=failure_id,
+                recovery_id=getattr(reservation, "recovery_id", None))
             self.attempts.append(attempt)
+            self._original_attempt_arguments[attempt_id] = deepcopy(args)
+            if getattr(reservation, "recovery_id", None):
+                rid = reservation.recovery_id
+                for i, action in enumerate(self.recovery_actions):
+                    if action.recovery_id == rid:
+                        self.recovery_actions[i] = RecoveryAction(**{**asdict(action), "status": "executed", "result_attempt": attempt_id, "result_generation_id": generation_id})
+                        break
             if result.tool != "update_todo":
                 self.tool_history.append({"tool": result.tool, "arguments_hash": arguments_hash,
                                           "ok": result.outcome == "succeeded", "brief": result.output_excerpt})
@@ -254,9 +329,11 @@ class AgentState:
                                         f"caused by {attempt_id} in generation {generation_id}.")
                 exhausted = self._fingerprint_counts[fingerprint] >= MAX_ATTEMPT_FINGERPRINTS
                 if category == "permission": self._terminal("failed", "权限被明确拒绝", failure_id)
-                elif category == "protocol": self._terminal("failed", "工具协议或参数不变量被破坏", failure_id)
+                elif category == "protocol":
+                    self.status = "running"
                 elif category == "unknown": self._terminal("blocked", "副作用范围未知，需要外部诊断", failure_id)
-                elif category == "deterministic": self._terminal("failed", "确定性执行错误不可恢复", failure_id)
+                elif category == "deterministic":
+                    self.status = "running"
                 elif category == "validation" and self._repair_cycles >= MAX_REPAIR_CYCLES:
                     self._terminal("failed", "Repair cycle 预算已耗尽", failure_id)
                 elif retryable and exhausted:
@@ -300,6 +377,7 @@ class AgentState:
             self._verification_generation = 0; self._last_verified_generation = -1
             self._verification_required = False; self._next_attempt = 1; self._next_failure = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0
+            self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             self.generations.append(ExecutionGeneration(0, open_reason="task_start"))
 
     def _invalidate_verification(self) -> None:
@@ -355,7 +433,7 @@ class AgentState:
                 "recovery_actions": [asdict(x) for x in self.recovery_actions],
                 "latest_failure": asdict(self.failures[-1]) if self.failures else None,
                 "recovery_notice": self.recovery_notice,
-                "budgets": {"failure_retries_remaining": MAX_FAILURE_RETRIES,
+                "budgets": {"failure_retries_remaining": max(0, MAX_FAILURE_RETRIES - sum(self._failure_retry_counts.values())),
                             "fingerprint_attempts_limit": MAX_ATTEMPT_FINGERPRINTS,
                             "recovery_actions_remaining": max(0, MAX_RECOVERY_ACTIONS - len(self.recovery_actions)),
                             "repair_cycles_remaining": max(0, MAX_REPAIR_CYCLES - self._repair_cycles)},
