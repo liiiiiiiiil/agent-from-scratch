@@ -13,6 +13,7 @@ from mini_agent.tools.shell import run_shell_tool
 from mini_agent.permission import PermissionGate
 from mini_agent.state import AgentState
 from mini_agent.tools.todo import make_update_todo_tool
+from mini_agent.recovery import RecoveryRuntime
 
 def create_registry(state: AgentState | None = None) -> ToolRegistry:
     result = ToolRegistry()
@@ -20,6 +21,7 @@ def create_registry(state: AgentState | None = None) -> ToolRegistry:
         result.register(tool)
     if state is not None:
         result.register(make_update_todo_tool(state))
+        result.register(__import__('mini_agent.recovery', fromlist=['make_recover_tool']).make_recover_tool(RecoveryRuntime(state, ToolExecutor(result))))
     return result
 
 registry = create_registry()

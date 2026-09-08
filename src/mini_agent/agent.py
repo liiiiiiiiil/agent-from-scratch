@@ -286,7 +286,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             except (TypeError, ValueError):
                 effect = "none"
             effects.append(effect)
-        has_possible = "possible" in effects
+        has_possible = "possible" in effects or any(name == "recover" for name, _ in parsed_calls)
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
             if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -342,7 +342,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             for item in indexed_calls:
                 result = _run(item)
                 results.append(result)
-                if structured and state is not None and result[2] is not None:
+                if structured and state is not None and result[2] is not None and parsed_calls[item[0]][0] != "recover":
                     state.record_execution_result(result[2])
         else:
             with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:

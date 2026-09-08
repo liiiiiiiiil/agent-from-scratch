@@ -5,6 +5,12 @@
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
 
+## [v0.18] - Recovery Policy
+
+- Added schema-validated `recover` actions: retry, adjust, ask, and block.
+- Added bounded recovery reservations, successor generations, and explicit causal links.
+- v0.18 deliberately rejects rollback and requires independent verification after recovery.
+
 ## [v0.16] - 计划驱动执行（Plan-driven Execution）
 
 - Added verification evidence, task reset, completion reminders, and blocked/failed task states.

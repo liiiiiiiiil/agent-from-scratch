@@ -112,6 +112,10 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
         raise ValueError("tool arguments 必须是 JSON object")
     normalized = deepcopy(arguments)
     properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        unknown = [key for key in normalized if key not in properties]
+        if unknown:
+            raise ValueError("未知参数: " + ", ".join(unknown))
     for key, prop in properties.items():
         if key not in normalized and "default" in prop:
             normalized[key] = deepcopy(prop["default"])
@@ -127,6 +131,11 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
             raise ValueError(f"参数 {key} 类型应为 {expected}")
         if "enum" in prop and value not in prop["enum"]:
             raise ValueError(f"参数 {key} 不在允许值中")
+        if isinstance(value, str):
+            if "minLength" in prop and len(value) < prop["minLength"]:
+                raise ValueError(f"参数 {key} 长度不足")
+            if "maxLength" in prop and len(value) > prop["maxLength"]:
+                raise ValueError(f"参数 {key} 超过长度上限")
         if isinstance(value, list) and "maxItems" in prop and len(value) > prop["maxItems"]:
             raise ValueError(f"参数 {key} 超过数量上限")
     return normalized
@@ -157,7 +166,7 @@ class ToolExecutor:
             except Exception: pass
 
     def execute_result(self, name: str, arguments: dict[str, Any], state: Any = None,
-                       notify: bool = True) -> ExecutionResult:
+                       notify: bool = True, reservation: AttemptReservation | None = None) -> ExecutionResult:
         """Execute and return facts; only admitted possible effects reserve generation."""
         started = monotonic()
         try:
@@ -183,7 +192,7 @@ class ToolExecutor:
                                      denied, _brief(denied), error_kind="permission_denied")
             if notify: self._notify_result(result)
             return result
-        reservation = state.reserve_attempt(effect_class) if state is not None else None
+        reservation = reservation or (state.reserve_attempt(effect_class) if state is not None else None)
         try:
             output = tool.handler(**normalized)
         except Exception as error:

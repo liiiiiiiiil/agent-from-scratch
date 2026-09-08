@@ -1,6 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.17**（失败模型）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.18**（Recovery Policy）。
+
+## v0.18 Recovery Policy
+
+`recover` 支持 retry、adjust、ask、block。动作在 State 锁内校验并预留后继 generation，仍须通过 PermissionGate；恢复后必须独立 verification。rollback 在本版本明确拒绝。
 
 ## v0.17 失败模型
 
