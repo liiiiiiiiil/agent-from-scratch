@@ -22,7 +22,8 @@ def test_prompt_toolkit_mode_binds_enter_and_shift_enter():
         def __init__(self):
             self.handlers = {}
 
-        def add(self, key):
+        def add(self, *keys):
+            key = keys[0] if len(keys) == 1 else tuple(keys)
             def decorator(handler):
                 self.handlers[key] = handler
                 return handler
@@ -48,7 +49,8 @@ def test_prompt_toolkit_mode_binds_enter_and_shift_enter():
             self.kwargs = kwargs
             bindings = kwargs["key_bindings"]
             event = type("Event", (), {"current_buffer": self.buffer})()
-            bindings.handlers["s-enter"](event)
+            handler = bindings.handlers.get("s-enter") or bindings.handlers.get(("escape", "enter"))
+            handler(event)
             bindings.handlers["enter"](event)
             return "first\nsecond"
 
