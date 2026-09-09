@@ -11,3 +11,4 @@
 - 每篇文档开头写明：约束内容、原因、违反后果。
 - [教程作者规范](tutorial-authoring.md) 规定版本课程的内容结构与验收要求。
 - [主 README 编写规范](readme-authoring.md) 规定中文命名、章节职责和同步要求。
+- [依赖政策](dependency-policy.md) 区分核心标准库流程与可选用户体验依赖。

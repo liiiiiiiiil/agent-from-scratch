@@ -7,7 +7,7 @@
 A step-by-step tutorial for building a coding agent from scratch — in incremental versions (v0.01 → ongoing).
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#快速开始)
+[![Dependencies](https://img.shields.io/badge/core%20dependencies-zero-green)](#快速开始)
 [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#学习路径)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
 
@@ -27,7 +27,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 
 ## 为什么用这个仓库学 Agent
 
-- **零第三方依赖** —— 全程只用 Python 标准库（`http.client` / `json` / `concurrent.futures`），不装 LangChain、不装 requests。代码自包含，每一行都能读懂。
+- **核心零第三方依赖** —— LLM 调用、Agent loop 和工具执行只用 Python 标准库；CLI 可选安装 `prompt_toolkit` 获得多行编辑，未安装时自动回退。
 - **版本切片，每版只加一个概念** —— `git diff v0.01..v0.02` 就是"加一个工具"的全部改动，diff 可读，学习负担低。版本持续递增，不设上限。
 - **真实可跑的 agent** —— 不是玩具 demo：支持 function calling、流式输出、权限闸门、并发工具调用，能真的读写文件、跑命令。
 - **配套中文教程** —— 教程按学习阶段导航，每个版本一份教学文档（`docs/tutorials/`），讲清"为什么这么设计"，不只是贴代码。
@@ -46,6 +46,8 @@ cp src/mini_agent/config_example.py src/mini_agent/config_local.py
 
 # 3. 安装（推荐）
 pip install -e .
+# 可选：启用支持多行粘贴的增强终端输入
+pip install -e '.[interactive]'
 
 # 4. 跑起来
 python -m mini_agent "帮我算一下 123 * 456"
@@ -132,6 +134,7 @@ agent-from-scratch/
 │   ├── state.py            # AgentState：独立于 messages 的执行状态
 │   ├── permission.py       # 权限闸门：allow/deny/ask 三态
 │   ├── prompt.py           # 分层组装 system prompt
+│   ├── input_session.py    # 可选多行终端输入，缺少 extra 时回退 input()
 │   └── tools/
 │       ├── base.py         # Tool / ToolRegistry / ToolExecutor（含结果回调）
 │       ├── calc.py         # calculate 工具
@@ -150,7 +153,7 @@ agent-from-scratch/
 
 - **渐进式生长**：每次只加刚好够用的能力，避免过度设计。新功能意图先记录到对应计划文档；只有运行时约束变化才更新 `AGENTS.md`。
 - **核心 loop 保持清晰**：agent loop 不对 LLM 或 CLI 顶层异常做兜底；工具层捕获 handler 异常并将错误结果回灌给 LLM。复杂容错按需在工具层引入。
-- **零依赖**：只用标准库，保持自包含、易部署。HTTP 客户端约束与其他运行时契约见 [`AGENTS.md`](./AGENTS.md)。
+- **核心标准库优先**：关键运行流程保持自包含；外围用户体验可以通过可选依赖增强。具体边界见 [`AGENTS.md`](./AGENTS.md) 和[依赖政策](./docs/governance/dependency-policy.md)。
 
 ## 文档
 

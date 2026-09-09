@@ -4,6 +4,11 @@
 
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
+- Added optional `prompt_toolkit` terminal input via the `interactive` extra:
+  multiline paste is supported with Enter to submit and Shift+Enter to insert a
+  newline; the standard-library `input()` path remains the fallback.
+- Clarified that zero third-party dependencies applies to core runtime flows;
+  user-experience integrations may be optional and must provide a fallback.
 - Added explicit `/new <task>` and `/reset` task boundaries. Task-local execution,
   Todo, failure, recovery, generation, retry, and verification state are reset in
   place; session permissions and protected project instructions remain available.

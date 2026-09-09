@@ -26,7 +26,8 @@
 
 ### 1.1 依赖
 - Python 3.10+（项目统一使用 Python 3.10 及以上版本）
-- 零第三方依赖，仅 Python 标准库
+- 核心运行时零第三方依赖，仅 Python 标准库
+- 可选 CLI 体验依赖：`prompt_toolkit>=3.0,<4`
 
 ### 1.2 安装方式
 
@@ -36,6 +37,14 @@ cd agent-from-scratch
 pip install -e .
 ```
 安装后可从任意目录运行 `python -m mini_agent`。
+
+需要多行编辑、Shift+Enter 换行和多行粘贴时，额外安装：
+
+```bash
+pip install -e '.[interactive]'
+```
+
+未安装该 extra 时，CLI 自动回退到标准库 `input()`，核心功能不受影响。
 
 **方式二：免安装，用 PYTHONPATH**
 ```bash
@@ -78,7 +87,7 @@ python -m mini_agent "你好"
 ```bash
 python -m mini_agent
 ```
-启动后进入 `你: ` 提示符，输入任务回车提交。输入 `exit` 或 `quit` 退出，或按 Ctrl+C/Ctrl+D。
+启动后进入交互提示符。安装 `interactive` extra 后，Enter 提交、Shift+Enter 换行，粘贴多行文本后按 Enter 提交；未安装时使用标准库单行输入。输入 `exit` 或 `quit` 退出，或按 Ctrl+C/Ctrl+D。
 
 普通后续输入默认继续当前任务。使用 `/new <任务>` 清空旧任务并开始新任务，使用
 `/reset` 清空当前任务和任务级状态；会话内已经授予的权限和项目级指令不受影响。
