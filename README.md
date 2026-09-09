@@ -21,7 +21,7 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 >
 > **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
 
-> **当前状态**：最新代码和教程已到 `v0.18`（受限恢复策略）。
+> **当前状态**：最新代码和教程已到 `v0.18.1`（受限恢复策略补丁，见第 18 课）。
 
 > **阅读模型**：`docs/tutorials/` 以默认分支上的最新版本为准；每课声明要运行的代码 tag，并把源码索引固定到该 tag。请在主线/网页读教程，在本地 checkout tag 跑代码。历史 tag 不重打，`v0.01` 至 `v0.06` tag 内的旧教程路径只是历史副本。
 

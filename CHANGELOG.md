@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v0.18.1] - Recovery Policy fixes
+
+- Classify edit precondition failures without treating them as unknown writes.
+- Record rejected recovery requests exactly once and block when their budget is exhausted.
+- Reserve recovery quotas before target authorization using the session permission gate;
+  open generations only after approval and release unused execution quotas on rejection.
+- Preserve recovery causal links and display failure references and budgets in Structured State.
+- Enforce terminal states while returning a result for every pending tool call.
+- Update lesson 18 with the patch snapshot; no checkpoint, rollback, repair scheduler, or replay is added.
+
+Previously unreleased mainline changes included in this snapshot:
+
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
 - Added optional `prompt_toolkit` terminal input via the `interactive` extra:

@@ -4,6 +4,10 @@
 
 > 代码快照：`v0.18` · 相邻差异：`v0.17..v0.18` · 命令环境：Bash/zsh
 
+> 补丁代码快照：`v0.18.1` · 相邻差异：`v0.18..v0.18.1` · 命令环境：Bash/zsh
+
+本文保留 v0.18 的概念与演进基线；恢复边界说明以 v0.18.1 修正后的实现为准。
+
 > 运行要求：Python 3.10+，运行时只使用标准库。
 
 ## 本课目标
@@ -22,6 +26,14 @@ v0.17 能回答“哪次调用失败、失败属于什么类别、是否可能�
 
 v0.18 把恢复选择放进已有工具协议：模型调用 recover，运行时校验动作和引用、预留预算，并在需要执行时继续使用参数校验、PermissionGate 和工具执行器。恢复结果只报告执行 attempt 的事实；是否修复仍由后续 verification 决定。
 
+v0.18.1 补丁修正了两类容易误导恢复判断的边界。`edit_file` 的没有匹配和多处匹配现在是继承 `ValueError` 的前置条件异常，Executor 以 `error_kind=edit_no_match` 或 `edit_multiple_matches` 标记，State 将其归为 `deterministic`；它们不会改文件，也不会因为异常文本被当成未知副作用。相反，已获准进入 handler 的其他异常仍按副作用范围未知处理，可能进入 `blocked`，并且已经预留的 generation 不回退。
+
+## v0.18.1 勘误与修复
+
+原始 [v0.18 恢复实现](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/recovery.py) 在部分拒绝路径漏记恢复动作，编辑前置条件失败也可能被误判为未知写入。补丁统一拒绝记录、修正分类，并落实已有终态约束；副作用未知时会真正停止后续工具执行。
+
+预算和 generation 分两步预留：先在 State 锁内预留动作、重试与目标参数指纹额度（`proposed`），再询问目标权限。获准后 `activate_recovery()` 才打开 generation 并使旧验证失效。拒绝时保留同一条动作记录并改为 `rejected`，释放未使用的目标执行和重试额度；动作申请仍计数。连续无效申请达到 8 次也会阻塞，不再进入目标权限或 handler。本补丁不增加后续课程的能力。
+
 ## 前置条件与版本切换
 
 建议先阅读第 17 课。以下命令适用于 Bash/zsh：
@@ -30,7 +42,8 @@ v0.18 把恢复选择放进已有工具协议：模型调用 recover，运行时
 git checkout v0.17
 git diff --stat v0.17..v0.18
 git diff v0.17..v0.18 -- src/mini_agent/recovery.py src/mini_agent/state.py src/mini_agent/tools/__init__.py src/mini_agent/agent.py
-git checkout v0.18
+git diff --stat v0.18..v0.18.1
+git checkout v0.18.1
 ~~~
 
 ## 新增与改动文件
@@ -59,8 +72,10 @@ v0.18：
 [旧] FailureEvent + Structured State
   -> [~] agent loop -> [+] recover JSON Schema
   -> [+] RecoveryRuntime.recover()
-       -> [+] AgentState.reserve_recovery()
-            -> 校验 failure、动作和预算，打开后继 generation，清除旧验证
+       -> [+] AgentState.reserve_recovery(defer_generation=True)
+            -> 校验 failure、动作和预算，预留额度
+            -> PermissionGate -> activate_recovery()
+            -> 打开后继 generation，清除旧验证
             ├─ retry：复用直接失败 attempt 的私有原始参数
             ├─ adjust：先校验目标工具的新参数
             ├─ ask/block：state-only generation -> [B] blocked
@@ -95,7 +110,9 @@ parameters = {
 }
 ~~~
 
-schema 通过后还要确认 failure 存在、任务未终态、动作组合合法且预算有余量。被拒绝的动作记录为 status="rejected" 的 RecoveryAction，不创建后继 generation。完整实现见 [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/recovery.py)。
+schema 通过后还要确认 failure 存在、任务未终态、动作组合合法且预算有余量。被拒绝的动作记录为 status="rejected" 的 RecoveryAction，不创建后继 generation。完整实现见 [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/recovery.py)。
+
+schema 本身、控制工具权限、failure 引用、目标工具参数、恢复预算和目标工具权限的拒绝都会生成一个带 `recovery_id` 的拒绝结果，并且每个申请只记录一次。目标权限检查使用当前会话同一把 PermissionGate；通过后才预留 generation 和 attempt，实际目标调用复用这次预留，不重复询问同一次授权。工具名严格匹配注册表，`functions.edit_file` 不是合法别名。
 
 ### 2. 四种动作限制恢复范围
 
@@ -140,7 +157,7 @@ self.generations.append(ExecutionGeneration(
 
 retry/adjust 复用该预留 generation 创建 ExecutionAttempt；ask/block 虽无 handler，也创建 state-only generation。RecoveryAction.result_attempt 只表示恢复调用的执行事实，不表示任务已修复。恢复结果先完整回灌 role=tool，下一轮才能调用 run_shell(purpose="verification")。只有当前 generation 的 [exit=0] 才可能成为完成条件。
 
-完整状态实现见 [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/state.py)。
+完整状态实现见 [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/state.py)。
 
 ## 为什么这样设计
 
@@ -156,6 +173,8 @@ retry/adjust 复用该预留 generation 创建 ExecutionAttempt；ask/block 虽�
 - recover 与 possible effect 同轮时按模型顺序串行提交；verification 不得与副作用同轮，恢复后必须下一轮验证。
 - rollback 明确拒绝。v0.18 没有 checkpoint，不承诺撤销文件、shell、网络或未知副作用，也不提供跨进程持久化。
 - ask 和 block 都是 blocked；前者等待外部条件，后者表示策略停止。
+- 运行中的 Structured State 也会展示 recovery notice、最近三条失败与恢复动作、失败对应的工具/attempt/generation/分类/可重试性，以及 hash 形式的剩余预算；失败调用不会再被标作“已完成，不要重复”。裁剪或压缩后这些字段仍从 State 快照重建。
+- 一旦状态进入 `blocked` 或 `failed`，调度和 Executor 都拒绝后续 handler 与权限询问。批次中剩余的每个 tool call 仍会逐一得到 `task_terminal` 结果并全部回灌；终态原因不会被后续记录改写。
 
 ## 关键流程
 
@@ -166,9 +185,10 @@ retry/adjust 复用该预留 generation 创建 ExecutionAttempt；ask/block 虽�
        requested_attempt=<直接失败的 attempt ID>)
   -> schema / failure 关联 / retry 预算
        ├─拒绝 -> status=rejected，generation 不变 -> role=tool
-       └─接受 -> recovery action 预留下一个 generation，清除旧 verification
-                    -> 复用私有原始参数
-                    -> PermissionGate -> handler -> 新 attempt
+       └─额度预留 -> 复用私有原始参数 -> PermissionGate
+                    ├─拒绝：记录 rejected，generation 不变
+                    └─接受：打开 generation，清除旧 verification
+                         -> handler -> 新 attempt
                     -> role=tool
   -> 下一轮单独 verification
        ├─[exit=0]：当前 generation 获得证据
@@ -181,14 +201,14 @@ retry/adjust 复用该预留 generation 创建 ExecutionAttempt；ask/block 虽�
 
 create_registry(state) 为每个 AgentState 新建 RecoveryRuntime 和 recover 工具，避免任务间共享恢复状态。agent loop 将 recover 按顺序处理；每个 tool call 都有对应 role=tool 结果，全部回灌后才进入下一轮。
 
-RecoveryRuntime.recover() 的顺序是：检查 reason 与 rollback；adjust 先校验目标参数；reserve_recovery() 原子校验并预留；retry/adjust 交给 ToolExecutor；record_execution_result() 写入 attempt/failure。这样无效 adjust 不会被误记为副作用，预留的 generation 也不会被重复推进。
+RecoveryRuntime.recover() 的顺序是：检查 reason 与 rollback；adjust 校验目标参数；reserve_recovery(defer_generation=True) 原子预留额度；检查目标权限；activate_recovery() 打开 generation；ToolExecutor 执行目标；record_execution_result() 写入 attempt/failure。权限拒绝只更新已预留动作，不增加第二条拒绝记录，也不打开 generation。
 
 相关源码：
 
-- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/recovery.py)
-- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/tools/__init__.py)
-- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/tools/base.py)
-- [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/agent.py)
+- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/recovery.py)
+- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/tools/__init__.py)
+- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/tools/base.py)
+- [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/agent.py)
 
 ## 本版特性、下一课与代码索引
 
@@ -196,8 +216,8 @@ v0.18 将失败后的选择限制为精确重试、显式调参、等待外部�
 
 下一课将讨论 checkpoint 与有边界的 rollback：只有保存明确文件前镜像的场景才可能恢复内容，shell 和外部副作用仍不承诺可回滚。
 
-- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/recovery.py)
-- [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/state.py)
-- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/tools/__init__.py)
-- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/tools/base.py)
-- [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18/src/mini_agent/agent.py)
+- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/recovery.py)
+- [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/state.py)
+- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/tools/__init__.py)
+- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/tools/base.py)
+- [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/agent.py)

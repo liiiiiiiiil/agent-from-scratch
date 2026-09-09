@@ -4,7 +4,9 @@
 
 ## v0.18 Recovery Policy
 
-`recover` 支持 retry、adjust、ask、block。动作在 State 锁内校验并预留后继 generation，仍须通过 PermissionGate；恢复后必须独立 verification。rollback 在本版本明确拒绝。
+`recover` 支持 retry、adjust、ask、block。v0.18.1 修复了拒绝记录和预算边界：schema、引用、参数、预算或权限拒绝都会只记录一次带 `recovery_id` 的 rejected action，不推进 generation。目标权限检查前先在 State 锁内预留额度；获准后才打开后继 generation 和 attempt。权限拒绝释放未使用的目标执行及重试额度，但恢复申请仍计数，连续无效申请达到恢复动作上限也会阻塞。恢复目标复用当前会话的同一把 PermissionGate，不重复询问同一次授权；恢复后必须独立 verification。rollback 在本版本明确拒绝。
+
+`edit_file` 的没有匹配和多处匹配是确定性的参数前置条件失败（`error_kind=edit_no_match` / `edit_multiple_matches`），不会改文件或进入未知副作用阻塞；已获准进入 handler 的其他异常仍会使 possible-effect generation 保持推进。Structured State 在 `running` 时也显示恢复通知、最近失败/恢复动作和脱敏预算。进入 `blocked` 或 `failed` 后，Executor 不再询问权限或运行 handler，当前批次剩余调用以 `task_terminal` 结果逐一回灌。
 
 ## v0.17 失败模型
 
@@ -115,6 +117,8 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `status` | `running` / `done` / `blocked` / `failed` |
 | `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
+| `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
+| `budgets` / `recovery_notice` | 失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 
@@ -222,6 +226,8 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 2. `ToolExecutor` 先过权限闸门（`PermissionGate.guard`）
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
+
+如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
 ### 3.8 相对路径约定
 工具的相对路径（如 `examples/input.txt`）按进程的**当前工作目录**解析，不会自动相对已安装的包目录。使用仓库示例时，建议先进入仓库根目录：

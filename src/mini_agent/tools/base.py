@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import re
 from time import monotonic
 from typing import Any, Callable, Literal
 
 from mini_agent.permission import PermissionGate
-from mini_agent.state import AttemptReservation, EffectClass
+from mini_agent.state import AttemptBudgetExceeded, AttemptReservation, EffectClass
+from mini_agent.tools.file_errors import EditMultipleMatchesError, EditNoMatchError
 
 RESULT_BRIEF_MAX_LENGTH = 200
 RESULT_BRIEF_FALLBACK = "<unavailable>"
@@ -166,6 +168,48 @@ class ToolExecutor:
         self.registry = registry
         self.gate = gate or PermissionGate()
         self.on_result = on_result
+        recovery_runtime = getattr(registry, "_recovery_runtime", None)
+        if recovery_runtime is not None:
+            recovery_runtime.bind_executor(self)
+
+    def authorize(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Run the same session permission gate used by normal execution."""
+        return self.gate.guard(name, arguments)
+
+    @staticmethod
+    def _record_recovery_rejection(state: Any, arguments: dict[str, Any], detail: str) -> str | None:
+        if state is None or not hasattr(state, "reject_recovery"):
+            return None
+        arguments = arguments if isinstance(arguments, dict) else {}
+        record = state.reject_recovery(
+            arguments.get("action", "block"),
+            arguments.get("caused_by_failure_id", "<missing>"),
+            arguments.get("reason", ""),
+            str(detail), arguments.get("requested_attempt"),
+            arguments.get("requested_tool"), arguments.get("requested_arguments"),
+        )
+        return json.dumps({
+            "status": "rejected", "recovery_id": record.recovery_id,
+            "message": str(detail)[:RESULT_BRIEF_MAX_LENGTH],
+        }, ensure_ascii=False)
+
+    def _terminal_result(self, name: str, arguments: dict[str, Any], state: Any) -> ExecutionResult:
+        reason = getattr(state, "terminal_reason", "") or "任务已终止"
+        text = f"工具调用拒绝: task_terminal: {reason}"
+        if name == "recover":
+            rejection = self._record_recovery_rejection(state, arguments, text)
+            if rejection is not None:
+                text = json.dumps({
+                    "status": "rejected",
+                    "error_kind": "task_terminal",
+                    "recovery_id": json.loads(rejection)["recovery_id"],
+                    "message": text,
+                }, ensure_ascii=False)
+        return ExecutionResult(
+            name, deepcopy(arguments) if isinstance(arguments, dict) else {},
+            "not_checked", False, "invalid", 0, "none", text, _brief(text),
+            error_kind="task_terminal",
+        )
 
     def _notify_result(self, result: ExecutionResult) -> None:
         if self.on_result is None:
@@ -178,9 +222,12 @@ class ToolExecutor:
             except Exception: pass
 
     def execute_result(self, name: str, arguments: dict[str, Any], state: Any = None,
-                       notify: bool = True, reservation: AttemptReservation | None = None) -> ExecutionResult:
+                       notify: bool = True, reservation: AttemptReservation | None = None,
+                       permission_already_checked: bool = False) -> ExecutionResult:
         """Execute and return facts; only admitted possible effects reserve generation."""
         started = monotonic()
+        if state is not None and getattr(state, "is_terminal", lambda: False)():
+            return self._terminal_result(name, arguments, state)
         try:
             tool = self.registry.get(name)
         except (TypeError, ValueError) as error:
@@ -192,26 +239,65 @@ class ToolExecutor:
             normalized = validate_arguments(tool.parameters, arguments)
         except (TypeError, ValueError) as error:
             text = f"工具调用失败: {type(error).__name__}: {error}"
+            if str(name) == "recover" and state is not None:
+                rejection = self._record_recovery_rejection(state, arguments, text)
+                if rejection is not None:
+                    return ExecutionResult(
+                        name, deepcopy(arguments) if isinstance(arguments, dict) else {},
+                        "not_checked", False, "invalid", 0, "none", rejection,
+                        _brief(rejection), error_kind="recovery_rejected",
+                    )
             return ExecutionResult(name, deepcopy(arguments) if isinstance(arguments, dict) else {},
                                    "not_checked", False, "invalid", 0,
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
-        denied = self.gate.guard(name, normalized)
+        denied = None if permission_already_checked else self.gate.guard(name, normalized)
         if denied:
+            if name == "recover":
+                rejection = self._record_recovery_rejection(state, normalized, denied)
+                if rejection is not None:
+                    result = ExecutionResult(name, normalized, "denied", False, "denied",
+                                             int((monotonic() - started) * 1000), effect_class,
+                                             rejection, _brief(rejection), error_kind="recovery_rejected")
+                    if notify: self._notify_result(result)
+                    return result
             result = ExecutionResult(name, normalized, "denied", False, "denied",
                                      int((monotonic() - started) * 1000), effect_class,
                                      denied, _brief(denied), error_kind="permission_denied")
             if notify: self._notify_result(result)
             return result
-        reservation = reservation or (state.reserve_attempt(effect_class) if state is not None else None)
+        try:
+            if reservation is None and state is not None and name != "recover":
+                reservation = state.reserve_attempt(effect_class, name, normalized)
+        except AttemptBudgetExceeded as error:
+            text = f"工具调用失败: {error}"
+            result = ExecutionResult(
+                name, normalized, "allowed", False, "invalid",
+                int((monotonic() - started) * 1000), effect_class,
+                text, _brief(text), error_kind="attempt_fingerprint_budget",
+            )
+            if notify:
+                self._notify_result(result)
+            return result
         try:
             output = tool.handler(**normalized)
         except Exception as error:
             text = f"Tool 执行失败: {error}"
+            if isinstance(error, EditNoMatchError):
+                error_kind = "edit_no_match"
+            elif isinstance(error, EditMultipleMatchesError):
+                error_kind = "edit_multiple_matches"
+            else:
+                error_kind = "handler_exception"
+            if name == "recover":
+                rejection = self._record_recovery_rejection(state, normalized, text)
+                if rejection is not None:
+                    text = rejection
+                    error_kind = "recovery_rejected"
             result = ExecutionResult(name, normalized, "allowed", True, "failed",
                                      int((monotonic() - started) * 1000), effect_class,
-                                     text, _brief(text), error_kind="handler_exception",
+                                     text, _brief(text), error_kind=error_kind,
                                      reservation=reservation)
             if notify: self._notify_result(result)
             return result

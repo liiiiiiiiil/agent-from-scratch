@@ -9,6 +9,11 @@ import os
 import re
 
 from mini_agent.tools.base import Tool
+from mini_agent.tools.file_errors import (
+    EditMultipleMatchesError,
+    EditNoMatchError,
+    EditPreconditionError,
+)
 
 
 # ============================================================
@@ -107,10 +112,10 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
 
     count = content.count(old_string)
     if count == 0:
-        raise ValueError(f"未找到匹配内容: {old_string[:50]}...")
+        raise EditNoMatchError(f"未找到匹配内容: {old_string[:50]}...")
 
     if count > 1 and not replace_all:
-        raise ValueError(
+        raise EditMultipleMatchesError(
             f"找到 {count} 处匹配，需指定 replace_all=true 或提供更长的唯一上下文"
         )
 

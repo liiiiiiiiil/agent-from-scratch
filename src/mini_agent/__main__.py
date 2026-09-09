@@ -46,15 +46,18 @@ def main():
                 state.begin_task(user_input)
             else:
                 state.task = user_input
-        state.status = "running"
+        if state.status not in ("blocked", "failed"):
+            state.status = "running"
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
         except Exception:
-            state.status = "failed"
+            if state.status not in ("blocked", "failed"):
+                state.status = "failed"
             raise
         if result == "达到最大迭代次数":
-            state.status = "failed"
+            if state.status not in ("blocked", "failed"):
+                state.status = "failed"
         elif state.status == "running":
             state.status = "done"
 

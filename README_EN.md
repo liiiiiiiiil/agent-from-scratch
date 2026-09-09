@@ -21,7 +21,7 @@
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
-> **Current status**: The code and tutorials are up to `v0.18` (Recovery Policy).
+> **Current status**: The code and tutorials are up to `v0.18.1` (Recovery Policy patch; see lesson 18).
 
 > **Reading model**: The authoritative tutorials are the current files under `docs/tutorials/` on the default branch. Each lesson names one code tag and links source files to that immutable snapshot. Read the current tutorial online, then check out its tag locally to run the code. Historical tags are not rewritten; tutorial paths inside `v0.01` through `v0.06` are historical copies.
 
