@@ -76,6 +76,21 @@ def test_runtime_notice_is_one_shot_and_not_history():
     assert not any("Runtime Notice" in str(m.get("content")) for m in second)
 
 
+def test_reset_task_clears_history_summary_and_runtime_notice():
+    history = [{"role": "user", "content": "task A"}]
+    context = ContextManager(AgentState(task="task A"), history)
+    context._summary = "old summary"
+    context._compacted = True
+    context._summarized_rounds = 3
+    context.set_runtime_notice("old notice")
+    context.reset_task()
+    assert history == []
+    assert context._summary == ""
+    assert context._compacted is False
+    assert context._summarized_rounds == 0
+    assert context._runtime_notice is None
+
+
 def test_runtime_notice_survives_compaction_and_fallback_trim():
     history = [{"role": "user", "content": "task"}]
     for index in range(8):
@@ -359,6 +374,16 @@ def test_structured_state_redacts_attempt_arguments_and_survives_compaction():
     rendered = context._render_state()["content"]
     assert "super-secret" not in rendered
     assert "generation" in rendered and "Latest failure" in rendered and "Budgets" in rendered
+
+
+def test_structured_state_has_deterministic_size_limit():
+    state = AgentState(task="task")
+    state.errors.append("x" * 20000)
+    context = ContextManager(state, [{"role": "user", "content": "task"}])
+    rendered = context._render_state()["content"]
+    assert len(rendered) <= 6000
+    assert "Task: task" in rendered
+    assert "truncated" in rendered
 
 
 def test_repeated_prepare_does_not_resummarize_same_rounds():

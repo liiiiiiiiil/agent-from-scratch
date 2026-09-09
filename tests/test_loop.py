@@ -72,7 +72,7 @@ def test_possible_round_is_serial_and_mixed_verification_is_invalid():
         {"id": "a", "type": "function", "function": {"name": "write_a", "arguments": "{}"}},
         {"id": "v", "type": "function", "function": {"name": "run_shell", "arguments": '{"command":"test","purpose":"verification"}'}},
         {"id": "b", "type": "function", "function": {"name": "write_b", "arguments": "{}"}},
-    ]}, {"role": "assistant", "content": "done"}]
+    ]}, {"role": "assistant", "content": "done"}, {"role": "assistant", "content": "done"}]
 
     with patch("mini_agent.agent.call_llm", side_effect=responses):
         assert agent_loop(context, executor) == "done"
@@ -762,17 +762,56 @@ def test_cli_reuses_context_and_executor_for_argv_and_interactive_tasks():
         tool_executor, tool_executor,
     ]
     assert [call["task"] for call in loop_calls] == [
-        "argv task", "interactive task",
+        "argv task", "argv task",
     ]
     assert [call["status"] for call in loop_calls] == ["running", "running"]
     assert context.history == [
         {"role": "user", "content": "argv task"},
         {"role": "user", "content": "interactive task"},
     ]
-    assert state.task == "interactive task"
+    assert state.task == "argv task"
     assert state.status_history == ["running", "done", "running", "failed"]
     assert state.status == "failed"
     print("PASS: CLI argv/交互共用并复用同一 State/Context/Executor")
+
+
+def test_cli_explicit_task_boundaries_isolate_history_and_reuse_state():
+    real_state = AgentState
+    states = []
+    contexts = []
+    calls = []
+
+    def make_state():
+        state = real_state()
+        states.append(state)
+        return state
+
+    real_context = ContextManager
+    def make_context(state, history):
+        context = real_context(state, history, observability=False)
+        contexts.append(context)
+        return context
+
+    def fake_loop(context, executor):
+        calls.append((id(context.state), context.state.task, list(context.history)))
+        return "完成"
+
+    with patch.object(cli, "AgentState", side_effect=make_state), \
+            patch.object(cli, "ContextManager", side_effect=make_context), \
+            patch.object(cli, "agent_loop", side_effect=fake_loop), \
+            patch.object(sys, "argv", ["mini_agent"]), \
+            patch("builtins.input", side_effect=[
+                "task A", "follow up", "/new task B", "/reset", "exit",
+            ]):
+        cli.main()
+
+    assert len(states) == 1 and len(contexts) == 1
+    assert [task for _, task, _ in calls] == ["task A", "task A", "task B"]
+    assert all(state_id == id(states[0]) for state_id, _, _ in calls)
+    assert [m["content"] for m in calls[1][2] if m["role"] == "user"] == ["task A", "follow up"]
+    assert [m["content"] for m in calls[2][2] if m["role"] == "user"] == ["task B"]
+    assert states[0].task == "" and states[0].status == "idle"
+    assert contexts[0].history == []
 
 
 if __name__ == "__main__":

@@ -4,6 +4,10 @@
 
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
+- Added explicit `/new <task>` and `/reset` task boundaries. Task-local execution,
+  Todo, failure, recovery, generation, retry, and verification state are reset in
+  place; session permissions and protected project instructions remain available.
+- Structured State is rendered on every request with a deterministic size limit.
 
 ## [v0.18] - Recovery Policy
 
