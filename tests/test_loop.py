@@ -84,6 +84,29 @@ def test_possible_round_is_serial_and_mixed_verification_is_invalid():
     assert "不能与 possible effect" in context.history[3]["content"]
 
 
+def test_completion_reminder_retry_is_not_printed_as_new_round():
+    state = AgentState(); state.begin_task("mutate")
+    context = ContextManager(state, [{"role": "user", "content": "mutate"}])
+    executor_registry = ToolRegistry()
+    executor_registry.register(Tool(
+        "write", "write", {"type": "object", "properties": {}},
+        lambda: "changed", effect_class="possible",
+    ))
+    executor = ToolExecutor(executor_registry, PermissionGate(PermissionPolicy({"write": ALLOW})))
+    responses = [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "w", "type": "function",
+            "function": {"name": "write", "arguments": "{}"},
+        }]},
+        {"role": "assistant", "content": "done"},
+        {"role": "assistant", "content": "still not verified"},
+    ]
+    output = StringIO()
+    with patch("mini_agent.agent.call_llm", side_effect=responses), redirect_stdout(output):
+        agent_loop(context, executor)
+    assert output.getvalue().count("[第") == 2
+
+
 def test_agent_loop_context_and_executor_integration():
     class FakeContextManager:
         def __init__(self):

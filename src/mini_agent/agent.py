@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 
 from mini_agent.context import ContextManager
 from mini_agent.tools import registry
-from mini_agent.tools.base import ExecutionResult, ToolExecutor
-from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS
+from mini_agent.tools.base import ExecutionResult, ToolExecutor, format_tool_result
+from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
 
 
 DISPLAY_RESULT_MAX_LENGTH = 1200
@@ -24,19 +24,20 @@ def _safe_print(*args, **kwargs):
 
 def _display_result(value):
     """Keep terminal output readable without changing the tool result."""
-    text = str(value)
-    if len(text) > DISPLAY_RESULT_MAX_LENGTH:
-        text = text[:DISPLAY_RESULT_MAX_LENGTH] + "... [输出已截断]"
+    limit = DISPLAY_RESULT_MAX_LENGTH if OUTPUT_MODE == "debug" else 240
+    text = format_tool_result(value, limit)
     return text.replace("\n", "\n    ")
 
 
-def call_llm(messages, include_tools=True, stream_output=True, tool_registry=None):
+def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
     按 BASE_URL 的 scheme 选 HTTP/HTTPSConnection（https 网关如 api.deepseek.com）。
     content 边收边 print（打字机效果），tool_calls 的 arguments 跨 chunk 拼接。
     """
+    if stream_output is None:
+        stream_output = OUTPUT_MODE != "quiet"
     p = urlparse(BASE_URL)
     if p.scheme == "https":
         conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=120)
@@ -147,9 +148,12 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
-    reminded = False
+    reminder_signature = None
+    internal_retry = False
     for i in range(MAX_ITERATIONS):
-        _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
+        if OUTPUT_MODE != "quiet" and not internal_retry:
+            _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
+        internal_retry = False
         prepared_messages = context_manager.prepare_messages()
         run_registry = getattr(tool_executor, "registry", None)
         if run_registry is None:
@@ -236,7 +240,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         context_manager.history.append(msg)
 
         # content 已在 call_llm 中流式打印；这里补齐换行，避免下一段粘连。
-        _safe_print()
+        if OUTPUT_MODE != "quiet":
+            _safe_print()
 
         for tc in msg.get("tool_calls", []):
             function = tc.get("function", {}) if isinstance(tc, dict) else {}
@@ -248,19 +253,30 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 arguments = json.dumps(json.loads(arguments), ensure_ascii=False)
             except (TypeError, json.JSONDecodeError):
                 arguments = str(arguments)
-            _safe_print(f"  工具: {name} {arguments}")
+            if OUTPUT_MODE == "debug":
+                _safe_print(f"  工具: {name} {arguments}")
+            elif OUTPUT_MODE == "normal":
+                _safe_print(f"  工具: {name}")
 
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
             state = getattr(context_manager, "state", None)
             reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
-            if reminder and not reminded:
-                reminded = True
+            if reminder:
+                signature = (
+                    tuple(reminder.get("unfinished_todos", [])),
+                    bool(reminder.get("verification_required")),
+                    getattr(state, "current_generation_id", None),
+                )
+                if signature == reminder_signature:
+                    if state is not None:
+                        state.status = "blocked"
+                    return msg.get("content", "")
+                reminder_signature = signature
                 if hasattr(context_manager, "set_runtime_notice"):
                     context_manager.set_runtime_notice(str(reminder.get("message", "请继续执行并验证。")))
+                internal_retry = True
                 continue
-            if reminder and state is not None:
-                state.status = "blocked"
             return msg.get("content", "")
 
         # 只有全 effect_class=none 的回合可以并发。任何 possible effect
@@ -358,7 +374,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         for tc, (tool_call_id, content, _) in zip(tool_calls, results):
             function = tc.get("function", {}) if isinstance(tc, dict) else {}
             name = function.get("name", "<missing>") if isinstance(function, dict) else "<missing>"
-            _safe_print(f"  结果 [{name}]:\n    {_display_result(content)}")
+            if OUTPUT_MODE != "quiet":
+                _safe_print(f"  结果 [{name}]:\n    {_display_result(content)}")
 
         for tool_call_id, content, _ in results:
             context_manager.history.append({

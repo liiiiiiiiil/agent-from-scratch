@@ -60,6 +60,7 @@ PYTHONPATH=src python -m mini_agent
 | `MODEL` | `EB-GLM-5.2` | 模型名 |
 | `MAX_ITERATIONS` | `50` | agent loop 最大轮数 |
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
+| `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
 
 > 真实配置写进 `config_local.py`（不进 git）；无 `config_local.py` 时回退到 `config.py` 占位值。
 
@@ -86,7 +87,7 @@ python -m mini_agent
 
 ## 3. 当前能力（v0.16）
 
-v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。每次请求默认显示 token 分桶，并记录 trimming/compaction 事件；可在 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False` 关闭日志。
+v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和完整工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 

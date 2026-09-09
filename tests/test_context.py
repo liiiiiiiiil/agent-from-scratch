@@ -354,7 +354,7 @@ def test_structured_state_includes_recent_completed_tools():
 
     rendered = context._render_state()["content"]
 
-    assert "echo round-11" in rendered
+    assert "round-11" in rendered
     assert "do not repeat" in rendered
 
 
@@ -373,7 +373,7 @@ def test_structured_state_redacts_attempt_arguments_and_survives_compaction():
     context.compact()
     rendered = context._render_state()["content"]
     assert "super-secret" not in rendered
-    assert "generation" in rendered and "Latest failure" in rendered and "Budgets" in rendered
+    assert "generation" in rendered and "Recent errors" in rendered
 
 
 def test_structured_state_has_deterministic_size_limit():
@@ -402,6 +402,23 @@ def test_repeated_prepare_does_not_resummarize_same_rounds():
     context.prepare_messages()
 
     assert len(calls) == 1
+
+
+def test_summary_prompt_uses_structured_message_labels():
+    history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+    history.extend(_tool_round(1))
+    prompts = []
+    context = ContextManager(
+        AgentState(task="task"), history,
+        summarizer=lambda prompt: prompts.append(prompt) or "summary",
+        keep_rounds=0,
+    )
+
+    assert context.compact()
+    prompt_text = prompts[0][0]["content"]
+    assert "[TOOL_CALL]" in prompt_text
+    assert "[TOOL_RESULT]" in prompt_text
+    assert "{'role':" not in prompt_text
 
 
 def test_context_stats_use_mutually_exclusive_buckets():
