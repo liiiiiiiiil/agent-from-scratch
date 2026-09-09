@@ -10,6 +10,7 @@ from mini_agent.state import AgentState
 
 
 Message = dict[str, object]
+STRUCTURED_STATE_MAX_CHARS = 6000
 
 
 @dataclass(frozen=True)
@@ -266,6 +267,15 @@ class ContextManager:
         self.last_stats: ContextStats | None = None
         self._runtime_notice: str | None = None
 
+    def reset_task(self) -> None:
+        """Discard task-local context while preserving protected messages."""
+        self.history.clear()
+        self._summary = ""
+        self._compacted = False
+        self._summarized_rounds = 0
+        self.last_stats = None
+        self._runtime_notice = None
+
     def set_runtime_notice(self, notice: str | None) -> None:
         self._runtime_notice = notice
 
@@ -311,30 +321,41 @@ class ContextManager:
 
     def _render_state(self) -> Message:
         snapshot = self.state.snapshot()
+        def bounded(value: object, limit: int) -> str:
+            text = str(value)
+            if len(text) <= limit:
+                return text
+            return text[:limit] + " [... truncated]"
+
         lines = ["[Structured State]"]
-        if snapshot["task"]: lines.append(f"Task: {snapshot['task']}")
-        if snapshot["current_goal"]: lines.append(f"Current goal: {snapshot['current_goal']}")
+        if snapshot["task"]: lines.append(f"Task: {bounded(snapshot['task'], 1200)}")
+        if snapshot["current_goal"]: lines.append(f"Current goal: {bounded(snapshot['current_goal'], 800)}")
         if snapshot["todos"]:
-            lines.append("Todos: " + "; ".join(
-                f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]))
-        if snapshot["files_changed"]: lines.append(f"Files changed: {', '.join(snapshot['files_changed'])}")
-        if snapshot["errors"]: lines.append(f"Errors: {', '.join(snapshot['errors'])}")
+            lines.append("Todos: " + bounded("; ".join(
+                f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]), 1000))
+        if snapshot["files_changed"]: lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
+        if snapshot["errors"]: lines.append("Errors: " + bounded(", ".join(snapshot["errors"]), 800))
         lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
         if snapshot["tool_history"]:
             lines.append(f"Tools executed: {len(snapshot['tool_history'])}")
-            lines.append("Recent completed tools (do not repeat): " + "; ".join(
+            lines.append("Recent completed tools (do not repeat): " + bounded("; ".join(
                 f"{item['tool']}({item.get('arguments_hash', item.get('args', '<legacy>'))}) -> {item['brief']}"
-                for item in snapshot["tool_history"][-4:]))
+                for item in snapshot["tool_history"][-4:]), 1200))
         if snapshot.get("verification_evidence"):
-            lines.append("Verification: " + "; ".join(
+            lines.append("Verification: " + bounded("; ".join(
                 f"{item['command']} => {item['outcome']} ({item['exit_code']}) @g{item.get('generation_id', 0)}"
-                for item in snapshot["verification_evidence"]))
+                for item in snapshot["verification_evidence"]), 800))
         if snapshot.get("verification_required"): lines.append("Verification required: true")
         if snapshot.get("terminal_reason"): lines.append("Terminal reason: " + snapshot["terminal_reason"])
-        if snapshot.get("latest_failure"): lines.append("Latest failure: " + str(snapshot["latest_failure"]))
+        if snapshot.get("latest_failure"): lines.append("Latest failure: " + bounded(snapshot["latest_failure"], 800))
         lines.append("Budgets: retry={failure_retries_remaining}, fingerprint={fingerprint_attempts_limit}, recovery={recovery_actions_remaining}, repair={repair_cycles_remaining}".format(**snapshot["budgets"]))
-        if snapshot.get("recovery_notice"): lines.append("Recovery notice: " + snapshot["recovery_notice"])
-        return {"role": "system", "content": "\n".join(lines)}
+        if snapshot.get("recovery_notice"): lines.append("Recovery notice: " + bounded(snapshot["recovery_notice"], 500))
+        content = "\n".join(lines)
+        if len(content) > STRUCTURED_STATE_MAX_CHARS:
+            marker = "\n[... state truncated ...]\n"
+            keep = max(2, STRUCTURED_STATE_MAX_CHARS - len(marker))
+            content = content[: (keep + 1) // 2] + marker + content[-(keep // 2):]
+        return {"role": "system", "content": content}
 
     def _build_messages(self) -> list[Message]:
         source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])

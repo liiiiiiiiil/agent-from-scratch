@@ -39,11 +39,12 @@ def main():
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
 
     def run_task(user_input):
-        if hasattr(state, "begin_task"):
-            state.begin_task(user_input)
-        else:
-            state.status = "running"
-            state.task = user_input
+        if not state.task:
+            if hasattr(state, "begin_task"):
+                state.begin_task(user_input)
+            else:
+                state.task = user_input
+        state.status = "running"
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
@@ -62,11 +63,35 @@ def main():
 
     while True:
         try:
-            user_input = input("\n你: ").strip()
+            task_label = state.task[:60] + ("..." if len(state.task) > 60 else "")
+            prompt = f"\n你 [{state.status}; 当前任务: {task_label or '(无)'}]: "
+            user_input = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
+        if user_input == "/reset":
+            context.reset_task()
+            if hasattr(state, "reset_task"):
+                state.reset_task()
+            else:
+                state.task = ""
+                state.status = "idle"
+            print("当前任务已清空。输入任务开始，或使用 /new <任务>。")
+            continue
+        if user_input == "/new" or user_input.startswith("/new "):
+            task = user_input[4:].strip()
+            if not task:
+                print("用法: /new <任务>")
+                continue
+            context.reset_task()
+            if hasattr(state, "begin_task"):
+                state.begin_task(task)
+            else:
+                state.task = task
+                state.status = "running"
+            run_task(task)
+            continue
         run_task(user_input)
 
 

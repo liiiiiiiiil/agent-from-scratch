@@ -380,6 +380,13 @@ class AgentState:
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             self.generations.append(ExecutionGeneration(0, open_reason="task_start"))
 
+    def reset_task(self, task: str = "") -> None:
+        """Reset all task-local state in place, preserving bound tool references."""
+        self.begin_task(task)
+        if not task:
+            with self._lock:
+                self.status = "idle"
+
     def _invalidate_verification(self) -> None:
         self._verification_generation += 1; self.verification_evidence.clear()
         self._last_verified_generation = -1; self._verification_required = True

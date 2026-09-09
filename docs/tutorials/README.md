@@ -50,7 +50,7 @@ git diff v0.07..v0.08
 | v0.09 | 权限系统升级 | [09-permission-upgrade.md](09-permission-upgrade.md) |
 | v0.10 | shell 执行 | [10-shell-execution.md](10-shell-execution.md) |
 
-> `v0.06.1` 是第 6 课的协议状态修订；`v0.13.1` 是第 13 课的 Context Observability 增补。两处都声明自己的 tag、diff 基线和固定源码链接。
+> `v0.06.1` 是第 6 课的协议状态修订；`v0.13.1` 是第 13 课的 Context Observability 增补，`v0.13.2` 是同课的任务边界隔离补丁。这些补丁都声明自己的 tag、diff 基线和固定源码链接。
 
 完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑，但它仍然缺少长上下文管理、任务规划、失败恢复和安全隔离等进阶能力。
 
@@ -64,6 +64,7 @@ git diff v0.07..v0.08
 | v0.12 | 预算与裁剪（token 估算 + 按轮次原子 trimming） | [12-token-budget-trimming.md](12-token-budget-trimming.md) |
 | v0.13 | 上下文压缩（LLM 摘要 + State 锚定） | [13-context-compaction.md](13-context-compaction.md) |
 | v0.13.1 | Context Observability（同课增补） | [13-context-compaction.md](13-context-compaction.md) |
+| v0.13.2 | Task Boundary Isolation（同课增补） | [13-context-compaction.md](13-context-compaction.md) |
 
 ### 阶段五：项目感知与任务编排
 

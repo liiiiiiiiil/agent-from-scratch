@@ -14,6 +14,21 @@
 
 本课末尾还以 v0.13.1 补丁增补 Context Observability：你应能读懂 `ContextStats` 的五个 token 分桶，调用 `ContextManager.stats_snapshot()`，区分 `prepared`、`trimmed`、`compacted` 事件，并配置默认终端日志与 `CONTEXT_OBSERVABILITY` 开关；同时理解 observer 异常会被隔离，不会影响 agent。
 
+## v0.13.2：任务边界隔离
+
+上下文压缩解决的是“历史太长”，不自动解决“任务已经切换”。同一 CLI 会话中，普通
+后续输入默认继续当前任务；使用 `/new <任务>` 才会清空旧任务并开始新任务，`/reset`
+清空当前任务并等待下一条输入。任务完成后也不会靠 `done` 状态猜测用户意图。
+
+任务边界会原地清空所有任务级事实：Todo、工具记录、文件变更、错误、验证证据、
+generation、FailureEvent、RecoveryAction、retry/fingerprint/recovery/repair 预算和
+后续版本中的 checkpoint。history、Historical Summary、压缩游标和 runtime notice 也会
+清空；system prompt、项目级指令和会话级权限授权保留。同步 CLI 只在当前工具批次完整
+回灌后读取下一条输入，因此不会在 tool call 与 tool result 之间制造孤儿消息。
+
+Structured State 每轮都会从最新状态重新渲染，并有固定字符上限；任务锚点、当前目标和
+状态优先保留，过长的诊断历史会被确定性截断。它是任务事实投影，不会修改本地 State。
+
 ## 上一版的问题
 
 v0.12 的 `ContextManager.prepare_messages()` 从完整 `history` 制作副本，再调用 `TrimPolicy.trim()`。它不会改写本地完整历史，但发送给模型的副本可能已经没有早期轮次。

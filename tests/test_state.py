@@ -128,6 +128,23 @@ def test_begin_task_resets_runtime_state_and_completion_reminder():
     assert state.completion_reminder() is None
 
 
+def test_reset_task_clears_stage_six_state_in_place():
+    state = AgentState()
+    state.begin_task("old")
+    state.update_todos([{"content": "old todo", "status": "in_progress"}])
+    state.begin_task("new")
+    snapshot = state.snapshot()
+    assert snapshot["task"] == "new"
+    assert snapshot["todos"] == []
+    assert snapshot["failures"] == []
+    assert snapshot["recovery_actions"] == []
+    assert snapshot["attempts"] == []
+    assert snapshot["current_generation_id"] == 0
+    state.reset_task()
+    assert state.snapshot()["task"] == ""
+    assert state.snapshot()["failures"] == []
+
+
 def test_record_success_and_failure():
     state = AgentState()
 
