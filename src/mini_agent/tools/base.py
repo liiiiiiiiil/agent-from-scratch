@@ -15,6 +15,21 @@ RESULT_BRIEF_FALLBACK = "<unavailable>"
 ResultCallback = Callable[[str, dict[str, Any], bool, str], None]
 
 
+def format_tool_result(value: Any, max_chars: int = 4000) -> str:
+    """Render a bounded, protocol-safe tool result for the model."""
+    try:
+        text = str(value)
+    except Exception:
+        return "工具调用失败: RuntimeError"
+    if len(text) <= max_chars:
+        return text
+    marker = f"\n[... output truncated; {len(text) - max_chars} characters omitted ...]\n"
+    keep = max(2, max_chars - len(marker))
+    head = (keep + 1) // 2
+    tail = keep // 2
+    return text[:head] + marker + text[-tail:]
+
+
 @dataclass
 class Tool:
     name: str
@@ -62,10 +77,7 @@ class ExecutionResult:
         return self.outcome == "timeout"
 
     def tool_content(self) -> str:
-        try:
-            return str(self.output)
-        except Exception:
-            return "工具调用失败: RuntimeError"
+        return format_tool_result(self.output)
 
 
 class ToolRegistry:

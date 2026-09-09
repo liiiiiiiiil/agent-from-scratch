@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from mini_agent.config import CONTEXT_OBSERVABILITY, CONTEXT_WINDOW
+from mini_agent.config import CONTEXT_OBSERVABILITY, CONTEXT_WINDOW, OUTPUT_MODE
 from mini_agent.state import AgentState
+from mini_agent.tools.base import format_tool_result
 
 
 Message = dict[str, object]
@@ -40,15 +41,37 @@ class ContextEvent:
 Observer = Callable[[ContextEvent], None]
 
 
+def _serialize_message(message: Message) -> str:
+    role = message.get("role", "unknown")
+    if role == "tool":
+        return "[TOOL_RESULT]\n" + f"id={message.get('tool_call_id', '<unknown>')}\n" + format_tool_result(message.get("content", ""), 1600)
+    if role == "assistant" and message.get("tool_calls"):
+        calls = []
+        for call in message.get("tool_calls", []):
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            calls.append(
+                f"id={call.get('id', '<unknown>')} name={function.get('name', '<unknown>')} "
+                f"arguments={format_tool_result(function.get('arguments', ''), 800)}"
+            )
+        return "[TOOL_CALL]\n" + "\n".join(calls)
+    return f"[{str(role).upper()}]\n{format_tool_result(message.get('content', ''), 1600)}"
+
+
 def _default_observer(event: ContextEvent) -> None:
+    if OUTPUT_MODE == "quiet":
+        return
     details = event.details
     if event.kind == "prepared" and event.stats is not None:
+        if OUTPUT_MODE != "debug":
+            return
         stats = event.stats
         print("[Context]")
         print(f"tokens: {stats.tokens:,} / {stats.window:,}")
         for name in ("system", "task", "state", "history", "tool_result", "reserve"):
             print(f"{name + ':':12}{getattr(stats, name):>10,}")
     elif event.kind == "trimmed":
+        if OUTPUT_MODE != "debug":
+            return
         action = details.get("action")
         if action == "truncate":
             print("[Context Trim]")
@@ -59,6 +82,8 @@ def _default_observer(event: ContextEvent) -> None:
             print(f"removed turn #{details.get('round', '?')}")
             print(f"tool_result: -{int(details.get('saved_tokens', 0)):,} tokens")
     elif event.kind == "compacted":
+        if OUTPUT_MODE != "debug":
+            return
         if details.get("failed"):
             print("[Context Compact]")
             print("failed; fallback: trimming")
@@ -334,22 +359,21 @@ class ContextManager:
             lines.append("Todos: " + bounded("; ".join(
                 f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]), 1000))
         if snapshot["files_changed"]: lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
-        if snapshot["errors"]: lines.append("Errors: " + bounded(", ".join(snapshot["errors"]), 800))
+        if snapshot["errors"]: lines.append("Recent errors: " + bounded(", ".join(snapshot["errors"][-3:]), 800))
         lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
         if snapshot["tool_history"]:
             lines.append(f"Tools executed: {len(snapshot['tool_history'])}")
             lines.append("Recent completed tools (do not repeat): " + bounded("; ".join(
-                f"{item['tool']}({item.get('arguments_hash', item.get('args', '<legacy>'))}) -> {item['brief']}"
-                for item in snapshot["tool_history"][-4:]), 1200))
+                f"{item['tool']} -> {format_tool_result(item.get('brief', ''), 180)}"
+                for item in snapshot["tool_history"][-3:]), 700))
         if snapshot.get("verification_evidence"):
             lines.append("Verification: " + bounded("; ".join(
                 f"{item['command']} => {item['outcome']} ({item['exit_code']}) @g{item.get('generation_id', 0)}"
                 for item in snapshot["verification_evidence"]), 800))
         if snapshot.get("verification_required"): lines.append("Verification required: true")
-        if snapshot.get("terminal_reason"): lines.append("Terminal reason: " + snapshot["terminal_reason"])
-        if snapshot.get("latest_failure"): lines.append("Latest failure: " + bounded(snapshot["latest_failure"], 800))
-        lines.append("Budgets: retry={failure_retries_remaining}, fingerprint={fingerprint_attempts_limit}, recovery={recovery_actions_remaining}, repair={repair_cycles_remaining}".format(**snapshot["budgets"]))
-        if snapshot.get("recovery_notice"): lines.append("Recovery notice: " + bounded(snapshot["recovery_notice"], 500))
+        if snapshot.get("terminal_reason"): lines.append("Blocking reason: " + bounded(snapshot["terminal_reason"], 500))
+        if snapshot.get("recovery_notice") and snapshot.get("status") in ("blocked", "failed"):
+            lines.append("Recovery notice: " + bounded(snapshot["recovery_notice"], 500))
         content = "\n".join(lines)
         if len(content) > STRUCTURED_STATE_MAX_CHARS:
             marker = "\n[... state truncated ...]\n"
@@ -401,7 +425,7 @@ class ContextManager:
             "已修改文件、错误、当前进度、下一步组织。禁止虚构事实，"
             "不要重复已经完成的工具调用，也不要把旧命令当作下一步。\n" +
             ("已有摘要：\n" + self._summary + "\n" if self._summary else "") +
-            "历史：\n" + "\n".join(str(message) for message in old_messages)
+            "历史：\n" + "\n\n".join(_serialize_message(message) for message in old_messages)
         )}]
         try:
             summary = self.summarizer(prompt)
