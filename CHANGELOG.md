@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.13.2] - Task Boundary Isolation
+
+### Added
+- `/new <task>` 与 `/reset` 显式隔离同一会话中的任务上下文。
+- 每轮注入 Structured State，并对其发送视图设置确定性长度上限。
+- 任务重置测试覆盖 history、摘要、状态对象和工具协议边界。
+
+### Changed
+- 普通后续输入默认延续当前任务，不再覆盖任务锚点或清空执行状态。
+
 ## [v0.13.1] - Context Observability 增强
 
 ### Added

@@ -20,13 +20,19 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
 
     state = AgentState()
-    history = [{"role": "system", "content": build_system_prompt()}]
+    history = []
     context = ContextManager(state, history)
     tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
     def run_task(user_input):
-        state.status = "running"
-        state.task = user_input
+        if not state.task:
+            if hasattr(state, "begin_task"):
+                state.begin_task(user_input)
+            else:
+                state.task = user_input
+                state.status = "running"
+        else:
+            state.status = "running"
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
@@ -34,6 +40,10 @@ def main():
             state.status = "failed"
             raise
         state.status = "failed" if result == "达到最大迭代次数" else "done"
+
+    def reset_task(task=""):
+        context.reset_task()
+        state.reset_task(task)
 
     # 命令行首条任务（可选）：与交互循环走同一套路径，
     # 保证 argv 分支后 history 状态完整，后续追问上下文不丢。
@@ -47,6 +57,18 @@ def main():
             break
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
+        if user_input == "/reset":
+            reset_task()
+            print("当前任务已清空。输入任务开始，或使用 /new <任务>。")
+            continue
+        if user_input.startswith("/new"):
+            task = user_input[4:].strip()
+            if not task:
+                print("用法: /new <任务>")
+                continue
+            reset_task(task)
+            run_task(task)
+            continue
         run_task(user_input)
 
 

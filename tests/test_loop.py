@@ -720,15 +720,14 @@ def test_cli_reuses_context_and_executor_for_argv_and_interactive_tasks():
         tool_executor, tool_executor,
     ]
     assert [call["task"] for call in loop_calls] == [
-        "argv task", "interactive task",
+        "argv task", "argv task",
     ]
     assert [call["status"] for call in loop_calls] == ["running", "running"]
     assert context.history == [
-        {"role": "system", "content": "system"},
         {"role": "user", "content": "argv task"},
         {"role": "user", "content": "interactive task"},
     ]
-    assert state.task == "interactive task"
+    assert state.task == "argv task"
     assert state.status_history == ["running", "done", "running", "failed"]
     assert state.status == "failed"
     print("PASS: CLI argv/交互共用并复用同一 State/Context/Executor")

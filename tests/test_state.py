@@ -31,6 +31,22 @@ def test_defaults_are_independent():
     assert second.errors == []
 
 
+def test_begin_task_resets_task_local_state_in_place():
+    state = AgentState(task="old")
+    state.current_goal = "old goal"
+    state.record_tool("write_file", {"path": "old.py"}, True, "written")
+    state.begin_task("new")
+    assert state.task == "new"
+    assert state.current_goal == ""
+    assert state.tool_history == []
+    assert state.files_changed == []
+    assert state.errors == []
+    assert state.status == "running"
+    state.reset_task()
+    assert state.task == ""
+    assert state.status == "idle"
+
+
 def test_record_success_and_failure():
     state = AgentState()
 

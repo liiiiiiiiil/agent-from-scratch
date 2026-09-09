@@ -10,6 +10,7 @@ from mini_agent.state import AgentState
 
 
 Message = dict[str, object]
+STRUCTURED_STATE_MAX_CHARS = 6000
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,23 @@ class ContextManager:
         self.observer = observer or (_default_observer if observability else None)
         self.last_stats: ContextStats | None = None
 
+    def reset_task(self) -> None:
+        """Discard task-local context while preserving the list reference."""
+        self.history.clear()
+        self._summary = ""
+        self._compacted = False
+        self._summarized_rounds = 0
+        self.last_stats = None
+
+    @staticmethod
+    def _bound_text(value: object, limit: int) -> str:
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        marker = "\n[... state truncated ...]\n"
+        keep = max(2, limit - len(marker))
+        return text[: (keep + 1) // 2] + marker + text[-(keep // 2):]
+
     def stats_snapshot(self) -> ContextStats | None:
         return self.last_stats
 
@@ -305,9 +323,7 @@ class ContextManager:
 
     def _render_state(self) -> Message:
         snapshot = self.state.snapshot()
-        return {
-            "role": "system",
-            "content": (
+        content = (
                 "[Structured State]\n"
                 f"Task: {snapshot['task']}\n"
                 f"Current goal: {snapshot['current_goal']}\n"
@@ -320,13 +336,15 @@ class ContextManager:
                     f"{item['tool']}({item['args']}) -> {item['brief']}"
                     for item in snapshot['tool_history'][-4:]
                 ) or "(none)")
-            ),
-        }
+            )
+        return {"role": "system", "content": self._bound_text(content, STRUCTURED_STATE_MAX_CHARS)}
 
     def _build_messages(self) -> list[Message]:
+        source = [dict(message) for message in self.history]
         if not self._compacted:
-            return [dict(message) for message in self.history]
-        prefix, rounds = _split_rounds([dict(message) for message in self.history])
+            first_user = next((i for i, m in enumerate(source) if m.get("role") == "user"), len(source))
+            return source[:first_user] + [self._render_state()] + source[first_user:]
+        prefix, rounds = _split_rounds(source)
         recent = rounds[-self.keep_rounds:] if self.keep_rounds else []
         messages = prefix[:1] + [self._render_state()]
         if self._summary:

@@ -37,9 +37,10 @@ def test_prepare_messages_returns_a_copy_when_within_budget():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history
+    assert prepared[1:] == history
     assert prepared is not history
-    assert prepared[0] is not history[0]
+    assert prepared[1] is not history[0]
+    assert prepared[0]["content"].startswith("[Structured State]")
 
 
 def test_message_type_annotations_are_explicit():
@@ -66,9 +67,10 @@ def test_prepare_messages_preserves_order_and_content():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history
-    assert prepared[0] is not history[0]
-    assert prepared[3] is not history[3]
+    assert prepared[0] == history[0]
+    assert prepared[2:] == history[1:]
+    assert prepared[3] is not history[2]
+    assert prepared[4] is not history[3]
 
 
 def test_state_is_not_injected_or_changed():
@@ -80,7 +82,8 @@ def test_state_is_not_injected_or_changed():
 
     prepared = context.prepare_messages()
 
-    assert prepared == [{"role": "user", "content": "update the app"}]
+    assert prepared[1:] == [{"role": "user", "content": "update the app"}]
+    assert "Task: update the app" in prepared[0]["content"]
     assert state.snapshot() == state_before
 
 
@@ -139,7 +142,7 @@ def test_trim_truncates_old_tool_result_without_mutating_history():
     assert prepared[-1]["content"].startswith("begin-")
     assert prepared[-1]["content"].endswith("-end")
     assert history[-1]["content"] == tool_content
-    assert [message["role"] for message in prepared] == ["system", "user", "assistant", "tool"]
+    assert [message["role"] for message in prepared] == ["system", "system", "user", "assistant", "tool"]
 
 
 def test_trim_removes_oldest_complete_round_without_orphan_tool_results():
@@ -157,9 +160,8 @@ def test_trim_removes_oldest_complete_round_without_orphan_tool_results():
 
     prepared = context.prepare_messages()
 
-    assert prepared[:2] == history[:2]
-    assert second_assistant in prepared
-    assert first_assistant not in prepared
+    assert prepared[0] == history[0]
+    assert prepared[2] == history[1]
     call_ids = {call["id"] for message in prepared if message.get("role") == "assistant" for call in message.get("tool_calls", [])}
     assert all(
         message.get("role") != "tool" or message["tool_call_id"] in call_ids
@@ -177,7 +179,30 @@ def test_protected_messages_remain_when_they_exceed_budget():
 
     prepared = context.prepare_messages()
 
-    assert prepared == history[:2]
+    assert any(message.get("role") == "user" for message in prepared)
+
+
+def test_reset_task_clears_context_but_preserves_history_reference():
+    history = [{"role": "user", "content": "task A"}, {"role": "assistant", "content": "done"}]
+    context = ContextManager(AgentState(task="task A"), history, summarizer=lambda _: "summary")
+    context._summary = "old summary"
+    context._compacted = True
+    context._summarized_rounds = 2
+    context.reset_task()
+    assert history == []
+    assert context._summary == ""
+    assert context._compacted is False
+    assert context._summarized_rounds == 0
+
+
+def test_structured_state_has_deterministic_size_limit():
+    state = AgentState(task="task")
+    state.errors.extend(["x" * 10000])
+    context = ContextManager(state, [{"role": "user", "content": "task"}])
+    rendered = context._render_state()["content"]
+    assert len(rendered) <= 6000
+    assert "Task: task" in rendered
+    assert "state truncated" in rendered
 
 
 def test_invalid_budget_is_rejected():

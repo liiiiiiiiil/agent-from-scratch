@@ -21,6 +21,21 @@ class AgentState:
         compare=False,
     )
 
+    def reset_task(self, task: str = "") -> None:
+        """Clear task-local facts while preserving this state object."""
+        with self._lock:
+            self.task = task
+            self.current_goal = ""
+            self.tool_history.clear()
+            self.files_changed.clear()
+            self.errors.clear()
+            self.status = "running" if task else "idle"
+
+    def begin_task(self, task: str) -> None:
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("task 必须是非空字符串")
+        self.reset_task(task.strip())
+
     def record_tool(
         self,
         name: str,
