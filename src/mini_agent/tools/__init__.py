@@ -21,7 +21,12 @@ def create_registry(state: AgentState | None = None) -> ToolRegistry:
         result.register(tool)
     if state is not None:
         result.register(make_update_todo_tool(state))
-        result.register(__import__('mini_agent.recovery', fromlist=['make_recover_tool']).make_recover_tool(RecoveryRuntime(state, ToolExecutor(result))))
+        # The outer task executor binds its own PermissionGate to this runtime.
+        # Keeping only one runtime here prevents recovery from silently using a
+        # second, default permission policy.
+        recovery_runtime = RecoveryRuntime(state, None)
+        result.register(__import__('mini_agent.recovery', fromlist=['make_recover_tool']).make_recover_tool(recovery_runtime))
+        result._recovery_runtime = recovery_runtime
     return result
 
 registry = create_registry()

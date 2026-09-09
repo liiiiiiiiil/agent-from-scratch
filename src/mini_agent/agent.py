@@ -29,6 +29,30 @@ def _display_result(value):
     return text.replace("\n", "\n    ")
 
 
+def _recovery_rejection_content(state, arguments, detail):
+    """Record one identifiable rejected recover call and return its tool result."""
+    if state is None or not hasattr(state, "reject_recovery"):
+        return json.dumps({"status": "rejected", "message": str(detail)[:1200]}, ensure_ascii=False)
+    arguments = arguments if isinstance(arguments, dict) else {}
+    record = state.reject_recovery(
+        arguments.get("action", "block"),
+        arguments.get("caused_by_failure_id", "<missing>"),
+        arguments.get("reason", ""),
+        str(detail),
+        arguments.get("requested_attempt"),
+        arguments.get("requested_tool"),
+        arguments.get("requested_arguments"),
+    )
+    payload = {
+        "status": "rejected",
+        "recovery_id": record.recovery_id,
+        "message": str(detail)[:1200],
+    }
+    if getattr(state, "status", None) in ("blocked", "failed"):
+        payload["error_kind"] = "task_terminal"
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
@@ -311,8 +335,14 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         def _run(index_tc):
             index, tc = index_tc
             tool_call_id = tc.get("id") if isinstance(tc, dict) else None
+            if structured and state is not None and getattr(state, "is_terminal", lambda: False)():
+                name, args = parsed_calls[index]
+                terminal = tool_executor.execute_result(name, args, state, notify=False)
+                return tool_call_id, terminal.tool_content(), None
             if tool_call_id in invalid_tool_call_errors:
                 text = invalid_tool_call_errors[tool_call_id]
+                if structured and state is not None and parsed_calls[index][0] == "recover":
+                    return tool_call_id, _recovery_rejection_content(state, parsed_calls[index][1], text), None
                 invalid = ExecutionResult(
                     "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
                     "none", text, text[:200], error_kind="malformed_tool_call",
@@ -343,9 +373,19 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             try:
                 if structured:
                     execution = tool_executor.execute_result(
-                        name, args, state if effects[index] == "possible" else None,
+                        name, args, state,
                         notify=False,
                     )
+                    if name == "recover":
+                        if execution.error_kind in ("task_terminal", "recovery_rejected"):
+                            content = execution.tool_content()
+                        elif execution.outcome != "succeeded":
+                            content = _recovery_rejection_content(state, args, execution.output_excerpt)
+                        else:
+                            content = execution.tool_content()
+                        return tool_call_id, content, None
+                    if execution.error_kind == "task_terminal":
+                        return tool_call_id, execution.tool_content(), None
                     return tool_call_id, execution.tool_content(), execution
                 result = tool_executor.execute(name, args)
                 return tool_call_id, str(result), None
@@ -385,6 +425,6 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             })
 
     state = getattr(context_manager, "state", None)
-    if state is not None:
+    if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):
         state.status = "failed"
     return "达到最大迭代次数"

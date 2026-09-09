@@ -352,33 +352,85 @@ class ContextManager:
                 return text
             return text[:limit] + " [... truncated]"
 
-        lines = ["[Structured State]"]
-        if snapshot["task"]: lines.append(f"Task: {bounded(snapshot['task'], 1200)}")
-        if snapshot["current_goal"]: lines.append(f"Current goal: {bounded(snapshot['current_goal'], 800)}")
+        base_lines = ["[Structured State]"]
+        if snapshot["task"]: base_lines.append(f"Task: {bounded(snapshot['task'], 1200)}")
+        if snapshot["current_goal"]: base_lines.append(f"Current goal: {bounded(snapshot['current_goal'], 800)}")
         if snapshot["todos"]:
-            lines.append("Todos: " + bounded("; ".join(
+            base_lines.append("Todos: " + bounded("; ".join(
                 f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]), 1000))
-        if snapshot["files_changed"]: lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
-        if snapshot["errors"]: lines.append("Recent errors: " + bounded(", ".join(snapshot["errors"][-3:]), 800))
-        lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
-        if snapshot["tool_history"]:
-            lines.append(f"Tools executed: {len(snapshot['tool_history'])}")
-            lines.append("Recent completed tools (do not repeat): " + bounded("; ".join(
+        if snapshot["files_changed"]:
+            base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
+        base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
+
+        optional_lines = []
+        if snapshot["errors"]:
+            optional_lines.append("Recent errors: " + bounded(", ".join(snapshot["errors"][-3:]), 800))
+        successful_tools = [item for item in snapshot["tool_history"] if item.get("ok")]
+        if successful_tools:
+            optional_lines.append(f"Tools executed: {len(snapshot['tool_history'])}")
+            optional_lines.append("Recent completed tools (do not repeat): " + bounded("; ".join(
                 f"{item['tool']} -> {format_tool_result(item.get('brief', ''), 180)}"
-                for item in snapshot["tool_history"][-3:]), 700))
+                for item in successful_tools[-3:]), 700))
         if snapshot.get("verification_evidence"):
-            lines.append("Verification: " + bounded("; ".join(
+            optional_lines.append("Verification: " + bounded("; ".join(
                 f"{item['command']} => {item['outcome']} ({item['exit_code']}) @g{item.get('generation_id', 0)}"
                 for item in snapshot["verification_evidence"]), 800))
-        if snapshot.get("verification_required"): lines.append("Verification required: true")
-        if snapshot.get("terminal_reason"): lines.append("Blocking reason: " + bounded(snapshot["terminal_reason"], 500))
-        if snapshot.get("recovery_notice") and snapshot.get("status") in ("blocked", "failed"):
-            lines.append("Recovery notice: " + bounded(snapshot["recovery_notice"], 500))
-        content = "\n".join(lines)
+
+        attempts = {item["attempt_id"]: item for item in snapshot.get("attempts", [])}
+        failure_lines = []
+        for failure in snapshot.get("failures", [])[-3:]:
+            attempt = attempts.get(failure.get("caused_by_attempt_id"), {})
+            failure_lines.append(
+                f"{failure['failure_id']} tool={attempt.get('tool', '<unknown>')} "
+                f"attempt={failure.get('caused_by_attempt_id', '<unknown>')} "
+                f"generation={failure.get('generation_id')} category={failure.get('category')} "
+                f"retryable={str(failure.get('retryable')).lower()}"
+            )
+        critical_lines = []
+        if failure_lines:
+            critical_lines.append("Recent failures: " + bounded("; ".join(failure_lines), 1500))
+        recovery_lines = []
+        for action in snapshot.get("recovery_actions", [])[-3:]:
+            recovery_lines.append(
+                f"{action['recovery_id']} action={action['action']} status={action['status']} "
+                f"failure={action['caused_by_failure_id']} generation={action['generation_id']} "
+                f"result_attempt={action.get('result_attempt') or '-'}"
+            )
+        if recovery_lines:
+            critical_lines.append("Recent recovery actions: " + bounded("; ".join(recovery_lines), 1500))
+        budgets = snapshot.get("budgets", {})
+        critical_lines.append(
+            "Budgets: "
+            f"failure_retries_remaining={budgets.get('failure_retries_remaining', '?')}; "
+            f"recovery_actions_remaining={budgets.get('recovery_actions_remaining', '?')}; "
+            f"repair_cycles_remaining={budgets.get('repair_cycles_remaining', '?')}; "
+            f"fingerprint_attempts_remaining={bounded(budgets.get('fingerprint_attempts_remaining', []), 900)}"
+        )
+        if snapshot.get("recovery_notice"):
+            critical_lines.append("Recovery notice: " + bounded(snapshot["recovery_notice"], 600))
+        if snapshot.get("verification_required"):
+            critical_lines.append("Verification required: true")
+        if snapshot.get("terminal_reason"):
+            critical_lines.append("Blocking reason: " + bounded(snapshot["terminal_reason"], 600))
+
+        content = "\n".join(base_lines + optional_lines + critical_lines)
         if len(content) > STRUCTURED_STATE_MAX_CHARS:
-            marker = "\n[... state truncated ...]\n"
-            keep = max(2, STRUCTURED_STATE_MAX_CHARS - len(marker))
-            content = content[: (keep + 1) // 2] + marker + content[-(keep // 2):]
+            # Keep the causal and budget block intact; low-priority observation
+            # text may be dropped after state is rebuilt from the snapshot.
+            content = "\n".join([
+                "[Structured State]",
+                f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
+                *critical_lines,
+            ])
+        if len(content) > STRUCTURED_STATE_MAX_CHARS:
+            # The individual critical fields are already bounded. This final
+            # fallback is only for an unusually large number of bounded records;
+            # do not cut a failure reference or terminal reason in half.
+            content = "\n".join([
+                "[Structured State]",
+                f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
+                *critical_lines,
+            ])
         return {"role": "system", "content": content}
 
     def _build_messages(self) -> list[Message]:

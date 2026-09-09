@@ -29,8 +29,10 @@ EXPECTED = {
     "15-task-state.md": ("v0.15", "v0.14..v0.15"),
     "16-plan-driven-execution.md": ("v0.16", "v0.15..v0.16"),
     "17-failure-model.md": ("v0.17", "v0.16..v0.17"),
+    "18-recovery-policy.md": ("v0.18", "v0.17..v0.18"),
 }
 PATCHES = {
+    "18-recovery-policy.md": ("v0.18.1", "v0.18..v0.18.1"),
     "06-concurrent-tool-calls.md": ("v0.06.1", "v0.06..v0.06.1"),
     "13-context-compaction.md": ("v0.13.1", "v0.13..v0.13.1"),
 }
