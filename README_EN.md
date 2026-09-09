@@ -7,7 +7,7 @@
 逐步生长的编程 Agent —— 持续迭代，从零构建一个能干活的 AI Agent。
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/dependencies-zero-green)](#quick-start)
+[![Dependencies](https://img.shields.io/badge/core%20dependencies-zero-green)](#quick-start)
 [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#learning-path)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
 
@@ -27,7 +27,7 @@
 
 ## Why learn agents with this repo
 
-- **Zero third-party dependencies** — Pure Python standard library throughout (`http.client` / `json` / `concurrent.futures`). No LangChain, no requests. Self-contained, every line is readable.
+- **Zero core third-party dependencies** — LLM calls, the agent loop, and tools use only the Python standard library. The CLI can optionally use `prompt_toolkit` for multiline editing and falls back when it is absent.
 - **Version slices, one concept per version** — `git diff v0.01..v0.02` is the entire change for "add a tool". Diffs are readable, cognitive load is low. Versions keep incrementing with no fixed cap.
 - **A real, runnable agent** — Not a toy demo: supports function calling, streaming output, a permission gate, concurrent tool calls. It can actually read/write files and run commands.
 - **Companion tutorials** — Tutorials are organized by learning stage, with one tutorial doc per version (`docs/tutorials/`) explaining *why* it's designed this way, not just pasting code.
@@ -46,6 +46,8 @@ cp src/mini_agent/config_example.py src/mini_agent/config_local.py
 
 # 3. Install (recommended)
 pip install -e .
+# Optional: enable multiline paste-friendly terminal input
+pip install -e '.[interactive]'
 
 # 4. Run
 python -m mini_agent "calculate 123 * 456"

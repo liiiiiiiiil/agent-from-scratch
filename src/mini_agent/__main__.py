@@ -11,6 +11,7 @@ except ImportError:
 from mini_agent.agent import agent_loop
 from mini_agent.context import ContextManager
 from mini_agent.instructions import InstructionLoader
+from mini_agent.input_session import InputSession
 from mini_agent.prompt import build_system_prompt
 from mini_agent.state import AgentState
 from mini_agent.tools import create_registry, registry
@@ -37,6 +38,7 @@ def main():
     # Kept as a compatibility observer for callers using ToolExecutor.execute().
     # The agent loop's structured path suppresses this legacy callback.
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
+    input_session = InputSession()
 
     def run_task(user_input):
         if not state.task:
@@ -65,7 +67,7 @@ def main():
         try:
             task_label = state.task[:60] + ("..." if len(state.task) > 60 else "")
             prompt = f"\n你 [{state.status}; 当前任务: {task_label or '(无)'}]: "
-            user_input = input(prompt).strip()
+            user_input = input_session.read(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not user_input or user_input.lower() in ("exit", "quit"):
