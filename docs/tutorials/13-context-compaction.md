@@ -12,6 +12,8 @@
 
 本课加入上下文压缩（compaction）：把较老的完整轮次交给一次内部 LLM 请求写成历史摘要，同时保留最近几轮原文，并把执行器记录的状态重新放进请求。读完后，你应能解释：为什么摘要可以有损，而 `AgentState` 必须仍是执行事实的来源。
 
+本课末尾还以 v0.13.1 补丁增补 Context Observability：你应能读懂 `ContextStats` 的五个 token 分桶，调用 `ContextManager.stats_snapshot()`，区分 `prepared`、`trimmed`、`compacted` 事件，并配置默认终端日志与 `CONTEXT_OBSERVABILITY` 开关；同时理解 observer 异常会被隔离，不会影响 agent。
+
 ## 上一版的问题
 
 v0.12 的 `ContextManager.prepare_messages()` 从完整 `history` 制作副本，再调用 `TrimPolicy.trim()`。它不会改写本地完整历史，但发送给模型的副本可能已经没有早期轮次。
@@ -238,11 +240,121 @@ PYTHONPATH=src python -m mini_agent "检查登录流程并运行回归测试"
 
 当任务累积的上下文超过预算、并且旧轮次多于默认保留的六轮时，终端会先显示裁剪日志，随后出现 `compacted` 日志。后续主 LLM 请求包含新的结构化状态和历史摘要，并保留最近完整轮次；这正是本课三层信息分工的可观察结果。
 
+## v0.13.1 补丁：Context Observability
+
+> 这是对 v0.13 的补丁增补，不是 v0.13 tag 原生已有的能力。补丁只为上下文压缩增加可观察性，不改变压缩策略、消息历史或 tool calling 协议。
+>
+> 补丁快照：`v0.13.1` · 相邻差异：`v0.13..v0.13.1`
+>
+> 代码快照：`v0.13.1` · 相邻差异：`v0.13..v0.13.1` · 命令环境：Bash/zsh
+
+如果要切到补丁并查看它相对 v0.13 的最小差异：
+
+```bash
+git checkout v0.13.1
+git diff --stat v0.13..v0.13.1
+git diff v0.13..v0.13.1 -- src/mini_agent/context.py src/mini_agent/config.py tests/test_context.py
+```
+
+### 为什么仅有压缩结果仍不够观察
+
+v0.13 的日志只能告诉你发生了裁剪或压缩，却不能回答“最终发送了多少 token”“预算被哪一类消息占用”“压缩是否真的成功”。长任务排查窗口不足、工具输出过大或摘要失败时，需要一份与实际发送视图对应的统计快照，以及结构化的生命周期事件。
+
+### `ContextStats`：五个互斥输入分桶
+
+v0.13.1 新增不可变的 `ContextStats`。`tokens` 是本次准备发送的完整消息视图估算值；`window` 是上下文窗口，`input_limit` 是扣除输出预留后的输入上限，`reserve` 是输出预留。输入 token 被分到五个互斥桶：
+
+| 字段 | 含义 |
+|---|---|
+| `system` | 普通 system 消息 |
+| `task` | 第一条 user 任务消息 |
+| `state` | 以 `[Structured State]` 开头的结构化状态消息 |
+| `history` | 其他 assistant/user 历史消息（不含 tool 结果） |
+| `tool_result` | 所有 `role=tool` 结果 |
+
+因此 `tokens == system + task + state + history + tool_result`。估算仍使用 `len(text) // 3`，只是诊断指标，不等同于服务端 tokenizer。
+
+### 用 `stats_snapshot()` 读取最近一次视图
+
+`prepare_messages()` 完成后，`ContextManager.stats_snapshot()` 返回最近一次发送视图的统计；在尚未准备请求前它返回 `None`。最小调用示例：
+
+```python
+context = ContextManager(state, history)
+messages = context.prepare_messages()
+stats = context.stats_snapshot()
+if stats is not None:
+    print(stats.tokens, stats.tool_result, stats.reserve)
+```
+
+快照来自裁剪或压缩后的最终副本，而不是未经处理的完整 `history`，所以它适合和即将发出的请求一起记录。
+
+### trim/compact 事件与默认日志
+
+上下文管理器会发出三类 `ContextEvent`：
+
+- `prepared`：最终视图准备完成，`event.stats` 携带 `ContextStats`。
+- `trimmed`：工具结果被截断，或完整旧轮次被移除；`details["action"]` 分别是 `truncate` 与 `remove_round`。
+- `compacted`：旧轮次压缩成功，详情包含压缩轮次、摘要 token 数和近期轮次；摘要异常时带有 `failed=True`，表示回退到 trimming。
+
+默认 `CONTEXT_OBSERVABILITY = True`，终端会显示类似下面的输出：
+
+```text
+[Context]
+tokens: 1,234 / 128,000
+system:              42
+task:                18
+state:               76
+history:            510
+tool_result:        588
+reserve:         19,200
+[Context Trim]
+removed turn #1
+tool_result: -240 tokens
+[Context Compact]
+compressed turns: 1-4
+summary tokens: 96
+recent turns: 5-10
+```
+
+实际数字取决于消息内容；这组日志用于定位预算变化，不是新的协议消息。
+
+### 用 observer 接入结构化事件
+
+需要写入指标或日志系统时，可以传入 `observer` 回调。回调接收 `ContextEvent`，不必解析终端文本：
+
+```python
+def record_context_event(event):
+    payload = {
+        "kind": event.kind,
+        "tokens": event.stats.tokens if event.stats else None,
+        "details": event.details,
+    }
+    metrics.write(payload)
+
+context = ContextManager(
+    state,
+    history,
+    observer=record_context_event,
+)
+```
+
+传入 observer 后仍可用 `observability=False` 关闭默认终端输出；自定义 observer 仍会收到事件。若 observer 自身抛出异常，`ContextManager` 会吞掉该异常并继续准备请求，观察逻辑不会影响 agent。
+
+### 补丁边界
+
+- 可观测性只读取发送副本，不修改完整 `history`，也不改变摘要失败时回退到 trimming 的行为。
+- `prepared`、`trimmed`、`compacted` 是进程内事件，不会追加到发给模型的 messages。
+- 不新增工具调用，不改变每个 `tool_calls` 对应 `role=tool` 结果的回灌规则。
+- 关闭日志只需在本地 `config_local.py` 设置 `CONTEXT_OBSERVABILITY = False`；该配置模板默认值仍为 `True`。
+
 ## 本版特性、下一课与代码索引
 
-v0.13 在 v0.12 的预算和裁剪之上增加了可注入的摘要器、自动或主动压缩、结构化状态注入、近期轮次保留以及摘要失败回退，同时将最大迭代次数提高到 50。下一课会加入项目级指令，并讨论它们为何也需要作为受保护上下文保留。
+v0.13 在 v0.12 的预算和裁剪之上增加了可注入的摘要器、自动或主动压缩、结构化状态注入、近期轮次保留以及摘要失败回退，同时将最大迭代次数提高到 50。v0.13.1 作为同课补丁增补了 `ContextStats` 的 token 分桶、`stats_snapshot()`、`prepared`/`trimmed`/`compacted` 事件、默认终端日志和 `CONTEXT_OBSERVABILITY` 开关，并保证 observer 异常不会影响 agent。下一课会加入项目级指令，并讨论它们为何也需要作为受保护上下文保留。
 
 - [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/context.py) - 压缩、状态渲染和发送视图重建
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/agent.py) - 无工具、无终端输出的摘要请求
 - [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/config.py) - 50 轮默认上限
 - [`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13/src/mini_agent/state.py) - 结构化执行事实的来源
+- [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/src/mini_agent/context.py) - `ContextStats`、`ContextEvent`、observer 与可观测生命周期
+- [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/src/mini_agent/config.py) - `CONTEXT_OBSERVABILITY` 默认开关
+- [`tests/test_context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.13.1/tests/test_context.py) - 分桶、事件和 observer 隔离测试
