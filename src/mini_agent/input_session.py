@@ -42,9 +42,16 @@ class InputSession:
         def submit(event):
             event.current_buffer.validate_and_handle()
 
-        @bindings.add("s-enter")
         def insert_newline(event):
             event.current_buffer.insert_text("\n")
+
+        # prompt_toolkit versions and terminals encode Shift+Enter differently.
+        # Use the named binding when available, then fall back to the common
+        # Escape+Enter sequence instead of making enhanced input fatal.
+        try:
+            bindings.add("s-enter")(insert_newline)
+        except ValueError:
+            bindings.add("escape", "enter")(insert_newline)
 
         return self.session.prompt(
             prompt,
