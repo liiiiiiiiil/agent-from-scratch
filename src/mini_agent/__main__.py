@@ -8,7 +8,7 @@ try:
 except ImportError:
     pass
 
-from mini_agent.agent import agent_loop
+from mini_agent.agent import LLMResponseError, agent_loop
 from mini_agent.context import ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.input_session import InputSession
@@ -68,6 +68,10 @@ def main():
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
+        except LLMResponseError as error:
+            state.status = "failed"
+            cli_notice(f"服务商错误：{error}")
+            return
         except Exception:
             state.status = "failed"
             raise

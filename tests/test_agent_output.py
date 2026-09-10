@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import mini_agent.agent as agent_module
-from mini_agent.agent import agent_loop, call_llm
+from mini_agent.agent import LLMResponseError, agent_loop, call_llm
 from mini_agent.context import ContextManager
 from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
 from mini_agent.state import AgentState
@@ -20,11 +20,16 @@ def _sse(delta):
 
 
 class _Response:
-    def __init__(self, lines):
+    def __init__(self, lines, status=None, reason=""):
         self.lines = lines
+        self.status = status
+        self.reason = reason
 
     def __iter__(self):
         return iter(self.lines)
+
+    def read(self):
+        return b"".join(self.lines)
 
 
 class _Connection:
@@ -84,6 +89,43 @@ def test_call_llm_callback_failure_does_not_break_sse_parsing():
 
     message = _call_with_sse([_sse({"content": "still parsed"})], on_content=fail)
     assert message["content"] == "still parsed"
+
+
+def test_call_llm_surfaces_http_error_status_and_provider_message():
+    _Connection.response = _Response(
+        [b'{"error":{"message":"invalid model","type":"invalid_request_error"}}\n'],
+        status=400,
+        reason="Bad Request",
+    )
+    with patch("mini_agent.agent.http.client.HTTPConnection", _Connection), \
+            patch("mini_agent.agent.http.client.HTTPSConnection", _Connection):
+        try:
+            call_llm([])
+        except LLMResponseError as error:
+            message = str(error)
+        else:
+            raise AssertionError("expected LLMResponseError")
+
+    assert "HTTP 400 Bad Request" in message
+    assert "invalid model" in message
+
+
+def test_call_llm_surfaces_non_sse_provider_error_body():
+    _Connection.response = _Response(
+        [b'{"error":{"message":"quota exceeded"}}\n'],
+        status=200,
+    )
+    with patch("mini_agent.agent.http.client.HTTPConnection", _Connection), \
+            patch("mini_agent.agent.http.client.HTTPSConnection", _Connection):
+        try:
+            call_llm([])
+        except LLMResponseError as error:
+            message = str(error)
+        else:
+            raise AssertionError("expected LLMResponseError")
+
+    assert "非 SSE 响应" in message
+    assert "quota exceeded" in message
 
 
 def test_quiet_call_llm_and_summary_suppress_streaming_output():

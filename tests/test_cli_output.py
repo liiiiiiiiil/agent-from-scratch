@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mini_agent import __main__ as cli
 import mini_agent.agent as agent_module
+from mini_agent.agent import LLMResponseError
 from mini_agent.output import TerminalOutput
 from mini_agent.permission import ALLOW, DENY, PermissionGate, PermissionPolicy
 
@@ -118,6 +119,25 @@ def test_cli_status_notices_cover_max_blocked_and_failed():
 
     _, failed_text = _run_cli(["failed", "exit"], failed_loop)
     assert "任务执行失败：执行器失败" in failed_text
+
+
+def test_cli_shows_provider_error_and_keeps_interactive_prompt_available():
+    def provider_error(context, executor):
+        raise LLMResponseError("服务商 HTTP 401 Unauthorized: invalid API key")
+
+    session, text = _run_cli(["hello", "exit"], provider_error)
+
+    assert "服务商错误：服务商 HTTP 401 Unauthorized: invalid API key" in text
+    assert session.prompts == ["你 › ", "你 › "]
+
+
+def test_cli_provider_error_remains_visible_in_quiet_mode():
+    def provider_error(context, executor):
+        raise LLMResponseError("服务商 HTTP 429 Too Many Requests: quota exceeded")
+
+    _, text = _run_cli(["hello", "exit"], provider_error, mode="quiet")
+
+    assert "服务商错误：服务商 HTTP 429 Too Many Requests: quota exceeded" in text
 
 
 def test_cli_real_agent_loop_streams_one_final_response_without_replay():

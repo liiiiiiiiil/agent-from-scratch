@@ -12,6 +12,58 @@ from mini_agent.tools.base import ExecutionResult, ToolExecutor
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
 
 
+_MAX_PROVIDER_ERROR_LENGTH = 1000
+
+
+class LLMResponseError(RuntimeError):
+    """Raised when the provider returns an unusable or error response."""
+
+
+def _response_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _clip_provider_detail(value):
+    text = " ".join(_response_text(value).split())
+    if len(text) <= _MAX_PROVIDER_ERROR_LENGTH:
+        return text
+    return text[: _MAX_PROVIDER_ERROR_LENGTH - 1] + "…"
+
+
+def _provider_error_detail(payload):
+    """Extract a bounded, human-readable error from a provider payload."""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("message", "detail", "error"):
+            value = error.get(key)
+            if value:
+                return _clip_provider_detail(value)
+        if error:
+            return _clip_provider_detail(error)
+    elif error:
+        return _clip_provider_detail(error)
+    for key in ("message", "detail"):
+        value = payload.get(key)
+        if value:
+            return _clip_provider_detail(value)
+    return ""
+
+
+def _provider_error_from_body(body):
+    text = _response_text(body)
+    if not text.strip():
+        return ""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _clip_provider_detail(text)
+    return _provider_error_detail(payload) or _clip_provider_detail(text)
+
+
 def _safe_print(*args, **kwargs):
     """Best-effort observation output that cannot break agent execution."""
     try:
@@ -76,16 +128,39 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
     conn.request("POST", f"{p.path.rstrip('/')}/chat/completions", body=body, headers=headers)
     resp = conn.getresponse()
 
+    status = getattr(resp, "status", None)
+    if isinstance(status, int) and not 200 <= status < 300:
+        try:
+            detail = _provider_error_from_body(resp.read())
+        finally:
+            conn.close()
+        reason = _clip_provider_detail(getattr(resp, "reason", ""))
+        message = f"服务商 HTTP {status}"
+        if reason:
+            message += f" {reason}"
+        if detail:
+            message += f": {detail}"
+        raise LLMResponseError(message)
+
     content_parts = []
     tool_calls_acc = {}
+    non_sse_parts = []
+    saw_sse_event = False
+    stream_error = ""
 
     for raw in resp:
         line = raw.decode("utf-8").strip()
-        if not line or not line.startswith("data:"):
+        if not line:
             continue
+        if not line.startswith("data:"):
+            if len(non_sse_parts) < 8:
+                non_sse_parts.append(line)
+            continue
+        saw_sse_event = True
         if line == "data: [DONE]":
             break
         chunk = json.loads(line[6:])
+        stream_error = stream_error or _provider_error_detail(chunk)
         choices = chunk.get("choices", [])
         if not choices:
             continue
@@ -151,6 +226,15 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
                     slot["function"]["arguments"] = raw_arguments
 
     conn.close()
+
+    if stream_error:
+        raise LLMResponseError(f"服务商返回错误：{stream_error}")
+    if not saw_sse_event:
+        body = "\n".join(non_sse_parts)
+        detail = _provider_error_from_body(body)
+        if detail:
+            raise LLMResponseError(f"服务商返回了非 SSE 响应：{detail}")
+        raise LLMResponseError("服务商返回了无法解析的响应：预期 SSE data: 事件")
 
     message = {"role": "assistant", "content": "".join(content_parts) or None}
     if tool_calls_acc:
