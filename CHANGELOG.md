@@ -5,6 +5,18 @@
 - Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
 - Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
 
+## [v0.19.0] - Checkpoint / Rollback
+
+- Added task-local single-file checkpoints for admitted `write_file` and `edit_file` calls.
+- Added bounded rollback with before-image bytes, mode restoration, absent tombstones,
+  SHA-256 conflict detection, same-directory atomic replacement, and explicit blocked
+  outcomes for conflicts or interrupted restores.
+- Kept rollback behind the existing recovery quota and PermissionGate; the internal
+  `rollback_checkpoint` tool is not exposed in LLM schemas and still records a full
+  possible-effect attempt with causal links.
+- Added checkpoint metadata to Structured State without exposing original bytes or
+  absolute paths, plus reset/new task cleanup and v0.19 tutorial coverage.
+
 ## [v0.18.1] - Recovery Policy fixes
 
 - Classify edit precondition failures without treating them as unknown writes.

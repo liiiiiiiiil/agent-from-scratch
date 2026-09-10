@@ -30,14 +30,16 @@ EXPECTED = {
     "16-plan-driven-execution.md": ("v0.16", "v0.15..v0.16"),
     "17-failure-model.md": ("v0.17", "v0.16..v0.17"),
     "18-recovery-policy.md": ("v0.18", "v0.17..v0.18"),
+    "19-checkpoint-rollback.md": ("v0.19", "v0.18.1..v0.19"),
 }
 PATCHES = {
+    "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),
     "18-recovery-policy.md": ("v0.18.1", "v0.18..v0.18.1"),
     "06-concurrent-tool-calls.md": ("v0.06.1", "v0.06..v0.06.1"),
     "13-context-compaction.md": ("v0.13.1", "v0.13..v0.13.1"),
 }
 META_RE = re.compile(
-    r"代码快照：`(?P<tag>v[0-9.]+)` · 相邻差异："
+    r"(?:代码|补丁)快照：`(?P<tag>v[0-9.]+)` · 相邻差异："
     r"(?:(?:`(?P<diff>v[0-9.]+\.\.v[0-9.]+)`)|无（首版）)"
 )
 LINK_RE = re.compile(re.escape(REPO_URL) + r"(?P<tag>v[0-9.]+)/(?P<path>[^)\s]+)")

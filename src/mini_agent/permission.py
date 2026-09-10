@@ -34,6 +34,7 @@ PERMISSION_RULES = {
     "grep": ALLOW,  # 只读，放行
     "write_file": ASK,  # 有副作用，每次问一下
     "edit_file": ASK,  # 有副作用，同 write_file
+    "rollback_checkpoint": ASK,  # 仅 RecoveryRuntime 可调用的受限文件恢复
     # v0.10：run_shell 二维权限——安全命令放行，其他每次问
     "run_shell": {
         "git *": ALLOW,  # git 操作放行
@@ -168,6 +169,6 @@ class PermissionGate:
         """
         if tool_name == "run_shell":
             return args.get("command", "*")
-        if tool_name in ("read_file", "write_file", "edit_file"):
+        if tool_name in ("read_file", "write_file", "edit_file", "rollback_checkpoint"):
             return args.get("path", "*")
         return "*"

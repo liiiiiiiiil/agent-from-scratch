@@ -9,6 +9,7 @@ import re
 from threading import Lock
 from typing import Any, Literal
 
+from mini_agent.checkpoint import CheckpointStore
 from mini_agent.config import (MAX_ATTEMPT_FINGERPRINTS, MAX_FAILURE_RETRIES,
                                MAX_RECOVERY_ACTIONS, MAX_REPAIR_CYCLES)
 
@@ -103,6 +104,7 @@ class ExecutionAttempt:
     output_excerpt: str = ""
     failure_id: str | None = None
     recovery_id: str | None = None
+    checkpoint_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,10 +121,10 @@ class FailureEvent:
 
 @dataclass(frozen=True)
 class RecoveryAction:
-    """Reserved v0.17 schema; recovery execution starts in v0.18."""
+    """Auditable recovery request; rollback references one task checkpoint."""
     recovery_id: str
     generation_id: int
-    action: Literal["retry", "adjust", "ask", "block"]
+    action: Literal["retry", "adjust", "ask", "block", "rollback"]
     reason: str
     caused_by_failure_id: str
     status: Literal["proposed", "reserved", "executed", "rejected", "terminal"]
@@ -132,6 +134,7 @@ class RecoveryAction:
     redacted_arguments: dict[str, Any] | None = None
     result_generation_id: int | None = None
     result_attempt: str | None = None
+    checkpoint_id: str | None = None
 
 
 @dataclass
@@ -160,6 +163,7 @@ class AgentState:
     _failure_retry_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _next_recovery: int = field(default=1, init=False, repr=False)
+    _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
     _lock: Any = field(default_factory=Lock, init=False, repr=False, compare=False)
 
     @property
@@ -181,6 +185,44 @@ class AgentState:
     def failure_events(self) -> list[FailureEvent]:
         with self._lock:
             return list(self.failures)
+
+    @property
+    def checkpoint_store(self) -> CheckpointStore | None:
+        return self._checkpoint_store
+
+    @property
+    def checkpoints(self) -> list[Any]:
+        """Metadata-only checkpoint records retained by this task."""
+        return self._checkpoint_store.list_checkpoints() if self._checkpoint_store is not None else []
+
+    @property
+    def rollback_checkpoints(self) -> list[Any]:
+        """Checkpoint records that are currently eligible for rollback."""
+        return self._checkpoint_store.available() if self._checkpoint_store is not None else []
+
+    def bind_checkpoint_store(self, store: CheckpointStore) -> None:
+        """Bind the task-local store shared by the registry, executor, and recovery runtime."""
+        with self._lock:
+            self._checkpoint_store = store
+
+    def _checkpoint_for_failure(self, checkpoint_id: Any,
+                               failure: FailureEvent) -> tuple[Any, str | None]:
+        store = self._checkpoint_store
+        if store is None:
+            return None, "checkpoint store 不可用"
+        checkpoint, detail = store.validate_rollback(checkpoint_id)
+        if detail:
+            return None, detail
+        attempt_order = {
+            attempt.attempt_id: index for index, attempt in enumerate(self.attempts)
+        }
+        checkpoint_order = attempt_order.get(checkpoint.attempt_id)
+        failure_order = attempt_order.get(failure.caused_by_attempt_id)
+        if checkpoint_order is None or failure_order is None:
+            return None, "checkpoint 与目标 failure 的因果顺序不可确定"
+        if checkpoint_order > failure_order:
+            return None, "checkpoint 创建晚于目标 failure"
+        return checkpoint, None
 
     def _ensure_generation(self) -> None:
         if not self.generations:
@@ -222,7 +264,8 @@ class AgentState:
     def recovery_target(self, action: str, caused_by_failure_id: str,
                         requested_attempt: str | None = None,
                         requested_tool: str | None = None,
-                        requested_arguments: dict[str, Any] | None = None) -> tuple[tuple[str, dict[str, Any]] | None, str | None]:
+                        requested_arguments: dict[str, Any] | None = None,
+                        checkpoint_id: str | None = None) -> tuple[tuple[str, dict[str, Any]] | None, str | None]:
         """Return a validated recovery target without mutating recovery state."""
         with self._lock:
             failure = next((f for f in self.failures if f.failure_id == caused_by_failure_id), None)
@@ -230,11 +273,20 @@ class AgentState:
                 return None, "未知 failure"
             if self.status in ("failed", "blocked"):
                 return None, "任务已终态"
-            if action not in ("retry", "adjust", "ask", "block"):
+            if action not in ("retry", "adjust", "ask", "block", "rollback"):
                 return None, "不支持的 action"
             if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
                 self._terminal("blocked", "恢复动作预算已耗尽", caused_by_failure_id)
                 return None, "恢复动作预算已耗尽"
+            if action == "rollback":
+                if requested_attempt is not None or requested_tool is not None or requested_arguments is not None:
+                    return None, "rollback 不接受 requested_attempt、requested_tool 或 requested_arguments"
+                checkpoint, detail = self._checkpoint_for_failure(checkpoint_id, failure)
+                if detail:
+                    return None, detail
+                return ("rollback_checkpoint", {"checkpoint_id": checkpoint.checkpoint_id}), None
+            if checkpoint_id is not None:
+                return None, "checkpoint_id 仅供 rollback 使用"
             if action == "retry":
                 if requested_tool is not None or requested_arguments is not None:
                     return None, "retry 不接受替换工具或参数"
@@ -276,7 +328,8 @@ class AgentState:
                          requested_attempt: str | None = None,
                          requested_tool: str | None = None,
                          requested_arguments: dict[str, Any] | None = None,
-                         defer_generation: bool = False) -> tuple[RecoveryAction | None, AttemptReservation | None, dict[str, Any] | None]:
+                         defer_generation: bool = False,
+                         checkpoint_id: str | None = None) -> tuple[RecoveryAction | None, AttemptReservation | None, dict[str, Any] | None]:
         """Atomically validate and reserve one recovery action and successor generation."""
         with self._lock:
             failure = next((f for f in self.failures if f.failure_id == caused_by_failure_id), None)
@@ -284,13 +337,29 @@ class AgentState:
                 return self._reject_recovery(action, caused_by_failure_id, reason, "未知 failure") + (None,)
             if self.status in ("failed", "blocked"):
                 return self._reject_recovery(action, caused_by_failure_id, reason, "任务已终态") + (None,)
-            if action not in ("retry", "adjust", "ask", "block"):
+            if action not in ("retry", "adjust", "ask", "block", "rollback"):
                 return self._reject_recovery(action, caused_by_failure_id, reason, "不支持的 action") + (None,)
             if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
                 self._terminal("blocked", "恢复动作预算已耗尽", caused_by_failure_id)
                 return self._reject_recovery(action, caused_by_failure_id, reason, "恢复动作预算已耗尽") + (None,)
             source_attempt = next((a for a in self.attempts if a.attempt_id == requested_attempt), None)
-            if action == "retry":
+            if action == "rollback":
+                if requested_attempt is not None or requested_tool is not None or requested_arguments is not None:
+                    return self._reject_recovery(action, caused_by_failure_id, reason,
+                                                "rollback 不接受 requested_attempt、requested_tool 或 requested_arguments",
+                                                checkpoint_id=checkpoint_id) + (None,)
+                checkpoint, detail = self._checkpoint_for_failure(checkpoint_id, failure)
+                if detail:
+                    return self._reject_recovery(action, caused_by_failure_id, reason,
+                                                detail, checkpoint_id=checkpoint_id) + (None,)
+                checkpoint_id = checkpoint.checkpoint_id
+                requested_tool = None
+                requested_arguments = None
+            elif checkpoint_id is not None:
+                return self._reject_recovery(action, caused_by_failure_id, reason,
+                                            "checkpoint_id 仅供 rollback 使用",
+                                            checkpoint_id=checkpoint_id) + (None,)
+            elif action == "retry":
                 if source_attempt is None or source_attempt.failure_id != caused_by_failure_id:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "retry 必须引用直接失败 attempt") + (None,)
                 if not failure.retryable:
@@ -311,7 +380,15 @@ class AgentState:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "recover 不能作为恢复目标") + (None,)
             elif requested_attempt or requested_tool or requested_arguments is not None:
                 return self._reject_recovery(action, caused_by_failure_id, reason, "ask/block 不接受目标参数") + (None,)
-            if action in ("retry", "adjust"):
+            if action == "rollback":
+                fingerprint = ("rollback_checkpoint", canonical_arguments_hash({"checkpoint_id": checkpoint_id}))
+                if self._fingerprint_counts.get(fingerprint, 0) >= MAX_ATTEMPT_FINGERPRINTS:
+                    self._terminal("blocked", "同一 rollback 参数指纹尝试预算已耗尽", caused_by_failure_id)
+                    return self._reject_recovery(action, caused_by_failure_id, reason,
+                                                 "同一 rollback 参数指纹尝试预算已耗尽",
+                                                 checkpoint_id=checkpoint_id) + (None,)
+                self._fingerprint_counts[fingerprint] = self._fingerprint_counts.get(fingerprint, 0) + 1
+            elif action in ("retry", "adjust"):
                 fingerprint = (requested_tool, canonical_arguments_hash(requested_arguments or {}))
                 if self._fingerprint_counts.get(fingerprint, 0) >= MAX_ATTEMPT_FINGERPRINTS:
                     self._terminal("blocked", "同一参数指纹尝试预算已耗尽", caused_by_failure_id)
@@ -324,7 +401,7 @@ class AgentState:
                 requested_attempt, requested_tool,
                 canonical_arguments_hash(requested_arguments) if isinstance(requested_arguments, dict) else None,
                 redacted_arguments(requested_arguments) if isinstance(requested_arguments, dict) else None,
-                None)
+                None, None, checkpoint_id)
             self.recovery_actions.append(action_record)
             if defer_generation:
                 return action_record, None, requested_arguments
@@ -351,6 +428,12 @@ class AgentState:
             raise ValueError("恢复额度已完成或拒绝")
         if current.requested_tool is not None:
             fingerprint = (current.requested_tool, current.requested_arguments_hash)
+            self._fingerprint_counts[fingerprint] -= 1
+        elif current.action == "rollback" and current.checkpoint_id is not None:
+            fingerprint = (
+                "rollback_checkpoint",
+                canonical_arguments_hash({"checkpoint_id": current.checkpoint_id}),
+            )
             self._fingerprint_counts[fingerprint] -= 1
         if current.action == "retry":
             self._failure_retry_counts[current.caused_by_failure_id] -= 1
@@ -392,18 +475,23 @@ class AgentState:
     def reject_recovery(self, action: Any, caused_by_failure_id: Any, reason: Any,
                         detail: str, requested_attempt: str | None = None,
                         requested_tool: str | None = None,
-                        requested_arguments: dict[str, Any] | None = None) -> RecoveryAction:
+                        requested_arguments: dict[str, Any] | None = None,
+                        checkpoint_id: str | None = None,
+                        block: bool = False) -> RecoveryAction:
         """Record one rejected recovery request without opening a generation."""
         with self._lock:
             record, _ = self._reject_recovery(
                 action, caused_by_failure_id, reason, detail,
                 requested_attempt, requested_tool, requested_arguments,
+                checkpoint_id,
             )
+            if block:
+                self._terminal("blocked", f"rollback rejected: {detail}", str(caused_by_failure_id))
             return record
 
     def _reject_recovery(self, action, failure_id, reason, detail,
                          requested_attempt=None, requested_tool=None,
-                         requested_arguments=None):
+                         requested_arguments=None, checkpoint_id=None):
         rid = f"r-{self._next_recovery}"; self._next_recovery += 1
         rec = RecoveryAction(
             rid, self._verification_generation, action if isinstance(action, str) and action else "<missing>",
@@ -411,6 +499,7 @@ class AgentState:
             requested_tool,
             canonical_arguments_hash(requested_arguments) if isinstance(requested_arguments, dict) else None,
             redacted_arguments(requested_arguments) if isinstance(requested_arguments, dict) else None,
+            None, None, checkpoint_id,
         )
         self.recovery_actions.append(rec)
         self.recovery_notice = f"Recovery {rid} rejected: {str(detail)[:500]}."
@@ -459,6 +548,8 @@ class AgentState:
                     self._repair_cycles += 1
                 elif result.error_kind in ("edit_no_match", "edit_multiple_matches"):
                     category = "deterministic"
+                elif result.error_kind in ("rollback_conflict", "rollback_restore_failed"):
+                    category = "unknown"
                 elif result.effect_class == "possible" and result.error_kind == "handler_exception":
                     category = "unknown"
                 else: category = "deterministic"
@@ -470,7 +561,8 @@ class AgentState:
                 caused_by_attempt_id=getattr(reservation, "caused_by_attempt_id", None),
                 exit_code=result.exit_code, error_kind=result.error_kind,
                 output_excerpt=result.output_excerpt, failure_id=failure_id,
-                recovery_id=getattr(reservation, "recovery_id", None))
+                recovery_id=getattr(reservation, "recovery_id", None),
+                checkpoint_id=getattr(result, "checkpoint_id", None))
             self.attempts.append(attempt)
             self._original_attempt_arguments[attempt_id] = deepcopy(args)
             if getattr(reservation, "recovery_id", None):
@@ -483,6 +575,18 @@ class AgentState:
                 self.tool_history.append({"tool": result.tool, "arguments_hash": arguments_hash,
                                           "ok": result.outcome == "succeeded", "brief": result.output_excerpt})
             path = args.get("path")
+            if result.tool == "rollback_checkpoint" and getattr(reservation, "recovery_id", None):
+                recovery = next(
+                    (item for item in self.recovery_actions
+                     if item.recovery_id == reservation.recovery_id),
+                    None,
+                )
+                checkpoint = (
+                    self._checkpoint_store.get(recovery.checkpoint_id)
+                    if recovery is not None and recovery.checkpoint_id is not None
+                    and self._checkpoint_store is not None else None
+                )
+                path = checkpoint.path if checkpoint is not None else None
             if result.outcome == "succeeded" and result.tool in ("write_file", "edit_file"):
                 if isinstance(path, str) and path not in self.files_changed:
                     self.files_changed.append(path)
@@ -502,7 +606,11 @@ class AgentState:
                     self.recovery_notice = (f"Failure {failure_id} ({category}) requires diagnosis; "
                                             f"caused by {attempt_id} in generation {generation_id}.")
                 exhausted = self._fingerprint_counts[fingerprint] >= MAX_ATTEMPT_FINGERPRINTS
-                if category == "permission": self._terminal("failed", "权限被明确拒绝", failure_id)
+                if result.error_kind == "rollback_conflict":
+                    self._terminal("blocked", "rollback_conflict：目标文件已发生外部变化", failure_id)
+                elif result.error_kind == "rollback_restore_failed":
+                    self._terminal("blocked", "rollback_restore_failed：恢复操作未完成", failure_id)
+                elif category == "permission": self._terminal("failed", "权限被明确拒绝", failure_id)
                 elif category == "protocol":
                     if self.status not in ("blocked", "failed"):
                         self.status = "running"
@@ -558,6 +666,8 @@ class AgentState:
             self._verification_required = False; self._next_attempt = 1; self._next_failure = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
+            if self._checkpoint_store is not None:
+                self._checkpoint_store.clear()
             self.generations.append(ExecutionGeneration(0, open_reason="task_start"))
 
     def reset_task(self, task: str = "") -> None:
@@ -637,6 +747,11 @@ class AgentState:
                 "attempts": [asdict(x) for x in self.attempts],
                 "failures": [asdict(x) for x in self.failures],
                 "recovery_actions": [asdict(x) for x in self.recovery_actions],
+                "checkpoints": self._checkpoint_store.snapshot() if self._checkpoint_store is not None else [],
+                "rollback_checkpoints": (
+                    [checkpoint.snapshot() for checkpoint in self._checkpoint_store.available()]
+                    if self._checkpoint_store is not None else []
+                ),
                 "latest_failure": asdict(self.failures[-1]) if self.failures else None,
                 "recovery_notice": self.recovery_notice,
                 "budgets": {"failure_retries_remaining": max(0, MAX_FAILURE_RETRIES - sum(self._failure_retry_counts.values())),

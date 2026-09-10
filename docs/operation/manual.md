@@ -1,10 +1,24 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.18.1**（Recovery Policy；含 v0.16.1 完成提醒修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.19.0**（Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
+
+## v0.19 Checkpoint / Rollback
+
+`write_file` 和 `edit_file` 在权限放行、attempt/generation 预留后，会为单个工作区内普通文件保存前镜像。前镜像最多 `MAX_CHECKPOINT_BYTES`（默认 1 MiB），不存在的文件记录为 `absent` tombstone；符号链接、工作区外路径、目录/特殊文件、无效父目录和读取失败只会让 checkpoint 变为 `unavailable`，不会改变原文件工具行为。
+
+模型通过 `recover(action="rollback", checkpoint_id=...)` 请求恢复。`rollback_checkpoint` 是内部工具，不出现在 LLM schema 中，也拒绝模型直接调用；RecoveryRuntime 会使用 checkpoint 保存的规范化相对路径经过同一 PermissionGate 授权。恢复前重新计算当前文件的类型和 SHA-256，发现外部修改就拒绝写入并进入 `blocked`。普通文件使用同目录临时文件、原 mode 和 `os.replace` 原子恢复；absent tombstone 只在后镜像仍匹配时删除目标。
+
+恢复成功只证明恢复操作本身完成：它会打开新的 generation、清除旧 verification evidence，并要求下一轮独立 verification。checkpoint 元数据保留在 Structured State 中，但不包含前镜像内容或绝对路径；`/reset` 和 `/new` 会清除本任务全部 checkpoint 及私有字节。
+
+配置项：
+
+| 配置项 | 默认值 | 说明 |
+|---|---:|---|
+| `MAX_CHECKPOINT_BYTES` | `1_048_576` | 单个前镜像的最大字节数，可在 `config_local.py` 覆盖 |
 
 ## v0.18 Recovery Policy
 
-`recover` 支持 retry、adjust、ask、block。v0.18.1 修复了拒绝记录和预算边界：schema、引用、参数、预算或权限拒绝都会只记录一次带 `recovery_id` 的 rejected action，不推进 generation。目标权限检查前先在 State 锁内预留额度；获准后才打开后继 generation 和 attempt。权限拒绝释放未使用的目标执行及重试额度，但恢复申请仍计数，连续无效申请达到恢复动作上限也会阻塞。恢复目标复用当前会话的同一把 PermissionGate，不重复询问同一次授权；恢复后必须独立 verification。rollback 在本版本明确拒绝。
+`recover` 支持 retry、adjust、ask、block。v0.18.1 修复了拒绝记录和预算边界：schema、引用、参数、预算或权限拒绝都会只记录一次带 `recovery_id` 的 rejected action，不推进 generation。目标权限检查前先在 State 锁内预留额度；获准后才打开后继 generation 和 attempt。权限拒绝释放未使用的目标执行及重试额度，但恢复申请仍计数，连续无效申请达到恢复动作上限也会阻塞。恢复目标复用当前会话的同一把 PermissionGate，不重复询问同一次授权；恢复后必须独立 verification。
 
 `edit_file` 的没有匹配和多处匹配是确定性的参数前置条件失败（`error_kind=edit_no_match` / `edit_multiple_matches`），不会改文件或进入未知副作用阻塞；已获准进入 handler 的其他异常仍会使 possible-effect generation 保持推进。Structured State 在 `running` 时也显示恢复通知、最近失败/恢复动作和脱敏预算。进入 `blocked` 或 `failed` 后，Executor 不再询问权限或运行 handler，当前批次剩余调用以 `task_terminal` 结果逐一回灌。
 
@@ -98,7 +112,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.18.1，含 v0.16.1 完成提醒修复）
+## 3. 当前能力（v0.19.0，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -120,6 +134,7 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
+| `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可 rollback 的 `ready` checkpoint，不含文件内容 |
 | `budgets` / `recovery_notice` | 失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
@@ -177,6 +192,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `list_dir` | `path?: str` | allow | 列出目录内容，目录加 `/` 后缀，上限 200 条 |
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
+| `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件 checkpoint |
 
 ### 3.6 权限交互
 

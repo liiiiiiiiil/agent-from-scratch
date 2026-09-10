@@ -1,7 +1,7 @@
 # 阶段六：Reliable Execution 实施计划
 
-> 状态：规划中
-> 当前基线：`v0.16`（计划驱动执行，Plan-driven Execution）
+> 状态：`v0.19` Checkpoint / Rollback 已实现；`v0.20`–`v0.21` 规划中
+> 当前基线：`v0.19.0`（单文件 Checkpoint / Rollback）
 > 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 
@@ -213,6 +213,8 @@ RecoveryAction
 
 ### 5.3 `v0.19` Checkpoint / Rollback
 
+实现状态：已完成单文件 checkpoint/rollback；本节中的 `v0.20` 及以后内容仍为路线规划。
+
 目标：为可追踪的文件修改提供有限、可审计的恢复能力。
 
 - checkpoint 的作用域固定为**一次成功或失败的单文件 `write_file`/`edit_file` 调用**，不尝试提供多文件事务。创建 checkpoint 时在 handler 前捕获同一真实路径的前镜像：规范化后的工作区内相对路径、`absent | regular-file` 类型、原始字节、mode、前镜像 SHA-256、创建 generation 与 attempt ID。路径解析到工作区外、符号链接、非普通文件、超过 `MAX_CHECKPOINT_BYTES` 的文件一律不支持 checkpoint，调用仍可执行但不可 rollback。
@@ -280,7 +282,7 @@ failure
 - [ ] `v0.17`–`v0.21` 各有独立教程、变更记录和可运行测试。
 - [ ] 所有失败都能关联到执行尝试和 generation；没有仅靠自然语言字符串驱动的隐藏状态。
 - [ ] 每次恢复动作都受 PermissionGate 和计数预算约束，并开启新的 Execution Generation；旧 generation 的验证证据不可复用于 `done` 判定。
-- [ ] rollback 只在 `v0.19` 及以后对明确 checkpoint 的副作用可用。
+- [x] rollback 只在 `v0.19` 及以后对明确 checkpoint 的副作用可用。
 - [ ] Repair Loop 能在成功、继续修复、阻塞和失败四种结果间正确收口。
 - [ ] v0.21 能用冻结的结构化数据回放至少一个真实失败—恢复案例，展示每个 generation 的状态转换与原始证据。
 - [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，运行时仍只有标准库。

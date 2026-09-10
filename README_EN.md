@@ -21,7 +21,7 @@
 >
 > **Who it's for**: Developers who want to understand how an LLM agent actually ticks. No frameworks, no LangChain — just the Python standard library, built from scratch.
 
-> **Current status**: The code and tutorials are up to `v0.18.1` (Recovery Policy patch; see lesson 18).
+> **Current status**: The code and tutorials are up to `v0.19.0` (single-file Checkpoint / Rollback; see lesson 19).
 
 > **Reading model**: The authoritative tutorials are the current files under `docs/tutorials/` on the default branch. Each lesson names one code tag and links source files to that immutable snapshot. Read the current tutorial online, then check out its tag locally to run the code. Historical tags are not rewritten; tutorial paths inside `v0.01` through `v0.06` are historical copies.
 
@@ -102,6 +102,7 @@ Tutorials are organized by capability stage, while versions remain the basic uni
     <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">Plan-driven Execution</a></td><td>Close the execution loop with plans, verification evidence, and failure states.</td></tr>
     <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">Failure Model</a></td><td>Audit generations, attempts, and structured failure facts.</td></tr>
     <tr><td><strong>v0.18</strong></td><td><a href="./docs/tutorials/18-recovery-policy.md">Recovery Policy</a></td><td>Bounded recovery actions with generation isolation.</td></tr>
+    <tr><td><strong>v0.19</strong></td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">Checkpoint / Rollback</a></td><td>Atomically restore one file from a private before-image with conflict detection.</td></tr>
     <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding recovery, memory, sandboxing, and related capabilities.</td></tr>
   </tbody>
 </table>
@@ -132,6 +133,7 @@ agent-from-scratch/
 │   ├── config_example.py   # config template (copy to config_local.py)
 │   ├── context.py           # ContextManager: unified pre-LLM entry point
 │   ├── state.py             # AgentState: execution state separate from messages
+│   ├── checkpoint.py        # private single-file checkpoint / rollback images
 │   ├── permission.py       # permission gate: allow/deny/ask
 │   ├── prompt.py            # layered system prompt builder
 │   └── tools/

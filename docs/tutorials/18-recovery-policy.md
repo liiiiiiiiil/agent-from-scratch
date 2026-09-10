@@ -1,6 +1,6 @@
 # 第 18 课：受限恢复策略（Recovery Policy，v0.18）
 
-上一课：[失败模型](17-failure-model.md) · [教程总览](README.md) · 下一课：v0.19（规划中）
+上一课：[失败模型](17-failure-model.md) · [教程总览](README.md) · 下一课：[单文件 Checkpoint / Rollback](19-checkpoint-rollback.md)
 
 > 代码快照：`v0.18` · 相邻差异：`v0.17..v0.18` · 命令环境：Bash/zsh
 

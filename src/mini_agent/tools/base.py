@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import re
 from time import monotonic
@@ -39,6 +39,7 @@ class Tool:
     parameters: dict
     handler: Callable[..., Any]
     effect_class: EffectClass = "none"
+    internal: bool = False
 
     def to_llm_schema(self):
         return {"type": "function", "function": {
@@ -65,6 +66,7 @@ class ExecutionResult:
     exit_code: int | None = None
     error_kind: str | None = None
     reservation: AttemptReservation | None = None
+    checkpoint_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -86,11 +88,13 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool):
+    def register(self, tool: Tool, internal: bool | None = None):
         if tool.name in self._tools:
             raise ValueError(f"Tool 已经存在: {tool.name}")
         if tool.effect_class not in ("none", "possible"):
             raise ValueError(f"非法 effect_class: {tool.effect_class}")
+        if internal is not None:
+            tool.internal = internal
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool:
@@ -102,7 +106,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def schemas(self):
-        return [tool.to_llm_schema() for tool in self._tools.values()]
+        return [tool.to_llm_schema() for tool in self._tools.values() if not tool.internal]
 
     def effect_for(self, name: str, arguments: dict[str, Any]) -> EffectClass:
         return self.get(name).effect_for(arguments)
@@ -168,6 +172,7 @@ class ToolExecutor:
         self.registry = registry
         self.gate = gate or PermissionGate()
         self.on_result = on_result
+        self.checkpoint_store = getattr(registry, "_checkpoint_store", None)
         recovery_runtime = getattr(registry, "_recovery_runtime", None)
         if recovery_runtime is not None:
             recovery_runtime.bind_executor(self)
@@ -223,7 +228,8 @@ class ToolExecutor:
 
     def execute_result(self, name: str, arguments: dict[str, Any], state: Any = None,
                        notify: bool = True, reservation: AttemptReservation | None = None,
-                       permission_already_checked: bool = False) -> ExecutionResult:
+                       permission_already_checked: bool = False,
+                       _internal: bool = False) -> ExecutionResult:
         """Execute and return facts; only admitted possible effects reserve generation."""
         started = monotonic()
         if state is not None and getattr(state, "is_terminal", lambda: False)():
@@ -235,6 +241,13 @@ class ToolExecutor:
                                    "not_checked", False, "invalid", 0, "none",
                                    f"工具调用失败: {type(error).__name__}",
                                    f"工具调用失败: {type(error).__name__}", error_kind="unknown_tool")
+        if tool.internal and not _internal:
+            text = "工具调用失败: internal_tool 只能由 RecoveryRuntime 调用"
+            return ExecutionResult(
+                str(name), deepcopy(arguments) if isinstance(arguments, dict) else {},
+                "not_checked", False, "invalid", 0, "none", text, text,
+                error_kind="internal_tool",
+            )
         try:
             normalized = validate_arguments(tool.parameters, arguments)
         except (TypeError, ValueError) as error:
@@ -280,11 +293,33 @@ class ToolExecutor:
             if notify:
                 self._notify_result(result)
             return result
+        checkpoint_capture = None
+        checkpoint_id = None
+        checkpoint_store = self.checkpoint_store
+        if (state is not None and checkpoint_store is not None and
+                name in ("write_file", "edit_file") and effect_class == "possible"):
+            try:
+                checkpoint_capture = checkpoint_store.capture_before(
+                    reservation.attempt_id, reservation.generation_id,
+                    normalized.get("path"),
+                )
+                checkpoint_id = checkpoint_capture.checkpoint_id
+            except Exception:
+                # Checkpoint support must never change the original file tool's
+                # admission or handler behavior.
+                checkpoint_capture = None
         try:
             output = tool.handler(**normalized)
         except Exception as error:
+            if checkpoint_capture is not None:
+                try:
+                    checkpoint_store.capture_after(checkpoint_capture)
+                except Exception:
+                    pass
             text = f"Tool 执行失败: {error}"
-            if isinstance(error, EditNoMatchError):
+            if hasattr(error, "error_kind"):
+                error_kind = str(error.error_kind)
+            elif isinstance(error, EditNoMatchError):
                 error_kind = "edit_no_match"
             elif isinstance(error, EditMultipleMatchesError):
                 error_kind = "edit_multiple_matches"
@@ -298,9 +333,14 @@ class ToolExecutor:
             result = ExecutionResult(name, normalized, "allowed", True, "failed",
                                      int((monotonic() - started) * 1000), effect_class,
                                      text, _brief(text), error_kind=error_kind,
-                                     reservation=reservation)
+                                     reservation=reservation, checkpoint_id=checkpoint_id)
             if notify: self._notify_result(result)
             return result
+        if checkpoint_capture is not None:
+            try:
+                checkpoint_store.capture_after(checkpoint_capture)
+            except Exception:
+                pass
         excerpt = _brief(output)
         exit_code = None
         outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"
@@ -315,7 +355,8 @@ class ToolExecutor:
                     outcome, error_kind = "failed", "nonzero_exit"
         result = ExecutionResult(name, normalized, "allowed", True, outcome,
                                  int((monotonic() - started) * 1000), effect_class,
-                                 output, excerpt, exit_code, error_kind, reservation)
+                                 output, excerpt, exit_code, error_kind, reservation,
+                                 checkpoint_id)
         if notify: self._notify_result(result)
         return result
 
@@ -324,3 +365,16 @@ class ToolExecutor:
         # Preserve the historical unknown-tool exception at this API boundary.
         self.registry.get(name)
         return self.execute_result(name, arguments).output
+
+    def execute_internal_result(self, name: str, arguments: dict[str, Any],
+                                state: Any = None, notify: bool = True,
+                                reservation: AttemptReservation | None = None,
+                                permission_already_checked: bool = False) -> ExecutionResult:
+        """Execute a registered internal tool through the normal fact boundary."""
+        result = self.execute_result(
+            name, arguments, state=state, notify=notify, reservation=reservation,
+            permission_already_checked=permission_already_checked, _internal=True,
+        )
+        if name == "rollback_checkpoint" and isinstance(arguments, dict):
+            return replace(result, checkpoint_id=arguments.get("checkpoint_id"))
+        return result
