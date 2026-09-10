@@ -2,14 +2,11 @@
 
 # agent-from-scratch
 
-### 逐步生长的编程 Agent · 从零开始构建一个能干活的 AI Agent
+### 逐步生长的编程 Agent：从零开始构建一个能干活的 AI Agent
 
-A step-by-step tutorial for building a coding agent from scratch — in incremental versions (v0.01 → ongoing).
+从最小的 agent loop 开始，按 Git tag 和能力阶段逐步加入工具、安全、上下文和可靠执行能力。
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/core%20dependencies-zero-green)](#快速开始)
-[![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#学习路径)
-[![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/) [![Dependencies](https://img.shields.io/badge/core%20dependencies-zero-green)](#快速开始) [![Versions](https://img.shields.io/badge/versions-v0.01%E2%86%92ongoing-orange)](#学习路径) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
 
 **[English](./README_EN.md)** · **中文**
 
@@ -17,180 +14,89 @@ A step-by-step tutorial for building a coding agent from scratch — in incremen
 
 ---
 
-> **这是什么**：一个按 git tag 切片、按能力阶段组织的教学仓库。从最小可用的 agent loop（v0.01，无工具纯对话）起步，每个版本**只引入一个新概念**，一路长到能读写文件、跑命令、跑测试的 Mini Agent（持续迭代，不设上限）。
->
-> **适合谁**：想搞清楚 LLM agent 到底怎么转起来的开发者。不调框架、不装 LangChain，只用 Python 标准库从零搭。
+适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-> **当前状态**：最新代码和教程已到 `v0.19.1`（单文件 Checkpoint / Rollback 审阅修复，见第 19 课）。
+**当前状态**：主线代码和教程到 `v0.19.1`（第 19 课的 Checkpoint / Rollback 审阅修复）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
-> **阅读模型**：`docs/tutorials/` 以默认分支上的最新版本为准；每课声明要运行的代码 tag，并把源码索引固定到该 tag。请在主线/网页读教程，在本地 checkout tag 跑代码。历史 tag 不重打，`v0.01` 至 `v0.06` tag 内的旧教程路径只是历史副本。
-
-## 为什么用这个仓库学 Agent
-
-- **核心零第三方依赖** —— LLM 调用、Agent loop 和工具执行只用 Python 标准库；CLI 可选安装 `prompt_toolkit` 获得多行编辑，未安装时自动回退。
-- **版本切片，每版只加一个概念** —— `git diff v0.01..v0.02` 就是"加一个工具"的全部改动，diff 可读，学习负担低。版本持续递增，不设上限。
-- **真实可跑的 agent** —— 不是玩具 demo：支持 function calling、流式输出、权限闸门、并发工具调用，能真的读写文件、跑命令。
-- **配套中文教程** —— 教程按学习阶段导航，每个版本一份教学文档（`docs/tutorials/`），讲清"为什么这么设计"，不只是贴代码。
-- **渐进式生长的设计哲学** —— 演示一个 agent 项目如何从最小 loop 长到可工作的 Mini Agent，每一步的取舍都有据可查。
-
-## 快速开始
-
-```bash
-# 1. 克隆并进入仓库
-git clone https://github.com/liiiiiiiiil/agent-from-scratch.git
-cd agent-from-scratch
-
-# 2. 配置 LLM 网关
-cp src/mini_agent/config_example.py src/mini_agent/config_local.py
-#    编辑 config_local.py 填入你的 BASE_URL / API_KEY / MODEL（此文件不进 git）
-
-# 3. 安装（推荐）
-pip install -e .
-# 可选：启用支持多行粘贴的增强终端输入
-pip install -e '.[interactive]'
-
-# 4. 跑起来
-python -m mini_agent "帮我算一下 123 * 456"
-python -m mini_agent             # 或交互式输入
-```
-
-不安装也可以运行。Linux/macOS 使用：
-
-```bash
-PYTHONPATH=src python -m mini_agent "帮我算一下 123 * 456"
-```
-
-PowerShell 使用：
-
-```powershell
-$env:PYTHONPATH="src"
-python -m mini_agent "帮我算一下 123 * 456"
-```
-
-> 需要 Python 3.10+（项目统一使用 Python 3.10 及以上版本）。
+快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
 ## 学习路径
 
-教程按能力阶段组织，版本仍然是代码演进和 Git tag 的基本单位。建议从阶段一开始，按顺序学习到阶段三；完成 `v0.10` 后即可得到一个能完成基础编程任务的 Mini Agent，再继续学习阶段四的上下文管理。**这是本仓库的核心学习路径**。
-
-<table>
+<table width="100%">
   <thead>
     <tr><th>版本</th><th>主题</th><th>简介</th></tr>
   </thead>
   <tbody>
-    <tr><th colspan="3">阶段一 · 理解 Agent Loop</th></tr>
+    <tr><th colspan="3"><a id="stage-1"></a>阶段一 · 理解 Agent Loop</th></tr>
     <tr><td><strong>v0.01</strong></td><td><a href="./docs/tutorials/01-minimal-loop.md">最简 agent loop</a></td><td>建立最小对话循环，理解请求、回复与结束条件。</td></tr>
-    <tr><th colspan="3">阶段二 · 工具与安全</th></tr>
-    <tr><td><strong>v0.02</strong></td><td><a href="./docs/tutorials/02-first-tool.md">第一个工具</a></td><td>接入 calculate 工具，跑通 function calling 的基本协议。</td></tr>
-    <tr><td><strong>v0.03</strong></td><td><a href="./docs/tutorials/03-file-tools.md">文件读写工具</a></td><td>让 Agent 能读取和写入文件，开始处理真实项目内容。</td></tr>
+    <tr><th colspan="3"><a id="stage-2"></a>阶段二 · 工具与安全</th></tr>
+    <tr><td><strong>v0.02</strong></td><td><a href="./docs/tutorials/02-first-tool.md">第一个工具</a></td><td>接入 calculate，跑通 function calling 基本协议。</td></tr>
+    <tr><td><strong>v0.03</strong></td><td><a href="./docs/tutorials/03-file-tools.md">文件读写工具</a></td><td>让 Agent 读取和写入真实项目文件。</td></tr>
     <tr><td><strong>v0.04</strong></td><td><a href="./docs/tutorials/04-permission-gate.md">权限闸门</a></td><td>为有副作用的工具加入 allow、deny、ask 三态授权。</td></tr>
-    <tr><th colspan="3">阶段三 · Mini Agent 里程碑</th></tr>
+    <tr><th colspan="3"><a id="stage-3"></a>阶段三 · Mini Agent 里程碑</th></tr>
     <tr><td><strong>v0.05</strong></td><td><a href="./docs/tutorials/05-streaming.md">流式输出</a></td><td>逐块接收并显示 LLM 回复，改善交互反馈。</td></tr>
-    <tr><td><strong>v0.06</strong></td><td><a href="./docs/tutorials/06-concurrent-tool-calls.md">并发 tool_calls</a></td><td>并发执行同一轮的多个工具调用，减少等待时间。</td></tr>
+    <tr><td><strong>v0.06</strong>（补丁 <code>v0.06.1</code>）</td><td><a href="./docs/tutorials/06-concurrent-tool-calls.md">并发 tool_calls</a></td><td>并发执行同一轮的多个工具调用，减少等待时间；补丁修正多轮上下文状态契约。</td></tr>
     <tr><td><strong>v0.07</strong></td><td><a href="./docs/tutorials/07-system-prompt.md">系统提示词工程化</a></td><td>分层组织身份、规则和环境信息，稳定 Agent 行为。</td></tr>
     <tr><td><strong>v0.08</strong></td><td><a href="./docs/tutorials/08-file-operations.md">文件操作补全</a></td><td>补齐目录列举、精确编辑和正则搜索能力。</td></tr>
     <tr><td><strong>v0.09</strong></td><td><a href="./docs/tutorials/09-permission-upgrade.md">权限系统升级</a></td><td>按工具和路径或命令模式细粒度匹配权限规则。</td></tr>
     <tr><td><strong>v0.10</strong></td><td><a href="./docs/tutorials/10-shell-execution.md">shell 执行</a></td><td>执行命令并处理超时、输出截断和命令级授权。</td></tr>
-    <tr><th colspan="3">阶段四 · 上下文管理</th></tr>
+    <tr><th colspan="3"><a id="stage-4"></a>阶段四 · 上下文管理</th></tr>
     <tr><td><strong>v0.11</strong></td><td><a href="./docs/tutorials/11-context-architecture.md">上下文架构</a></td><td>将持久执行状态与可裁剪的对话上下文分离。</td></tr>
-    <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token 并按完整对话轮次安全裁剪历史。</td></tr>
-    <tr><td><strong>v0.13</strong></td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务的遗忘。</td></tr>
-    <tr><th colspan="3">阶段五 · 项目感知与任务编排</th></tr>
-    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">项目级指令</a></td><td>自动发现并注入 <code>AGENTS.md</code> 中适用的项目级指令。</td></tr>
+    <tr><td><strong>v0.12</strong></td><td><a href="./docs/tutorials/12-token-budget-trimming.md">预算与裁剪</a></td><td>估算 token，并按完整对话轮次安全裁剪历史。</td></tr>
+    <tr><td><strong>v0.13</strong>（补丁 <code>v0.13.1</code>、<code>v0.13.2</code>）</td><td><a href="./docs/tutorials/13-context-compaction.md">上下文压缩</a></td><td>用历史摘要和结构化状态降低长任务遗忘；补丁增加可观测性与任务边界隔离。</td></tr>
+    <tr><th colspan="3"><a id="stage-5"></a>阶段五 · 项目感知与任务编排</th></tr>
+    <tr><td><strong>v0.14</strong></td><td><a href="./docs/tutorials/14-project-instructions.md">项目级指令</a></td><td>自动发现并注入适用的 <code>AGENTS.md</code> 指令。</td></tr>
     <tr><td><strong>v0.15</strong></td><td><a href="./docs/tutorials/15-task-state.md">任务清单与状态</a></td><td>用结构化任务清单与显式状态跟踪多步任务进度。</td></tr>
-    <tr><td><strong>v0.16</strong></td><td><a href="./docs/tutorials/16-plan-driven-execution.md">计划驱动执行</a></td><td>通过计划、执行、观察、重排和验证形成执行闭环。</td></tr>
-    <tr><th colspan="3">阶段六 · 可靠执行</th></tr>
+    <tr><td><strong>v0.16</strong>（补丁 <code>v0.16.1</code>）</td><td><a href="./docs/tutorials/16-plan-driven-execution.md">计划驱动执行</a></td><td>通过计划、执行、观察、重排和验证形成闭环；补丁收窄完成提醒的重开规则。</td></tr>
+    <tr><th colspan="3"><a id="stage-6"></a>阶段六 · 可靠执行</th></tr>
     <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">失败模型</a></td><td>记录 generation、执行尝试与可审计失败事实。</td></tr>
-    <tr><td><strong>v0.18</strong></td><td><a href="./docs/tutorials/18-recovery-policy.md">受限恢复策略</a></td><td>用受限动作恢复失败并隔离 generation。</td></tr>
-    <tr><td><strong>v0.19 / v0.19.1</strong></td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">Checkpoint / Rollback</a></td><td>为单文件写入保存前镜像，并在冲突检测下原子恢复；v0.19.1 修复审阅问题。</td></tr>
+    <tr><td><strong>v0.18</strong>（补丁 <code>v0.18.1</code>）</td><td><a href="./docs/tutorials/18-recovery-policy.md">受限恢复策略</a></td><td>用受限动作恢复失败并隔离 generation；补丁修正边界一致性。</td></tr>
+    <tr><td><strong>v0.19</strong>（补丁 <code>v0.19.1</code>）</td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">Checkpoint / Rollback</a></td><td>为单文件写入保存前镜像，并在冲突检测下原子恢复；补丁修正审阅问题。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展恢复、记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>
 
-完成 `v0.10` 后，Agent 已经能够读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。这是本仓库的第一个阶段性里程碑。
+完成 `v0.10` 后，Agent 已能读取项目、搜索和修改文件、执行命令、运行测试，并通过权限机制控制高风险操作。
 
-**如何切版本学习：**
+## 快速开始
+
+要求：Python 3.10+；准备一个可访问的 LLM 网关。Bash/zsh：
 
 ```bash
-git tag                    # 看所有版本
-git checkout v0.01          # 切到第一版
-# 先读 docs/tutorials/README.md，再读 01-minimal-loop.md
-# 跑课程"使用指导"里的命令
-git checkout v0.02          # 看差异：git diff v0.01..v0.02
-# 按教程总览中的阶段和版本顺序继续学习
+git clone https://github.com/liiiiiiiiil/agent-from-scratch.git
+cd agent-from-scratch
+cp src/mini_agent/config_example.py src/mini_agent/config_local.py
+# 编辑 config_local.py，填入 BASE_URL / API_KEY / MODEL；它不会进 git
+python -m pip install -e .
+python -m mini_agent "帮我算一下 123 * 456"
 ```
 
-命令行参数是首条任务，不是一次性模式；处理后仍进入交互循环，可用空行、`exit`、`quit` 或 EOF 退出。教程命令默认使用 Bash/zsh；PowerShell 先设置 `$env:PYTHONPATH="src"`，再运行对应的 `python ...` 命令。
+可选：`python -m pip install -e '.[interactive]'` 启用多行终端输入。命令行参数只是首条任务，处理后仍进入交互循环；用空行、`exit`、`quit` 或 EOF 退出。PowerShell、免安装运行和配置细节见[完整手册](./docs/operation/manual.md)。
 
 ## 项目结构
 
-```
-agent-from-scratch/
-├── src/mini_agent/
-│   ├── agent.py            # agent loop：call_llm + agent_loop
-│   ├── __main__.py         # CLI 入口
-│   ├── config.py           # 配置占位 + 自动加载 config_local.py
-│   ├── config_example.py   # 配置模板（复制为 config_local.py 使用）
-│   ├── context.py          # ContextManager：LLM 调用前统一入口
-│   ├── state.py            # AgentState：独立于 messages 的执行状态
-│   ├── checkpoint.py       # 单文件 checkpoint / rollback 私有镜像
-│   ├── permission.py       # 权限闸门：allow/deny/ask 三态
-│   ├── prompt.py           # 分层组装 system prompt
-│   ├── input_session.py    # 可选多行终端输入，缺少 extra 时回退 input()
-│   └── tools/
-│       ├── base.py         # Tool / ToolRegistry / ToolExecutor（含结果回调）
-│       ├── calc.py         # calculate 工具
-│       ├── file.py         # read_file / write_file / edit_file / list_dir / grep 工具
-│       └── shell.py        # run_shell 工具
-├── tests/                  # smoke tests
-├── docs/
-│   ├── tutorials/          # 按阶段导航、按版本切片的教程（核心）
-│   ├── plans/              # 路线图、功能计划
-│   ├── operation/          # 运行手册、使用指南
-│   └── governance/         # 治理文档、决策记录
-└── examples/               # 示例 IO 文件
+```text
+src/mini_agent/   核心运行时、配置、状态、权限、上下文和工具
+tests/             测试与 smoke test
+docs/tutorials/    分阶段、按版本的教程
+docs/operation/    最新版运行手册
+docs/plans/        路线图与功能计划
+docs/governance/   写作规范与决策记录
+examples/          示例输入输出文件
 ```
 
-## 设计哲学
+## 设计与文档
 
-- **渐进式生长**：每次只加刚好够用的能力，避免过度设计。新功能意图先记录到对应计划文档；只有运行时约束变化才更新 `AGENTS.md`。
-- **核心 loop 保持清晰**：agent loop 不对 LLM 或 CLI 顶层异常做兜底；工具层捕获 handler 异常并将错误结果回灌给 LLM。复杂容错按需在工具层引入。
-- **核心标准库优先**：关键运行流程保持自包含；外围用户体验可以通过可选依赖增强。具体边界见 [`AGENTS.md`](./AGENTS.md) 和[依赖政策](./docs/governance/dependency-policy.md)。
-
-## 文档
-
-- [教学路径索引](./docs/tutorials/README.md) —— **从这里开始学**
-- [完整使用手册](./docs/operation/manual.md) —— 最新版全量用法、配置、FAQ
-- [上下文架构说明](./docs/operation/context-architecture.md) —— 当前上下文视图、状态与预算机制
-- [路线图与计划](./docs/plans/teaching-repo-plan.md) —— 阶段导航与版本切分方案
-- [AGENTS.md](./AGENTS.md) —— 运行时硬约束与精简架构索引
-- [治理文档](./docs/governance/README.md) —— 详细规范与决策记录
-- [CHANGELOG.md](./CHANGELOG.md) —— 按版本记录的变更
-
-## 测试
-
-开发环境安装 pytest 后运行完整测试：
-
-```bash
-PYTHONPATH=src python -m pytest -q
-```
-
-不安装 pytest 时，可直接运行各测试文件中的标准库 smoke test，详见[操作手册](./docs/operation/manual.md#4-测试)。
+- 核心 LLM 调用、agent loop、工具、权限和状态只用 Python 标准库；外围交互增强为可选依赖。
+- 工具层处理 handler 错误并把结果回灌模型；核心 loop 保持清晰，具体约束见 [`AGENTS.md`](./AGENTS.md)。
+- [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md) · [上下文架构](./docs/operation/context-architecture.md) · [路线图](./docs/plans/teaching-repo-plan.md) · [CHANGELOG](./CHANGELOG.md)
 
 ## 贡献
 
-欢迎提 Issue / PR。如果是新增版本切片，请先读 `docs/plans/teaching-repo-plan.md`、[教程作者规范](./docs/governance/tutorial-authoring.md) 和 `AGENTS.md`，遵循“每版只加一个概念”的切分原则。
+欢迎提交 Issue / PR。新增课程前请读[教程作者规范](./docs/governance/tutorial-authoring.md)、[主 README 编写规范](./docs/governance/readme-authoring.md)和 `AGENTS.md`；作者入口与模板见[学习指南](./docs/tutorials/README.md)。
 
 ## License
 
 MIT — 见 [LICENSE](./LICENSE)
 
----
-
-<div align="center">
-
-**如果这个仓库对你有帮助，欢迎 Star ⭐ 让更多人看到。**
-
-</div>
-
-<!-- 关键词 / Keywords: agent tutorial, agent 教程, LLM agent, coding agent, Python agent, function calling, 从零构建 agent, AI agent, 大模型 agent, agent loop, tool calling -->
+<!-- 关键词 / Keywords: agent tutorial, agent 教程, LLM agent, coding agent, Python agent, function calling, 从零构建 agent, AI agent, agent loop, tool calling -->
