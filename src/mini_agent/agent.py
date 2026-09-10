@@ -147,7 +147,11 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
-    reminded = False
+    # Remind once for each observable progress state.  Old/custom State
+    # implementations without ``progress_marker`` retain one-reminder
+    # compatibility behavior.
+    reminded_progress_marker = None
+    legacy_reminded = False
     for i in range(MAX_ITERATIONS):
         _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
         prepared_messages = context_manager.prepare_messages()
@@ -254,13 +258,26 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         if not msg.get("tool_calls"):
             state = getattr(context_manager, "state", None)
             reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
-            if reminder and not reminded:
-                reminded = True
+            if reminder:
+                if "progress_marker" not in reminder:
+                    # Compatibility for old/custom State objects.
+                    if legacy_reminded:
+                        if state is not None:
+                            state.status = "blocked"
+                        return msg.get("content", "")
+                    legacy_reminded = True
+                else:
+                    marker = reminder.get("progress_marker")
+                    if marker == reminded_progress_marker:
+                        if state is not None:
+                            state.status = "blocked"
+                        return msg.get("content", "")
+                    reminded_progress_marker = marker
                 if hasattr(context_manager, "set_runtime_notice"):
-                    context_manager.set_runtime_notice(str(reminder.get("message", "请继续执行并验证。")))
+                    context_manager.set_runtime_notice(str(reminder.get(
+                        "message", "请在下一条回复中调用推进任务的工具；确实无法继续时说明具体阻塞原因。"
+                    )))
                 continue
-            if reminder and state is not None:
-                state.status = "blocked"
             return msg.get("content", "")
 
         # 有 tool_calls：并发执行，结果按原顺序作为 role=tool 回灌

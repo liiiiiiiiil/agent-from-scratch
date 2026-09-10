@@ -48,11 +48,11 @@
 
 ## 版本状态
 
-- **稳定基线**：`v0.16`（已创建 Git tag，可按教程复现）。
-- **当前开发版本**：下一版本规划中（v0.16 Plan-driven Execution 已完成）。
+- **稳定基线**：`v0.16.1`（从 `v0.16` 分出的完成提醒进展感知补丁，可按教程复现）。
+- **当前开发版本**：下一版本规划中（v0.16.1 Plan-driven Execution 修复已完成）。
 - 进行中的版本不要在稳定版手册中标为已发布；创建 tag 前应完成本文件、README、中英文教程索引、操作手册和 CHANGELOG 的一致性检查。
 
-## 当前架构（v0.16）
+## 当前架构（v0.16.1）
 
 标准 Python `src/` 包布局：
 
@@ -123,7 +123,8 @@ agent-from-scratch/
 - **v0.13 上下文压缩**：老轮次通过无工具摘要请求压缩为 Historical Summary，近期轮次保留原文；`AgentState` 重新渲染为 Structured State 锚定事实，摘要失败降级为 trimming，`MAX_ITERATIONS = 50`。`ContextManager` 同时提供 `ContextStats`/`stats_snapshot()` 与 `ContextEvent` observer；默认输出每次请求的互斥 token 分桶及 trimming/compaction 事件，可由 `CONTEXT_OBSERVABILITY` 关闭。
 - **v0.14 Project Instructions**：启动时按 root → cwd 加载 `AGENTS.md`，作为 protected context 注入每次请求；12,000 字符上限，不改变权限规则。
 - **v0.15 Todo / Task State**：`AgentState` 管理最多 50 项 Todo，`update_todo` 通过实例 registry 更新并由 Structured State 每轮渲染；不自动规划或持久化。
-- **v0.16 Plan-driven Execution**：验证证据、任务重置、一次性完成提醒与 blocked/failed 状态；`run_shell` 支持 execution/verification。
+- **v0.16 Plan-driven Execution**：验证证据、任务重置与 blocked/failed 状态；`run_shell` 支持 execution/verification。
+- **v0.16.1 完成协议修复**：完成提醒按 `progress_marker`（完整 Todo、非 Todo 工具事实、验证证据数量、generation、`verification_required`）逐进展状态最多注入一次；标记不变而再次尝试结束才进入 `blocked`。旧式 State 未提供标记时保持一次提醒兼容行为。阶段性汇报后若未完成，下一回复必须调用推进工具，不能只口头描述下一步。
 - 迭代上限默认值为 `MAX_ITERATIONS = 50`，可由 `config_local.py` 覆盖；超限直接返回“达到最大迭代次数”。
 - 包未 pip install 时需 `PYTHONPATH=src`；`pip install -e .` 后可免。
 
