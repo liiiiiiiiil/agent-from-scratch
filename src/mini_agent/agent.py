@@ -174,7 +174,11 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
     追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
     """
-    reminder_signature = None
+    # Remind once for each observable progress state. Old/custom State
+    # implementations without ``progress_marker`` retain one-reminder
+    # compatibility behavior.
+    reminded_progress_marker = None
+    legacy_reminded = False
     internal_retry = False
     output = TerminalOutput(OUTPUT_MODE)
 
@@ -281,18 +285,24 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             state = getattr(context_manager, "state", None)
             reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
             if reminder:
-                signature = (
-                    tuple(reminder.get("unfinished_todos", [])),
-                    bool(reminder.get("verification_required")),
-                    getattr(state, "current_generation_id", None),
-                )
-                if signature == reminder_signature:
-                    if state is not None:
-                        state.status = "blocked"
-                    return _finish(msg.get("content", ""))
-                reminder_signature = signature
+                if "progress_marker" not in reminder:
+                    # Compatibility for old/custom State objects.
+                    if legacy_reminded:
+                        if state is not None:
+                            state.status = "blocked"
+                        return _finish(msg.get("content", ""))
+                    legacy_reminded = True
+                else:
+                    marker = reminder.get("progress_marker")
+                    if marker == reminded_progress_marker:
+                        if state is not None:
+                            state.status = "blocked"
+                        return _finish(msg.get("content", ""))
+                    reminded_progress_marker = marker
                 if hasattr(context_manager, "set_runtime_notice"):
-                    context_manager.set_runtime_notice(str(reminder.get("message", "请继续执行并验证。")))
+                    context_manager.set_runtime_notice(str(reminder.get(
+                        "message", "请在下一条回复中调用推进任务的工具；确实无法继续时说明具体阻塞原因。"
+                    )))
                 internal_retry = True
                 continue
             return _finish(msg.get("content", ""))

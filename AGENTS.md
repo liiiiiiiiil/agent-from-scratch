@@ -19,7 +19,14 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16`（计划驱动执行，Plan-driven Execution）；后续版本处于规划中。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.18.1`。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+
+完成提醒硬约束：当 Todo 未完成或仍需验证时，阶段性文本只触发当前
+`progress_marker` 一次 Runtime Notice；Todo 状态、非 Todo 工具事实、验证证据、
+generation 或 `verification_required` 发生变化后才允许再次提醒。标记不变而再次
+输出无 `tool_calls` 文本时必须将任务置为 `blocked`。Runtime Notice 要求下一回复
+调用推进工具；确实无法继续时才说明具体阻塞原因。没有 `progress_marker` 的旧式
+State 保持一次提醒兼容行为。
 
 ## 架构索引
 

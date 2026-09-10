@@ -274,3 +274,90 @@ v0.16 新增了 generation 绑定的验证证据、一次性完成提醒，以�
 - [src/mini_agent/prompt.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/prompt.py)
 - [src/mini_agent/__main__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16/src/mini_agent/__main__.py)
 
+## v0.16.1 补丁：完成提醒按进展状态重开
+
+> 补丁快照：`v0.16.1` · 相邻差异：`v0.16..v0.16.1` · 本补丁不新增独立课程
+
+### 为什么需要这个补丁
+
+v0.16 用一个全局 `reminded` 布尔值控制完成提醒，整个任务最多提醒一次。这能阻止模型无限输出未完成总结，却也把正常的阶段性汇报误当成一次不可恢复的结束尝试：模型汇报调查结果、收到提醒并继续调用只读工具后，即使已经获得新事实，下一次阶段性汇报仍会直接进入 `blocked`。
+
+v0.16.1 把规则收窄为“每个进展状态最多提醒一次”。它修复的是完成协议，不引入 `recover`、`FailureEvent`、planner 或新的控制工具；`MAX_ITERATIONS=50` 仍是整个 loop 的全局上限。
+
+### 用已有完成事实构造进展标记
+
+`AgentState.completion_reminder()` 在原有完成缺口之外返回内部字段 `progress_marker`：
+
+```python
+progress_marker = (
+    tuple((todo.content, todo.status) for todo in self.todos),
+    len(self.tool_history),
+    len(self.verification_evidence),
+    self._verification_generation,
+    needs_verify,
+)
+```
+
+它由五类事实组成：完整 Todo 的 `(content, status)`、已记录的非 Todo 工具结果数量、验证证据数量、当前验证 generation，以及 `verification_required` 状态。这里没有新增持久化的提醒计数器；标记完全从现有状态派生。
+
+因此，相同内容和状态的 Todo 被重复提交时标记不变，不能借此无限刷新提醒。Todo 从 `pending` 或 `in_progress` 实质推进、读写或 shell 工具产生结果、验证证据增加、generation 改变，都会形成新标记。工具失败也属于新的观察事实，允许模型基于结果重新判断一次。
+
+### agent loop 如何判定
+
+`agent_loop()` 用 `reminded_progress_marker` 代替全局 `reminded`：
+
+- 首次看到某个完成缺口时，保存当前标记并注入 Runtime Notice。
+- 工具、Todo 或验证事实让标记发生变化后，可以针对新状态再次提醒。
+- 标记没有变化而模型再次输出无工具文本时，任务才进入 `blocked`。
+- 自定义或旧式 State 没有提供 `progress_marker` 时，仍沿用“整个任务只提醒一次”的兼容行为。
+
+Runtime Notice 也改成可执行指令：任务未完成时，模型的下一回复必须携带更新 Todo、继续调查/操作或执行验证的工具调用，不能只口头描述“接下来执行”；确实无法继续时才说明具体阻塞原因。已经流式输出到终端的阶段性文本仍然保留。
+
+典型的调查汇报流程变为：
+
+```text
+阶段性汇报
+  -> Runtime Notice
+  -> 调用只读工具（progress_marker 改变）
+  -> 再次阶段性汇报
+  -> 针对新标记再次收到 Runtime Notice
+  -> 更新 Todo / 继续执行 / 验证
+  -> 满足完成条件，或在下一种进展状态继续循环
+```
+
+无进展边界仍然明确：
+
+```text
+Runtime Notice
+  -> 没有工具、Todo 或验证进展
+  -> 再次只输出文本
+  -> blocked
+```
+
+### 与 v0.16 保持不变的边界
+
+正常完成条件没有改变：所有 Todo 都必须完成，并且最近一次可能改变环境的操作必须拥有当前 generation 的通过验证。带 `tool_calls` 的 assistant 消息仍须为每个调用回灌对应的 `role=tool` 结果；简单任务和无 Todo 任务仍可直接完成；50 轮上限保持不变。
+
+Runtime Notice 仍只进入下一次目标请求。即使该次请求触发 trimming 或 compaction，它也在最终请求视图构建完成后才被消费，不会重复注入，也不会撤回已经打印的阶段性文本。
+
+### 测试与验收
+
+v0.16.1 使用脚本化 mock LLM 响应验证完成协议，不依赖网络。先运行补丁直接涉及的 State、loop 和 Context 测试，再运行完整测试和教程结构检查：
+
+```bash
+PYTHONPATH=src python -m pytest -q tests/test_state.py tests/test_loop.py tests/test_context.py
+PYTHONPATH=src python -m pytest -q
+PYTHONPATH=src python scripts/check_tutorials.py docs/tutorials/16-plan-driven-execution.md
+```
+
+验收覆盖以下边界：
+
+- 首次未完成回复触发提醒；没有 Todo、工具或验证进展而再次输出文本时进入 `blocked`。
+- 调查汇报后调用只读工具会改变标记；再次汇报可获得新的提醒，并能继续执行直至完成。
+- Todo 从 `pending`/`in_progress` 实质推进会改变标记；重复提交完全相同的 Todo 不会。
+- 工具失败也会形成新的观察事实并允许重新判断一次；之后持续只输出文本仍会阻塞。
+- Todo 全部完成且当前 generation 有通过的验证证据时正常返回 `done`。
+- 简单任务、无 Todo 任务、tool-call/result 一一对应、50 轮上限与 context compaction 行为不回归。
+- Runtime Notice 在 trimming 或 compaction 后仍只注入目标请求一次。
+
+补丁实现与回归测试可在固定快照中阅读：[state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/src/mini_agent/state.py)、[agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/src/mini_agent/agent.py)、[prompt.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/src/mini_agent/prompt.py)、[test_state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/tests/test_state.py)、[test_loop.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/tests/test_loop.py) 和 [test_context.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.16.1/tests/test_context.py)。
