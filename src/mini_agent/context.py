@@ -387,6 +387,39 @@ class ContextManager:
                 f"retryable={str(failure.get('retryable')).lower()}"
             )
         critical_lines = []
+        checkpoint_records = snapshot.get("checkpoints", [])
+        checkpoint_lines = []
+        for checkpoint in checkpoint_records:
+            if not isinstance(checkpoint, dict):
+                continue
+            before_hash = checkpoint.get("before_sha256") or "-"
+            after_hash = checkpoint.get("after_sha256") or "-"
+            line = (
+                f"{checkpoint.get('checkpoint_id', '<unknown>')} "
+                f"path={checkpoint.get('path', '<unknown>')} "
+                f"attempt={checkpoint.get('attempt_id', '<unknown>')} "
+                f"generation={checkpoint.get('generation_id', '?')} "
+                f"status={checkpoint.get('status', '<unknown>')} "
+                f"before_sha256={before_hash} after_sha256={after_hash}"
+            )
+            if checkpoint.get("unavailable_reason"):
+                line += f" reason={bounded(checkpoint['unavailable_reason'], 180)}"
+            checkpoint_lines.append(line)
+        checkpoint_state_line = None
+        rollback_state_line = None
+        if checkpoint_lines:
+            checkpoint_state_line = "Checkpoints: " + bounded("; ".join(checkpoint_lines), 2200)
+            critical_lines.append(checkpoint_state_line)
+            ready_ids = [
+                item.get("checkpoint_id", "<unknown>")
+                for item in snapshot.get("rollback_checkpoints", [])
+                if isinstance(item, dict)
+            ]
+            rollback_state_line = (
+                "Rollback checkpoints (ready): " +
+                bounded(", ".join(ready_ids) if ready_ids else "none", 500)
+            )
+            critical_lines.append(rollback_state_line)
         if failure_lines:
             critical_lines.append("Recent failures: " + bounded("; ".join(failure_lines), 1500))
         recovery_lines = []
@@ -417,20 +450,44 @@ class ContextManager:
         if len(content) > STRUCTURED_STATE_MAX_CHARS:
             # Keep the causal and budget block intact; low-priority observation
             # text may be dropped after state is rebuilt from the snapshot.
-            content = "\n".join([
+            compact_lines = [
                 "[Structured State]",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
-                *critical_lines,
-            ])
+            ]
+            # Checkpoint metadata is part of the causal recovery state. Keep
+            # it ahead of lower-priority history when the state is degraded.
+            for line, limit in (
+                (checkpoint_state_line, 2100),
+                (rollback_state_line, 450),
+                ("Recent failures: " + bounded("; ".join(failure_lines), 850) if failure_lines else None, 850),
+                ("Recent recovery actions: " + bounded("; ".join(recovery_lines), 700) if recovery_lines else None, 700),
+                ("Budgets: " +
+                 f"failure_retries_remaining={budgets.get('failure_retries_remaining', '?')}; "
+                 f"recovery_actions_remaining={budgets.get('recovery_actions_remaining', '?')}; "
+                 f"repair_cycles_remaining={budgets.get('repair_cycles_remaining', '?')}; "
+                 f"fingerprint_attempts_remaining={bounded(budgets.get('fingerprint_attempts_remaining', []), 600)}", 650),
+                ("Recovery notice: " + bounded(snapshot["recovery_notice"], 350)
+                 if snapshot.get("recovery_notice") else None, 350),
+                ("Verification required: true" if snapshot.get("verification_required") else None, 100),
+                ("Blocking reason: " + bounded(snapshot["terminal_reason"], 350)
+                 if snapshot.get("terminal_reason") else None, 350),
+            ):
+                if line is not None:
+                    compact_lines.append(bounded(line, limit))
+            content = "\n".join(compact_lines)
         if len(content) > STRUCTURED_STATE_MAX_CHARS:
             # The individual critical fields are already bounded. This final
             # fallback is only for an unusually large number of bounded records;
             # do not cut a failure reference or terminal reason in half.
-            content = "\n".join([
+            compact_lines = [
                 "[Structured State]",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
-                *critical_lines,
-            ])
+            ]
+            if checkpoint_state_line is not None:
+                compact_lines.append(bounded(checkpoint_state_line, 1800))
+            if rollback_state_line is not None:
+                compact_lines.append(bounded(rollback_state_line, 350))
+            content = "\n".join(compact_lines)
         return {"role": "system", "content": content}
 
     def _build_messages(self) -> list[Message]:

@@ -298,8 +298,8 @@ class AgentState:
                 if self._failure_retry_counts.get(caused_by_failure_id, 0) >= MAX_FAILURE_RETRIES:
                     self._terminal("blocked", "failure retry 预算已耗尽", caused_by_failure_id)
                     return None, "failure retry 预算已耗尽"
-                if source_attempt.tool == "recover":
-                    return None, "recover 不能作为恢复目标"
+                if source_attempt.tool in ("recover", "rollback_checkpoint"):
+                    return None, "internal/recover 工具不能作为恢复目标"
                 target = (
                     source_attempt.tool,
                     deepcopy(self._original_attempt_arguments.get(source_attempt.attempt_id, {})),
@@ -309,8 +309,8 @@ class AgentState:
                     return None, "adjust 不接受 requested_attempt"
                 if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
                     return None, "adjust 需要目标工具和参数"
-                if requested_tool == "recover":
-                    return None, "recover 不能作为恢复目标"
+                if requested_tool in ("recover", "rollback_checkpoint"):
+                    return None, "internal/recover 工具不能作为恢复目标"
                 target = (requested_tool, deepcopy(requested_arguments))
             else:
                 target = None
@@ -367,8 +367,9 @@ class AgentState:
                 count = self._failure_retry_counts.get(caused_by_failure_id, 0)
                 if count >= MAX_FAILURE_RETRIES:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "failure retry 预算已耗尽") + (None,)
-                if source_attempt.tool == "recover":
-                    return self._reject_recovery(action, caused_by_failure_id, reason, "recover 不能作为恢复目标") + (None,)
+                if source_attempt.tool in ("recover", "rollback_checkpoint"):
+                    return self._reject_recovery(action, caused_by_failure_id, reason,
+                                                 "internal/recover 工具不能作为恢复目标") + (None,)
                 requested_tool = source_attempt.tool
                 requested_arguments = deepcopy(self._original_attempt_arguments.get(source_attempt.attempt_id, {}))
             elif action == "adjust":
@@ -376,8 +377,9 @@ class AgentState:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 不接受 requested_attempt") + (None,)
                 if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
                     return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 需要目标工具和参数") + (None,)
-                if requested_tool == "recover":
-                    return self._reject_recovery(action, caused_by_failure_id, reason, "recover 不能作为恢复目标") + (None,)
+                if requested_tool in ("recover", "rollback_checkpoint"):
+                    return self._reject_recovery(action, caused_by_failure_id, reason,
+                                                 "internal/recover 工具不能作为恢复目标") + (None,)
             elif requested_attempt or requested_tool or requested_arguments is not None:
                 return self._reject_recovery(action, caused_by_failure_id, reason, "ask/block 不接受目标参数") + (None,)
             if action == "rollback":
@@ -614,7 +616,29 @@ class AgentState:
                 elif category == "protocol":
                     if self.status not in ("blocked", "failed"):
                         self.status = "running"
-                elif category == "unknown": self._terminal("blocked", "副作用范围未知，需要外部诊断", failure_id)
+                elif category == "unknown":
+                    checkpoint = (
+                        self._checkpoint_store.get(result.checkpoint_id)
+                        if result.tool in ("write_file", "edit_file")
+                        and result.checkpoint_id is not None
+                        and self._checkpoint_store is not None else None
+                    )
+                    if (result.error_kind == "handler_exception" and
+                            result.effect_class == "possible" and
+                            checkpoint is not None and checkpoint.status == "ready" and
+                            not was_terminal):
+                        # A handler exception may have happened after a partial
+                        # write. The finalized before/after images make the
+                        # bounded rollback path deterministic, so leave the
+                        # task recoverable instead of treating it as unknown.
+                        self.status = "running"
+                        self.recovery_notice = (
+                            f"Failure {failure_id} caused by {attempt_id} left ready "
+                            f"checkpoint {checkpoint.checkpoint_id} for {checkpoint.path}; "
+                            "rollback may be requested before independent verification."
+                        )
+                    else:
+                        self._terminal("blocked", "副作用范围未知，需要外部诊断", failure_id)
                 elif category == "deterministic":
                     if self.status not in ("blocked", "failed"):
                         self.status = "running"

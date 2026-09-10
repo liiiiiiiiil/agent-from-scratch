@@ -380,7 +380,10 @@ class CheckpointStore:
                         with os.fdopen(fd, "wb") as handle:
                             handle.write(before_data)
                             handle.flush()
-                        os.chmod(temporary, checkpoint.mode or 0o644)
+                        os.chmod(
+                            temporary,
+                            checkpoint.mode if checkpoint.mode is not None else 0o644,
+                        )
                         os.replace(temporary, absolute_path)
                     except Exception:
                         try:

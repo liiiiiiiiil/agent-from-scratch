@@ -3,6 +3,7 @@
 上一课：[受限恢复策略](18-recovery-policy.md) · [教程总览](README.md) · 下一课：按需追加
 
 > 代码快照：`v0.19` · 相邻差异：`v0.18.1..v0.19` · 命令环境：Bash/zsh
+> 补丁快照：`v0.19.1` · 相邻差异：`v0.19..v0.19.1`
 
 > 运行要求：Python 3.10+，核心运行时只使用标准库。
 
@@ -25,6 +26,7 @@
 git checkout v0.18.1
 git diff --stat v0.18.1..v0.19
 git checkout v0.19
+git checkout v0.19.1  # 使用审阅修复后的补丁快照
 ```
 
 ## 新增与改动文件
@@ -125,13 +127,14 @@ rollback 沿用 v0.18 的两阶段恢复边界：先占用额度，再授权，�
 
 下一课按路线图继续扩展失败恢复或回放能力；不要把本版 checkpoint 当作多文件事务或通用沙箱。
 
-- [checkpoint.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/checkpoint.py)
-- [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/state.py)
-- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/recovery.py)
-- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/tools/base.py)
-- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/tools/__init__.py)
-- [permission.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/permission.py)
-- [test_checkpoint_rollback.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/tests/test_checkpoint_rollback.py)
+- [checkpoint.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/checkpoint.py)
+- [v0.19 baseline checkpoint.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19/src/mini_agent/checkpoint.py)
+- [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/state.py)
+- [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/recovery.py)
+- [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/tools/base.py)
+- [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/tools/__init__.py)
+- [permission.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/src/mini_agent/permission.py)
+- [test_checkpoint_rollback.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.19.1/tests/test_checkpoint_rollback.py)
 
 验收命令：
 

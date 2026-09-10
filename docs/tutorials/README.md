@@ -84,7 +84,7 @@ git diff v0.07..v0.08
 |---|---|---|
 | v0.17 | 失败模型 | [17-failure-model.md](17-failure-model.md) |
 | v0.18 / v0.18.1 | Recovery Policy 与补丁修复 | [18-recovery-policy.md](18-recovery-policy.md) |
-| v0.19 | 单文件 Checkpoint / Rollback | [19-checkpoint-rollback.md](19-checkpoint-rollback.md) |
+| v0.19 / v0.19.1 | 单文件 Checkpoint / Rollback | [19-checkpoint-rollback.md](19-checkpoint-rollback.md) |
 | 后续版本 | 失败恢复、验证闭环、可观测性、记忆、沙箱等 | 按需追加 |
 
 ## 版本与 Git tag

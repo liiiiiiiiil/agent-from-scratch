@@ -1,7 +1,7 @@
 # 阶段六：Reliable Execution 实施计划
 
-> 状态：`v0.19` Checkpoint / Rollback 已实现；`v0.20`–`v0.21` 规划中
-> 当前基线：`v0.19.0`（单文件 Checkpoint / Rollback）
+> 状态：`v0.19` Checkpoint / Rollback 已实现，`v0.19.1` 审阅修复已完成；`v0.20`–`v0.21` 规划中
+> 当前基线：`v0.19.1`（单文件 Checkpoint / Rollback）
 > 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 

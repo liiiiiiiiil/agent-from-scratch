@@ -1,8 +1,10 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.19.0**（Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.19.1**（Checkpoint / Rollback 审阅修复；含 v0.18.1 Recovery Policy 修复）。
 
 ## v0.19 Checkpoint / Rollback
+
+v0.19.1 修复了四个边界：checkpoint 元数据会出现在 critical Structured State 和文件工具结果中；形成明确前后镜像的文件 handler 异常仍可请求 rollback；所有 internal 工具都会在恢复额度和 generation 激活前被拒绝为 retry/adjust 目标；原始 mode 为 `0` 时按 `0` 恢复。
 
 `write_file` 和 `edit_file` 在权限放行、attempt/generation 预留后，会为单个工作区内普通文件保存前镜像。前镜像最多 `MAX_CHECKPOINT_BYTES`（默认 1 MiB），不存在的文件记录为 `absent` tombstone；符号链接、工作区外路径、目录/特殊文件、无效父目录和读取失败只会让 checkpoint 变为 `unavailable`，不会改变原文件工具行为。
 
@@ -112,7 +114,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.19.0，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.19.1，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

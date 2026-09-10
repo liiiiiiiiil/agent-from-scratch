@@ -166,6 +166,18 @@ def _brief(value: Any) -> str:
         return RESULT_BRIEF_FALLBACK
 
 
+def _checkpoint_notice(checkpoint: Any) -> str:
+    """Return metadata-only checkpoint information for a file-tool result."""
+    fields = (
+        f"checkpoint_id={checkpoint.checkpoint_id}",
+        f"path={checkpoint.path}",
+        f"status={checkpoint.status}",
+    )
+    if checkpoint.unavailable_reason:
+        fields += (f"reason={checkpoint.unavailable_reason}",)
+    return "Checkpoint: " + "; ".join(fields)
+
+
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry, gate: PermissionGate | None = None,
                  on_result: ResultCallback | None = None):
@@ -295,6 +307,7 @@ class ToolExecutor:
             return result
         checkpoint_capture = None
         checkpoint_id = None
+        checkpoint = None
         checkpoint_store = self.checkpoint_store
         if (state is not None and checkpoint_store is not None and
                 name in ("write_file", "edit_file") and effect_class == "possible"):
@@ -313,7 +326,7 @@ class ToolExecutor:
         except Exception as error:
             if checkpoint_capture is not None:
                 try:
-                    checkpoint_store.capture_after(checkpoint_capture)
+                    checkpoint = checkpoint_store.capture_after(checkpoint_capture)
                 except Exception:
                     pass
             text = f"Tool 执行失败: {error}"
@@ -325,6 +338,8 @@ class ToolExecutor:
                 error_kind = "edit_multiple_matches"
             else:
                 error_kind = "handler_exception"
+            if checkpoint is not None:
+                text += "\n" + _checkpoint_notice(checkpoint)
             if name == "recover":
                 rejection = self._record_recovery_rejection(state, normalized, text)
                 if rejection is not None:
@@ -338,9 +353,11 @@ class ToolExecutor:
             return result
         if checkpoint_capture is not None:
             try:
-                checkpoint_store.capture_after(checkpoint_capture)
+                checkpoint = checkpoint_store.capture_after(checkpoint_capture)
             except Exception:
                 pass
+        if checkpoint is not None:
+            output = f"{output}\n{_checkpoint_notice(checkpoint)}"
         excerpt = _brief(output)
         exit_code = None
         outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"

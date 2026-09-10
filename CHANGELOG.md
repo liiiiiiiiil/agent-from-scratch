@@ -5,6 +5,13 @@
 - Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
 - Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
 
+## [v0.19.1] - Checkpoint / Rollback review fixes
+
+- Render checkpoint and currently rollback-eligible metadata in critical Structured State, including compacted and long-state fallback views; return metadata-only checkpoint IDs from file-tool results.
+- Keep a file write/edit task recoverable after a handler exception when its before/after checkpoint is ready, so a partial write can be rolled back safely.
+- Reject internal tools as retry/adjust recovery targets before reserving recovery budget or opening a generation.
+- Restore a valid file mode of `0` instead of treating it as a missing mode.
+
 ## [v0.19.0] - Checkpoint / Rollback
 
 - Added task-local single-file checkpoints for admitted `write_file` and `edit_file` calls.

@@ -53,10 +53,28 @@ class RecoveryRuntime:
                                     requested_attempt, requested_tool, requested_arguments)
             try:
                 tool = self.executor.registry.get(requested_tool)
+                if tool.internal:
+                    return self._reject(action, caused_by_failure_id, reason,
+                                        "internal 工具不能作为恢复目标",
+                                        requested_attempt, requested_tool, requested_arguments)
                 requested_arguments = validate_arguments(tool.parameters, requested_arguments)
             except (TypeError, ValueError) as exc:
                 return self._reject(action, caused_by_failure_id, reason, f"adjust 参数无效: {exc}",
                                     requested_attempt, requested_tool, requested_arguments)
+        elif action == "retry" and requested_attempt is not None:
+            source_attempt = next(
+                (attempt for attempt in self.state.attempts
+                 if attempt.attempt_id == requested_attempt), None
+            )
+            if source_attempt is not None:
+                try:
+                    source_tool = self.executor.registry.get(source_attempt.tool)
+                except (TypeError, ValueError):
+                    source_tool = None
+                if source_tool is not None and source_tool.internal:
+                    return self._reject(action, caused_by_failure_id, reason,
+                                        "internal 工具不能作为恢复目标",
+                                        requested_attempt, requested_tool, requested_arguments)
         target, detail = self.state.recovery_target(
             action, caused_by_failure_id, requested_attempt,
             requested_tool, requested_arguments, checkpoint_id,
