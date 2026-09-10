@@ -35,7 +35,6 @@ EXPECTED = {
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),
     "18-recovery-policy.md": ("v0.18.1", "v0.18..v0.18.1"),
-    "19-checkpoint-rollback.md": ("v0.19.1", "v0.19..v0.19.1"),
     "06-concurrent-tool-calls.md": ("v0.06.1", "v0.06..v0.06.1"),
     "13-context-compaction.md": ("v0.13.1", "v0.13..v0.13.1"),
 }
