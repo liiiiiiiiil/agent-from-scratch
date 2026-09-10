@@ -98,7 +98,7 @@ python -m mini_agent
 
 ## 3. 当前能力（v0.16）
 
-v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和完整工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
+v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
@@ -235,6 +235,28 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 # 在 agent-from-scratch/ 目录下运行
 python -m mini_agent "读取 examples/input.txt"
 ```
+
+### 3.9 终端输出
+
+CLI 的输入提示固定为 `你 › `。助手正文通过 SSE 流式到达时，只有收到第一个非空 chunk 才显示 `助手 › `，随后直接追加正文；因此空回复不会留下空标题。agent loop 将 `call_llm` 的 `on_content` 回调连接到这一层，最终正文不会再次整段重播。
+
+输出模式由 `OUTPUT_MODE` 控制：
+
+| 模式 | 显示内容 |
+|---|---|
+| `normal` | 助手正文、工具批次（按工具名计数）和按调用顺序排列的结构化结果 |
+| `debug` | normal 内容，加上轮次、工具参数和工具结果；参数与结果各最多 1200 个字符 |
+| `quiet` | 隐藏助手正文、工具进度和运行时状态；显式 CLI 通知及权限确认仍显示 |
+
+normal 模式的成功工具结果只显示工具名和安全摘要，不展开结果正文。文件工具摘要只包含 `path`，`run_shell` 只包含 `command`，每个摘要最多 100 个字符；写入内容、grep pattern 等其他参数不显示。失败、拒绝、超时和无效结果显示最多 240 个字符的原因。debug 模式才显示有界的完整结果。上述限制只作用于终端，完整 tool message 仍会回灌模型。
+
+`call_llm` 的 `stream_output` 和 `on_content` 语义如下：
+
+- `stream_output=True` 且传入 `on_content` 时，每个正文 chunk 调用一次回调，不额外写标准输出；回调异常会被隔离。
+- `stream_output=True` 且没有回调时，保留独立调用的标准输出兼容行为。
+- `stream_output=False` 时不打印正文，也不调用回调，但仍累积并返回完整 assistant message。未显式指定时，quiet 模式默认为关闭流式观察，其余模式默认为开启。
+
+终端呈现是观察层：输出流关闭、重定向或写入失败不会改变工具协议或让执行失败。权限询问仍由 `PermissionGate` 同步发出，即使在 quiet 模式也必须让用户看到提示并输入 `once`、`always` 或 `reject`。
 
 ---
 

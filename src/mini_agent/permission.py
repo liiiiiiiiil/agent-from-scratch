@@ -142,9 +142,15 @@ class PermissionGate:
 
         if action == ASK:
             with self._ask_lock:
-                choice = input(
-                    f"允许执行 {tool_name}({args})? [once/always/reject] "
-                ).strip().lower()
+                try:
+                    choice = input(
+                        f"\n授权确认\n允许执行 {tool_name}({args})? [once/always/reject] "
+                    ).strip().lower()
+                finally:
+                    try:
+                        print()
+                    except Exception:
+                        pass
                 if choice == "always":
                     self.policy.approve(tool_name, pattern)
                 elif choice != "once":

@@ -6,12 +6,10 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from mini_agent.context import ContextManager
+from mini_agent.output import TerminalOutput
 from mini_agent.tools import registry
-from mini_agent.tools.base import ExecutionResult, ToolExecutor, format_tool_result
+from mini_agent.tools.base import ExecutionResult, ToolExecutor
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
-
-
-DISPLAY_RESULT_MAX_LENGTH = 1200
 
 
 def _safe_print(*args, **kwargs):
@@ -20,13 +18,6 @@ def _safe_print(*args, **kwargs):
         print(*args, **kwargs)
     except Exception:
         pass
-
-
-def _display_result(value):
-    """Keep terminal output readable without changing the tool result."""
-    limit = DISPLAY_RESULT_MAX_LENGTH if OUTPUT_MODE == "debug" else 240
-    text = format_tool_result(value, limit)
-    return text.replace("\n", "\n    ")
 
 
 def _recovery_rejection_content(state, arguments, detail):
@@ -53,12 +44,15 @@ def _recovery_rejection_content(state, arguments, detail):
     return json.dumps(payload, ensure_ascii=False)
 
 
-def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None):
+def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
+             on_content=None):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
     按 BASE_URL 的 scheme 选 HTTP/HTTPSConnection（https 网关如 api.deepseek.com）。
-    content 边收边 print（打字机效果），tool_calls 的 arguments 跨 chunk 拼接。
+    ``stream_output`` 为真时，正文通过 ``on_content`` 逐 chunk 观察；没有
+    回调时保留独立调用的 print 行为。为假时既不调用回调也不打印正文。
+    tool_calls 的 arguments 跨 chunk 拼接。
     """
     if stream_output is None:
         stream_output = OUTPUT_MODE != "quiet"
@@ -97,11 +91,19 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
             continue
         delta = choices[0].get("delta", {})
 
-        # content 边收边打印（打字机效果）
+        # content 边收边输出（打字机效果）；回调是观察能力，失败不能
+        # 影响 SSE 累积和后续协议解析。
         if delta.get("content"):
-            content_parts.append(delta["content"])
+            content = delta["content"]
+            content_parts.append(content)
             if stream_output:
-                _safe_print(delta["content"], end="", flush=True)
+                if on_content is None:
+                    _safe_print(content, end="", flush=True)
+                else:
+                    try:
+                        on_content(content)
+                    except Exception:
+                        pass
 
         # tool_calls 的 arguments 跨 chunk 拼接
         for tc in delta.get("tool_calls") or []:
@@ -174,16 +176,27 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     """
     reminder_signature = None
     internal_retry = False
+    output = TerminalOutput(OUTPUT_MODE)
+
+    def _finish(value):
+        output.close()
+        return value
+
     for i in range(MAX_ITERATIONS):
-        if OUTPUT_MODE != "quiet" and not internal_retry:
-            _safe_print(f"\n[第 {i + 1} 轮] 助手: ", end="", flush=True)
-        internal_retry = False
         prepared_messages = context_manager.prepare_messages()
+        if not internal_retry:
+            output.round_start(i + 1)
+        internal_retry = False
         run_registry = getattr(tool_executor, "registry", None)
         if run_registry is None:
-            msg = call_llm(prepared_messages)
+            msg = call_llm(prepared_messages, on_content=output.assistant_delta)
         else:
-            msg = call_llm(prepared_messages, tool_registry=run_registry)
+            msg = call_llm(
+                prepared_messages,
+                tool_registry=run_registry,
+                on_content=output.assistant_delta,
+            )
+        output.assistant_end()
 
         tool_calls = msg.get("tool_calls", [])
         invalid_tool_call_ids = set()
@@ -263,25 +276,6 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         context_manager.history.append(msg)
 
-        # content 已在 call_llm 中流式打印；这里补齐换行，避免下一段粘连。
-        if OUTPUT_MODE != "quiet":
-            _safe_print()
-
-        for tc in msg.get("tool_calls", []):
-            function = tc.get("function", {}) if isinstance(tc, dict) else {}
-            if not isinstance(function, dict):
-                function = {}
-            name = function.get("name", "<missing>")
-            arguments = function.get("arguments", "<missing>")
-            try:
-                arguments = json.dumps(json.loads(arguments), ensure_ascii=False)
-            except (TypeError, json.JSONDecodeError):
-                arguments = str(arguments)
-            if OUTPUT_MODE == "debug":
-                _safe_print(f"  工具: {name} {arguments}")
-            elif OUTPUT_MODE == "normal":
-                _safe_print(f"  工具: {name}")
-
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
             state = getattr(context_manager, "state", None)
@@ -295,13 +289,13 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 if signature == reminder_signature:
                     if state is not None:
                         state.status = "blocked"
-                    return msg.get("content", "")
+                    return _finish(msg.get("content", ""))
                 reminder_signature = signature
                 if hasattr(context_manager, "set_runtime_notice"):
                     context_manager.set_runtime_notice(str(reminder.get("message", "请继续执行并验证。")))
                 internal_retry = True
                 continue
-            return msg.get("content", "")
+            return _finish(msg.get("content", ""))
 
         # 只有全 effect_class=none 的回合可以并发。任何 possible effect
         # 都令整轮按模型顺序执行和提交，保证 generation 的确定性。
@@ -338,16 +332,22 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             if structured and state is not None and getattr(state, "is_terminal", lambda: False)():
                 name, args = parsed_calls[index]
                 terminal = tool_executor.execute_result(name, args, state, notify=False)
-                return tool_call_id, terminal.tool_content(), None
+                return tool_call_id, terminal.tool_content(), None, terminal
             if tool_call_id in invalid_tool_call_errors:
                 text = invalid_tool_call_errors[tool_call_id]
                 if structured and state is not None and parsed_calls[index][0] == "recover":
-                    return tool_call_id, _recovery_rejection_content(state, parsed_calls[index][1], text), None
+                    content = _recovery_rejection_content(state, parsed_calls[index][1], text)
+                    display = ExecutionResult(
+                        "recover", parsed_calls[index][1], "not_checked", False,
+                        "invalid", 0, "none", content, content[:200],
+                        error_kind="malformed_tool_call",
+                    )
+                    return tool_call_id, content, None, display
                 invalid = ExecutionResult(
                     "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
                     "none", text, text[:200], error_kind="malformed_tool_call",
                 ) if structured else None
-                return tool_call_id, text, invalid
+                return tool_call_id, text, invalid, invalid
 
             name, args = parsed_calls[index]
             if index in invalid_verifications:
@@ -356,7 +356,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                     name, args, "not_checked", False, "invalid", 0, "none",
                     text, text[:200], error_kind="mixed_verification",
                 ) if structured else None
-                return tool_call_id, text, invalid
+                return tool_call_id, text, invalid, invalid
 
             try:
                 function = tc["function"]
@@ -366,7 +366,12 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 if not isinstance(args, dict):
                     raise TypeError("tool arguments 必须是 JSON object")
             except (KeyError, TypeError, json.JSONDecodeError) as error:
-                return tool_call_id, f"工具调用失败: {type(error).__name__}", None
+                text = f"工具调用失败: {type(error).__name__}"
+                display = ExecutionResult(
+                    "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
+                    "none", text, text[:200], error_kind="malformed_tool_call",
+                ) if structured else None
+                return tool_call_id, text, None, display
 
             # Isolate only this tool boundary so pool.map still returns one
             # protocol result per call; LLM and CLI exceptions remain uncaught.
@@ -383,16 +388,22 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                             content = _recovery_rejection_content(state, args, execution.output_excerpt)
                         else:
                             content = execution.tool_content()
-                        return tool_call_id, content, None
+                        return tool_call_id, content, None, execution
                     if execution.error_kind == "task_terminal":
-                        return tool_call_id, execution.tool_content(), None
-                    return tool_call_id, execution.tool_content(), execution
+                        return tool_call_id, execution.tool_content(), None, execution
+                    return tool_call_id, execution.tool_content(), execution, execution
                 result = tool_executor.execute(name, args)
-                return tool_call_id, str(result), None
+                return tool_call_id, str(result), None, None
             except Exception as error:
-                return tool_call_id, f"工具调用失败: {type(error).__name__}", None
+                text = f"工具调用失败: {type(error).__name__}"
+                display = ExecutionResult(
+                    name, args, "not_checked", False, "failed", 0, "none",
+                    text, text[:200], error_kind="executor_exception",
+                )
+                return tool_call_id, text, None, display
 
         indexed_calls = list(enumerate(tool_calls))
+        output.tools_start(tool_calls)
         if has_possible:
             results = []
             for item in indexed_calls:
@@ -406,18 +417,19 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             # Concurrent handlers finish in arbitrary order; facts commit in
             # model order so attempt ids and snapshots stay deterministic.
             if structured and state is not None:
-                for _, _, execution in results:
+                for _, _, execution, _ in results:
                     if execution is not None:
                         state.record_execution_result(execution)
 
         # Threads execute concurrently, but terminal output follows tool-call order.
-        for tc, (tool_call_id, content, _) in zip(tool_calls, results):
+        for tc, (tool_call_id, content, _, display) in zip(tool_calls, results):
             function = tc.get("function", {}) if isinstance(tc, dict) else {}
             name = function.get("name", "<missing>") if isinstance(function, dict) else "<missing>"
-            if OUTPUT_MODE != "quiet":
-                _safe_print(f"  结果 [{name}]:\n    {_display_result(content)}")
+            arguments = function.get("arguments", {}) if isinstance(function, dict) else {}
+            output.tool_result(name, arguments, content, display)
+        output.close()
 
-        for tool_call_id, content, _ in results:
+        for tool_call_id, content, _, _ in results:
             context_manager.history.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
@@ -427,4 +439,4 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     state = getattr(context_manager, "state", None)
     if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):
         state.status = "failed"
-    return "达到最大迭代次数"
+    return _finish("达到最大迭代次数")

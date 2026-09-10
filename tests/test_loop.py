@@ -102,7 +102,8 @@ def test_completion_reminder_retry_is_not_printed_as_new_round():
         {"role": "assistant", "content": "still not verified"},
     ]
     output = StringIO()
-    with patch("mini_agent.agent.call_llm", side_effect=responses), redirect_stdout(output):
+    with patch("mini_agent.agent.call_llm", side_effect=responses), \
+            patch("mini_agent.agent.OUTPUT_MODE", "debug"), redirect_stdout(output):
         agent_loop(context, executor)
     assert output.getvalue().count("[第") == 2
 
@@ -180,7 +181,7 @@ def test_agent_loop_context_and_executor_integration():
         {"role": "assistant", "content": "both tools completed"},
     ]
 
-    def fake_call_llm(messages):
+    def fake_call_llm(messages, **kwargs):
         assert messages is context.prepared_snapshots[-1]
         return responses.pop(0)
 
@@ -223,7 +224,7 @@ def test_agent_loop_context_and_executor_integration():
     assert all("state" not in message for message in context.history)
     assert context.state.snapshot() == state_before
     rendered = output.getvalue()
-    assert rendered.index("结果 [first_tool]") < rendered.index("结果 [second_tool]")
+    assert rendered.index("返回 · first_tool") < rendered.index("返回 · second_tool")
     assert "[Executor]" not in rendered
     print("PASS: agent loop 使用 ContextManager/注入 Executor 并保持消息顺序")
 
@@ -387,7 +388,7 @@ def test_agent_loop_tool_call_errors_keep_protocol_and_continue():
         {"role": "assistant", "content": "continued after tool errors"},
     ]
 
-    def fake_call_llm(messages):
+    def fake_call_llm(messages, **kwargs):
         assert messages is context.prepared_snapshots[-1]
         return responses.pop(0)
 
@@ -491,7 +492,7 @@ def test_agent_loop_unstringifiable_result_keeps_protocol():
         {"role": "assistant", "content": "continued"},
     ]
 
-    def fake_call_llm(messages):
+    def fake_call_llm(messages, **kwargs):
         assert messages is context.prepared_snapshots[-1]
         return responses.pop(0)
 
@@ -549,12 +550,19 @@ def test_agent_loop_observation_print_failure_does_not_break_protocol():
         {"role": "assistant", "content": "continued"},
     ]
 
-    def fake_call_llm(messages):
+    def fake_call_llm(messages, **kwargs):
         assert messages is context.prepare_snapshots[-1]
         return responses.pop(0)
 
+    class BrokenOutput:
+        def write(self, value):
+            raise OSError("logging unavailable")
+
+        def flush(self):
+            raise OSError("logging unavailable")
+
     with patch("mini_agent.agent.call_llm", side_effect=fake_call_llm), \
-            patch("builtins.print", side_effect=RuntimeError("logging unavailable")):
+            patch("mini_agent.output.sys.stdout", BrokenOutput()):
         result = agent_loop(context, tool_executor)
 
     assert result == "continued"
@@ -664,7 +672,7 @@ def test_call_llm_preserves_malformed_streaming_tool_delta_for_loop():
     tool_executor = FakeExecutor()
     responses = [malformed_message, {"role": "assistant", "content": "continued"}]
 
-    def fake_call_llm(messages):
+    def fake_call_llm(messages, **kwargs):
         assert messages is context.prepare_snapshots[-1]
         return responses.pop(0)
 

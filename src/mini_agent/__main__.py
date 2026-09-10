@@ -12,10 +12,19 @@ from mini_agent.agent import agent_loop
 from mini_agent.context import ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.input_session import InputSession
+from mini_agent.config import OUTPUT_MODE
 from mini_agent.prompt import build_system_prompt
 from mini_agent.state import AgentState
 from mini_agent.tools import create_registry, registry
 from mini_agent.tools.base import ToolExecutor
+from mini_agent.output import TerminalOutput
+
+
+def _single_line_notice(value, limit=240):
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def main():
@@ -39,6 +48,15 @@ def main():
     # The agent loop's structured path suppresses this legacy callback.
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
     input_session = InputSession()
+    cli_output = TerminalOutput(OUTPUT_MODE)
+
+    def cli_notice(message):
+        cli_output.cli_notice(message)
+        cli_output.close()
+
+    def status_notice(message):
+        cli_output.status_notice(message)
+        cli_output.close()
 
     def run_task(user_input):
         if not state.task:
@@ -46,18 +64,23 @@ def main():
                 state.begin_task(user_input)
             else:
                 state.task = user_input
-        if state.status not in ("blocked", "failed"):
-            state.status = "running"
+        state.status = "running"
         context.history.append({"role": "user", "content": user_input})
         try:
             result = agent_loop(context, tool_executor)
         except Exception:
-            if state.status not in ("blocked", "failed"):
-                state.status = "failed"
+            state.status = "failed"
             raise
         if result == "达到最大迭代次数":
             if state.status not in ("blocked", "failed"):
                 state.status = "failed"
+            status_notice("达到最大迭代次数。")
+        elif state.status == "blocked":
+            reason = _single_line_notice(getattr(state, "terminal_reason", ""))
+            status_notice(f"任务已阻塞：{reason}" if reason else "任务已阻塞：完成条件尚未满足。")
+        elif state.status == "failed":
+            reason = _single_line_notice(getattr(state, "terminal_reason", ""))
+            status_notice(f"任务执行失败：{reason}" if reason else "任务执行失败。")
         elif state.status == "running":
             state.status = "done"
 
@@ -68,13 +91,13 @@ def main():
 
     while True:
         try:
-            task_label = state.task[:60] + ("..." if len(state.task) > 60 else "")
-            prompt = f"\n你 [{state.status}; 当前任务: {task_label or '(无)'}]: "
+            prompt = "你 › "
             user_input = input_session.read(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
+        cli_output.input_end()
         if user_input == "/reset":
             context.reset_task()
             if hasattr(state, "reset_task"):
@@ -82,12 +105,12 @@ def main():
             else:
                 state.task = ""
                 state.status = "idle"
-            print("当前任务已清空。输入任务开始，或使用 /new <任务>。")
+            cli_notice("当前任务已清空。输入任务开始，或使用 /new <任务>。")
             continue
         if user_input == "/new" or user_input.startswith("/new "):
             task = user_input[4:].strip()
             if not task:
-                print("用法: /new <任务>")
+                cli_notice("用法: /new <任务>")
                 continue
             context.reset_task()
             if hasattr(state, "begin_task"):
@@ -95,6 +118,7 @@ def main():
             else:
                 state.task = task
                 state.status = "running"
+            cli_notice("已开始新任务。")
             run_task(task)
             continue
         run_task(user_input)

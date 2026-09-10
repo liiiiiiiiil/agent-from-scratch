@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
+- Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
+
 ## [v0.18.1] - Recovery Policy fixes
 
 - Classify edit precondition failures without treating them as unknown writes.
