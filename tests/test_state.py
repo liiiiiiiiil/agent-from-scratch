@@ -116,6 +116,32 @@ def test_failed_verification_requires_retry():
     state.record_tool("run_shell", {"command": "pytest", "purpose": "verification"}, True, "[timeout] 命令超时")
     assert not state.has_verification_evidence()
 
+
+def test_completion_progress_marker_tracks_real_facts_and_ignores_duplicate_todo():
+    state = AgentState(task="progress")
+    state.update_todos([{"content": "inspect", "status": "pending"}])
+    first = state.completion_reminder()["progress_marker"]
+    state.update_todos([{"content": "inspect", "status": "pending"}])
+    assert state.completion_reminder()["progress_marker"] == first
+
+    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    todo_progress = state.completion_reminder()["progress_marker"]
+    assert todo_progress != first
+
+    state.record_tool("read_file", {"path": "a.py"}, False, "not found")
+    tool_progress = state.completion_reminder()["progress_marker"]
+    assert tool_progress != todo_progress
+
+    state.record_tool("run_shell", {"command": "check", "purpose": "verification"}, True, "[exit=0] ok")
+    assert state.completion_reminder()["progress_marker"] != tool_progress
+
+
+def test_completed_todos_and_current_passed_verification_allow_finish():
+    state = AgentState(task="finish")
+    state.update_todos([{"content": "inspect", "status": "completed"}])
+    state.record_tool("run_shell", {"command": "check", "purpose": "verification"}, True, "[exit=0] ok")
+    assert state.completion_reminder() is None
+
 def test_begin_task_resets_runtime_state_and_completion_reminder():
     state = AgentState(task="old")
     state.update_todos([{"content": "done", "status": "completed"}])
@@ -267,4 +293,6 @@ if __name__ == "__main__":
     test_invalid_todo_shapes_leave_snapshot_unchanged()
     test_verification_evidence_generation_and_purpose()
     test_begin_task_resets_runtime_state_and_completion_reminder()
+    test_completion_progress_marker_tracks_real_facts_and_ignores_duplicate_todo()
+    test_completed_todos_and_current_passed_verification_allow_finish()
     print("\n全部 state test 通过")

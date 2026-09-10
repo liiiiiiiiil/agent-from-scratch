@@ -35,6 +35,18 @@ Previously unreleased mainline changes included in this snapshot:
 - Added bounded recovery reservations, successor generations, and explicit causal links.
 - v0.18 deliberately rejects rollback and requires independent verification after recovery.
 
+## [v0.16.1] - Completion progress reminders
+
+- Fixed completion reminders so each observable progress state is reminded at
+  most once; Todo changes, tool observations, and verification facts reopen a
+  new correction opportunity.
+- Clarified the Runtime Notice and system rules: after an intermediate report,
+  the next response must call a progress-making tool unless the task is
+  concretely blocked.
+- Added deterministic regression coverage for no-progress blocking,
+  investigation reports, Todo marker stability, failed tools, and verification
+  closure.
+
 ## [v0.16] - 计划驱动执行（Plan-driven Execution）
 
 - Added verification evidence, task reset, completion reminders, and blocked/failed task states.

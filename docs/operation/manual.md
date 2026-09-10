@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.18**（Recovery Policy）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.18.1**（Recovery Policy；含 v0.16.1 完成提醒修复）。
 
 ## v0.18 Recovery Policy
 
@@ -14,7 +14,9 @@
 
 ## v0.16 计划驱动执行（Plan-driven Execution）
 
-复杂任务通常按 Plan → Execute → Observe → Verify 推进；如果观察结果或验证结果暴露问题，模型再 Replan（重排 Todo）并继续执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。这种保守策略不依赖第三方库或命令解析。
+复杂任务通常按 Plan → Execute → Observe → Verify 推进；如果观察结果或验证结果暴露问题，模型再 Replan（重排 Todo）并继续执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。
+
+v0.16.1 修复了完成提醒：当模型在 Todo 未完成或仍需验证时输出阶段性文本，运行时注入明确的 Runtime Notice，要求下一回复调用推进工具（更新 Todo、调查/操作或验证），而不是只口头描述下一步。提醒按进展状态最多一次：完整 Todo、非 Todo 工具结果、验证证据数量、generation 或 `verification_required` 发生变化后，可以再次提醒；相同标记下再次输出无工具文本才标记 `blocked`。没有 `progress_marker` 的旧式 State 保持一次提醒兼容行为。这种保守策略不依赖第三方库或命令解析。
 
 ## v0.15 任务清单与状态（Todo / Task State）
 
@@ -96,7 +98,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.16）
+## 3. 当前能力（v0.18.1，含 v0.16.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

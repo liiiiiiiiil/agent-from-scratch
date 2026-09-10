@@ -108,6 +108,112 @@ def test_completion_reminder_retry_is_not_printed_as_new_round():
     assert output.getvalue().count("[第") == 2
 
 
+def test_completion_reminder_blocks_when_no_progress_is_made():
+    """A second text-only attempt with the same marker is terminal."""
+    state = AgentState(task="investigate")
+    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    context = ContextManager(state, [{"role": "user", "content": "investigate"}])
+    responses = iter([
+        {"role": "assistant", "content": "调查汇报"},
+        {"role": "assistant", "content": "仍然无法继续"},
+    ])
+    notices = []
+    original_set_notice = context.set_runtime_notice
+    def set_notice(message):
+        notices.append(message)
+        original_set_notice(message)
+    context.set_runtime_notice = set_notice
+
+    with patch("mini_agent.agent.call_llm", side_effect=lambda messages, **kwargs: next(responses)):
+        result = agent_loop(context, ToolExecutor(ToolRegistry()))
+
+    assert result == "仍然无法继续"
+    assert state.status == "blocked"
+    assert len(notices) == 1
+
+
+def test_completion_reminder_reopens_after_read_only_progress_and_can_finish():
+    """A read-only observation changes the marker and permits another reminder."""
+    state = AgentState(task="investigate")
+    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    registry = ToolRegistry()
+    registry.register(Tool(
+        "inspect", "read-only investigation", {"type": "object", "properties": {}},
+        lambda: "observed",
+    ))
+    registry.register(Tool(
+        "update_todo", "update plan", {"type": "object", "properties": {"todos": {"type": "array"}}},
+        lambda todos: state.update_todos(todos) or "updated",
+    ))
+    executor = ToolExecutor(registry, PermissionGate(PermissionPolicy({
+        "inspect": ALLOW, "update_todo": ALLOW,
+    })), on_result=state.record_tool)
+    context = ContextManager(state, [{"role": "user", "content": "investigate"}])
+    responses = iter([
+        {"role": "assistant", "content": "先汇报调查结果"},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "inspect-1", "type": "function",
+            "function": {"name": "inspect", "arguments": "{}"},
+        }]},
+        {"role": "assistant", "content": "再次汇报"},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "todo-1", "type": "function",
+            "function": {"name": "update_todo", "arguments": '{"todos":[{"content":"inspect","status":"completed"}]}'},
+        }]},
+        {"role": "assistant", "content": "完成"},
+    ])
+    notices = []
+    original_set_notice = context.set_runtime_notice
+    def set_notice(message):
+        notices.append(message)
+        original_set_notice(message)
+    context.set_runtime_notice = set_notice
+
+    with patch("mini_agent.agent.call_llm", side_effect=lambda messages, **kwargs: next(responses)):
+        result = agent_loop(context, executor)
+
+    assert result == "完成"
+    assert state.status == "running"
+    assert len(notices) == 2
+    assert state.snapshot()["todos"] == [{"content": "inspect", "status": "completed"}]
+
+
+def test_failed_tool_is_progress_then_repeated_text_blocks():
+    """A failed observation still advances facts, but cannot refresh forever."""
+    state = AgentState(task="investigate")
+    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    registry = ToolRegistry()
+    registry.register(Tool(
+        "inspect", "failing investigation", {"type": "object", "properties": {}},
+        lambda: (_ for _ in ()).throw(ValueError("probe failed")),
+    ))
+    executor = ToolExecutor(registry, PermissionGate(PermissionPolicy({"inspect": ALLOW})))
+    context = ContextManager(state, [{"role": "user", "content": "investigate"}])
+    responses = iter([
+        {"role": "assistant", "content": "先汇报"},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "inspect-1", "type": "function",
+            "function": {"name": "inspect", "arguments": "{}"},
+        }]},
+        {"role": "assistant", "content": "失败后再次汇报"},
+        {"role": "assistant", "content": "仍然没有工具"},
+    ])
+    notices = []
+    original_set_notice = context.set_runtime_notice
+    def set_notice(message):
+        notices.append(message)
+        original_set_notice(message)
+    context.set_runtime_notice = set_notice
+
+    with patch("mini_agent.agent.call_llm", side_effect=lambda messages, **kwargs: next(responses)):
+        result = agent_loop(context, executor)
+
+    assert result == "仍然没有工具"
+    assert state.status == "blocked"
+    assert len(notices) == 2
+    assert state.snapshot()["tool_history"][0]["ok"] is False
+
+
 def test_agent_loop_context_and_executor_integration():
     class FakeContextManager:
         def __init__(self):
@@ -849,6 +955,9 @@ if __name__ == "__main__":
     test_import()
     test_config()
     test_agent_loop_signature()
+    test_completion_reminder_blocks_when_no_progress_is_made()
+    test_completion_reminder_reopens_after_read_only_progress_and_can_finish()
+    test_failed_tool_is_progress_then_repeated_text_blocks()
     test_agent_loop_context_and_executor_integration()
     test_agent_loop_tool_call_errors_keep_protocol_and_continue()
     test_agent_loop_unstringifiable_result_keeps_protocol()

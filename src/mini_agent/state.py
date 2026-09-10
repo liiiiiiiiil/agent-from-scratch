@@ -582,9 +582,28 @@ class AgentState:
         with self._lock:
             if self.status in ("blocked", "failed"): return None
             missing = [t.content for t in self.todos if t.status != "completed"]
-            if not missing and not self._verification_required: return None
-            return {"unfinished_todos": missing, "verification_required": self._verification_required,
-                    "message": "任务尚未满足完成条件，请继续执行并验证。"}
+            needs_verify = self._verification_required
+            if not missing and not needs_verify:
+                return None
+            # Describe observable completion facts instead of counting
+            # reminders. The marker changes when Todo state, tool
+            # observations, verification evidence, or its generation changes.
+            progress_marker = (
+                tuple((todo.content, todo.status) for todo in self.todos),
+                len(self.tool_history),
+                len(self.verification_evidence),
+                self._verification_generation,
+                needs_verify,
+            )
+            return {
+                "unfinished_todos": missing,
+                "verification_required": needs_verify,
+                "progress_marker": progress_marker,
+                "message": (
+                    "任务尚未满足完成条件。请在下一条回复中调用能推进任务的工具 "
+                    "（更新 Todo、执行调查/操作或运行验证）；确实无法继续时才说明具体阻塞原因。"
+                ),
+            }
 
     def update_todos(self, todos: list[dict[str, Any]]) -> None:
         if not isinstance(todos, list): raise ValueError("todos 必须是数组")
