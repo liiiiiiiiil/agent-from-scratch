@@ -5,6 +5,18 @@
 - Raised the current mainline minimum supported Python version from 3.9 to 3.10.
 - Recreated the recommended development environment with Python 3.10.
 
+## [v0.16.1] - Completion progress reminders
+
+- Fixed completion reminders so each observable progress state is reminded at
+  most once; Todo changes, tool observations, and verification facts reopen a
+  new correction opportunity.
+- Clarified the Runtime Notice and system rules: after an intermediate report,
+  the next response must call a progress-making tool unless the task is
+  concretely blocked.
+- Added deterministic regression coverage for no-progress blocking,
+  investigation reports, Todo marker stability, failed tools, and verification
+  closure.
+
 ## [v0.16] - Plan-driven Execution
 
 - Added verification evidence, task reset, completion reminders, and blocked/failed task states.

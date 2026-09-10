@@ -1,10 +1,12 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.16**（Plan-driven Execution）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.16.1**（Plan-driven Execution completion fix）。
 
-## v0.16 计划驱动执行
+## v0.16.1 计划驱动执行完成提醒
 
-复杂任务按 Plan → Execute → Observe → Replan → Verify 闭环执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。若模型过早结束，运行时只追加一次提醒，仍无法满足条件时标记 blocked。这种保守策略不依赖第三方库或命令解析。
+复杂任务按 Plan → Execute → Observe → Replan → Verify 闭环执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。
+
+当模型在 Todo 未完成或仍需验证时输出阶段性文本，运行时会注入一次明确的 Runtime Notice，要求下一回复调用推进工具（更新 Todo、调查/操作或验证），而不是只口头描述下一步。提醒按进展状态最多一次：完整 Todo、非 Todo 工具结果、验证证据数量、generation 或 `verification_required` 发生变化后，可以再次提醒；相同标记下再次输出无工具文本才标记 `blocked`。旧式 State 没有进展标记时仍保持一次提醒兼容行为。这种保守策略不依赖第三方库或命令解析。
 
 ## v0.15 Todo 状态
 

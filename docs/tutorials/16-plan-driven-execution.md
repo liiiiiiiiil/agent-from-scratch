@@ -1,6 +1,6 @@
-# 第 16 课：Plan-driven Execution（v0.16）
+# 第 16 课：Plan-driven Execution（v0.16 / v0.16.1）
 
-> 稳定版本 v0.16 | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
+> 稳定版本 v0.16.1 | [教程总览](README.md) | [上一课：Todo / Task State](15-task-state.md) | 下一课：规划中
 
 ## 本课目标
 
@@ -14,7 +14,7 @@ Plan -> Execute -> Observe -> Replan -> Verify -> done
 
 - 解释 `generation` 为什么会让旧验证证据失效。
 - 区分 `run_shell` 的 `execution` 与 `verification`，以及它们对状态的不同影响。
-- 看懂“最终文本回复”出现后，agent loop 如何提醒一次、阻止过早完成并最终收口为 `blocked`。
+- 看懂“最终文本回复”出现后，agent loop 如何按进展状态提醒、在无进展时阻止过早完成并最终收口为 `blocked`。
 - 使用零网络示例和现有测试验证正常路径、失败验证、任务重置和最大迭代失败路径。
 
 本课的核心原则是：**计划表达意图，状态记录事实，独立验证才提供完成证据。**
@@ -35,10 +35,10 @@ git diff v0.15..v0.16 -- src/mini_agent/state.py src/mini_agent/agent.py src/min
 
 | 文件 | 相对 v0.15 的变化 | 作用 |
 |---|---|---|
-| `src/mini_agent/state.py` | 增加 `VerificationEvidence`、generation、完成条件、`begin_task()` | 保存验证事实并使状态转换有依据 |
+| `src/mini_agent/state.py` | 增加 `VerificationEvidence`、generation、完成条件、按进展生成 `progress_marker`、`begin_task()` | 保存验证事实并使状态转换有依据 |
 | `src/mini_agent/tools/shell.py` | `run_shell(command, purpose=...)` | 区分可能改变环境的执行命令和验证命令 |
 | `src/mini_agent/context.py` | Structured State 增加验证字段；增加 Runtime Notice | 将缺口只注入下一次 LLM 请求 |
-| `src/mini_agent/agent.py` | 最终回复检查 reminder；支持 `blocked`/`failed` 收口 | 防止模型未经验证就结束，达到上限时明确失败 |
+| `src/mini_agent/agent.py` | 最终回复检查 reminder；按 `progress_marker` 决定再次提醒；支持 `blocked`/`failed` 收口 | 防止模型未经验证就结束，同时允许调查/执行/验证继续推进 |
 | `src/mini_agent/prompt.py` | core rules 增加 Plan → Verify 规则 | 让模型知道何时建立 Todo、何时验证 |
 | `src/mini_agent/__main__.py` | 每项任务调用 `begin_task()`；结束时设置 `done`/`failed` | CLI 任务边界和状态生命周期 |
 | `tests/test_state.py`、`test_loop.py`、`test_context.py`、`test_tools.py` | 覆盖 generation、提醒、协议和 shell schema | 本版本的可执行验收 |
@@ -84,7 +84,7 @@ CLI run_task
   -> LLM: run_shell verification
        -> [exit=0] 才设置 last_verified_generation
   -> LLM 最终文本
-       -> 无缺口：返回；有缺口：Runtime Notice 后再请求一次
+       -> 无缺口：返回；有缺口：按当前 progress_marker 注入 Runtime Notice 后再请求
 ```
 
 `ContextManager.prepare_messages()` 每轮都会重新渲染 Structured State，所以压缩、裁剪或多轮对话不会把最新的验证状态“藏”在旧摘要里。Runtime Notice 不写入 `history`，只在下一次请求视图中出现；即使这次请求触发上下文压缩，也会保留到最终构建完成后再消费。
@@ -108,11 +108,16 @@ CLI run_task
 
 ### 完成提醒与 loop 收口
 
-`completion_reminder()` 在存在未完成 Todo，或存在待验证的可能变更时返回消息；简单只读任务没有这些缺口，可以直接结束。agent loop 收到没有 `tool_calls` 的 assistant 消息后：
+`completion_reminder()` 在存在未完成 Todo，或存在待验证的可能变更时返回消息；简单只读任务没有这些缺口，可以直接结束。返回值还带一个内部 `progress_marker`：完整 Todo 的 `(content, status)`、已记录的非 Todo 工具结果数量、验证证据数量、当前验证 generation 和 `verification_required`。相同 Todo 重复提交不会改变标记；Todo 状态变化、工具结果（成功或失败）和验证事实会改变标记。
 
-1. 第一次发现 reminder：设置 Runtime Notice，继续下一轮；提醒最多纠正一次，不会自动替模型规划或重试。
-2. 第二次仍有缺口：将 `state.status` 设为 `blocked`，返回当前文本，避免无限循环。
-3. 有工具调用则继续正常执行；达到 `MAX_ITERATIONS`（默认 50）后返回“达到最大迭代次数”，并把状态设为 `failed`。
+agent loop 收到没有 `tool_calls` 的 assistant 消息后：
+
+1. 第一次发现某个进展标记的缺口：保存该标记，设置 Runtime Notice，继续下一轮。Notice 明确要求下一回复携带推进工具；运行时不替模型规划或重试。
+2. 后续若 Todo、工具观察或验证使标记变化，再次发现缺口时允许再次提醒。
+3. 标记不变而模型再次只输出文本：将 `state.status` 设为 `blocked`，返回当前文本，避免无限循环。旧式 State 没有 `progress_marker` 时沿用“整个任务只提醒一次”的兼容行为。
+4. 有工具调用则继续正常执行；达到 `MAX_ITERATIONS`（默认 50）后返回“达到最大迭代次数”，并把状态设为 `failed`。
+
+一个典型的调查流程是：模型先输出调查汇报，收到 Notice 后调用只读工具；工具结果进入 `tool_history`，标记改变，因此下一次汇报仍会获得一次新的 Notice。模型随后更新 Todo 或运行验证，直到所有 Todo 完成且验证证据有效。若它在 Notice 后不调用工具、Todo 也不变，下一次纯文本回复立即进入 `blocked`。
 
 CLI 的 `run_task()` 在 loop 正常返回且状态仍为 `running` 时设为 `done`；顶层异常或最大迭代结果设为 `failed`。loop 不兜底 LLM/CLI 顶层异常，工具边界异常仍由 Executor/loop 转成可回灌的工具结果。
 
@@ -122,7 +127,7 @@ CLI 的 `run_task()` 在 loop 正常返回且状态仍为 `running` 时设为 `d
 - **保守地把 execution 当作可能变更**：无法可靠判断任意 shell 命令是否修改环境，因此即使命令看起来是只读或退出非零，也会使证据失效。
 - **证据不是业务正确性证明**：`[exit=0]` 只代表进程成功退出；测试覆盖不足、命令选错等问题仍需模型判断。
 - **不持久化、不撤回流式输出**：任务状态只在当前进程内维护；已经打印的草稿不会被运行时收回。
-- **提醒只一次**：这是防止过早结束的安全闸门，不是重试策略；持续缺口最终明确为 `blocked`。
+- **提醒按进展状态最多一次**：这是防止过早结束的安全闸门，不是自动重试策略；同一状态持续缺口最终明确为 `blocked`。
 
 ## 最小无网络示例
 
@@ -171,12 +176,12 @@ PYTHONPATH=src python tests/test_context.py
 - execution 不产生通过证据；写入、execution 失败和超时都会使旧证据失效，权限拒绝不会。
 - verification 的零退出码、非零退出码和超时分别得到正确 evidence。
 - 新任务 `begin_task()` 清空运行态但不要求清空会话 history。
-- 最终回复的提醒只注入一次；仍有缺口时状态为 `blocked`；达到迭代上限时为 `failed`。
+- 相同进展状态的提醒只注入一次；真实工具/Todo/验证进展后可再次提醒；无进展仍输出文本时状态为 `blocked`；达到迭代上限时为 `failed`。
 - tool call 协议、并发执行和结果顺序保持第 11 课以来的不变量。
 
 ## 本版特性、下一课与代码索引
 
-v0.16 的独有能力是“generation 绑定的验证证据 + 一次性完成提醒 + 明确的 done/blocked/failed 状态”。下一版本尚在规划中；运行时不会自动保存计划，也不会替用户决定验证命令。
+v0.16.1 在 v0.16 的基础上修复了完成协议：以进展标记驱动提醒，避免调查汇报后失去继续执行的机会，同时保留无进展阻塞边界。运行时不会自动保存计划，也不会替用户决定验证命令。
 
 - [state.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/state.py)
 - [agent.py](/Users/lihao/Public/Projects/codes/agent-from-scratch/src/mini_agent/agent.py)
