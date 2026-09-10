@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: code and tutorials reach `v0.19.1` (review fixes for lesson 19 Checkpoint / Rollback). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: code and tutorials reach `v0.19` (lesson 19 Checkpoint / Rollback). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -51,7 +51,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><th colspan="3"><a id="stage-6"></a>Stage 6 · Reliable Execution</th></tr>
     <tr><td><strong>v0.17</strong></td><td><a href="./docs/tutorials/17-failure-model.md">Failure model</a></td><td>Audit generations, attempts, and structured failure facts.</td></tr>
     <tr><td><strong>v0.18</strong> (patch <code>v0.18.1</code>)</td><td><a href="./docs/tutorials/18-recovery-policy.md">Recovery policy</a></td><td>Use bounded recovery actions with generation isolation; the patch tightens boundary consistency.</td></tr>
-    <tr><td><strong>v0.19</strong> (patch <code>v0.19.1</code>)</td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">Checkpoint / Rollback</a></td><td>Restore one file atomically from a before-image with conflict detection; the patch contains review fixes.</td></tr>
+    <tr><td><strong>v0.19</strong></td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">Checkpoint / Rollback</a></td><td>Restore one file atomically from a before-image with conflict detection, visible recovery state, and independent verification.</td></tr>
     <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding recovery, memory, sandboxing, and related capabilities.</td></tr>
   </tbody>
 </table>

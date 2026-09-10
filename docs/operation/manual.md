@@ -1,12 +1,12 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.19.1**（Checkpoint / Rollback 审阅修复；含 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.19**（Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
 
 ## v0.19 Checkpoint / Rollback
 
-v0.19.1 修复了四个边界：checkpoint 元数据会出现在 critical Structured State 和文件工具结果中；形成明确前后镜像的文件 handler 异常仍可请求 rollback；所有 internal 工具都会在恢复额度和 generation 激活前被拒绝为 retry/adjust 目标；原始 mode 为 `0` 时按 `0` 恢复。
-
 `write_file` 和 `edit_file` 在权限放行、attempt/generation 预留后，会为单个工作区内普通文件保存前镜像。前镜像最多 `MAX_CHECKPOINT_BYTES`（默认 1 MiB），不存在的文件记录为 `absent` tombstone；符号链接、工作区外路径、目录/特殊文件、无效父目录和读取失败只会让 checkpoint 变为 `unavailable`，不会改变原文件工具行为。
+
+文件工具结果和 critical Structured State 会保留 checkpoint ID、相对路径、attempt、generation、状态和哈希；上下文压缩或超长状态降级后仍保留这些恢复元数据。若获准的文件 handler 抛错但前后镜像明确，任务保持可恢复并提示 rollback；前后镜像不可用时才按未知副作用阻塞。internal 工具不能作为 retry/adjust 目标，原始 mode 为 `0` 也会按原值恢复。
 
 模型通过 `recover(action="rollback", checkpoint_id=...)` 请求恢复。`rollback_checkpoint` 是内部工具，不出现在 LLM schema 中，也拒绝模型直接调用；RecoveryRuntime 会使用 checkpoint 保存的规范化相对路径经过同一 PermissionGate 授权。恢复前重新计算当前文件的类型和 SHA-256，发现外部修改就拒绝写入并进入 `blocked`。普通文件使用同目录临时文件、原 mode 和 `os.replace` 原子恢复；absent tombstone 只在后镜像仍匹配时删除目标。
 
@@ -114,7 +114,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.19.1，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.19，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
