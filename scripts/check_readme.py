@@ -10,7 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 TUTORIALS = ROOT / "docs" / "tutorials"
-ENGLISH_TOPIC_ALLOWLIST = {"Trace & Replay"}
+# Add an entry only for an intentional, documented English-only topic.
+ENGLISH_TOPIC_ALLOWLIST: set[str] = set()
 
 
 def _plain_text(fragment: str) -> str:

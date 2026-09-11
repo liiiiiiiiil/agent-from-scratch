@@ -1,8 +1,8 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.21**（Trace & Replay 只读回放；含 v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.21**（任务轨迹回放；含 v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
 
-## v0.21 Trace & Replay（只读回放）
+## v0.21 任务轨迹回放（Trace & Replay，只读）
 
 `/trace` 回放当前进程、当前任务已经保存的结构化事实：Todo revision、generation、执行尝试、失败、恢复动作、验证证据和终态。`/trace 3` 只显示 generation 3。命令在 `run_task()` 之前拦截，不追加 user history，不调用 LLM、工具 handler 或 PermissionGate，也不修改 State、预算或 generation。
 

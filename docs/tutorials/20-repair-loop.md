@@ -1,6 +1,6 @@
 # 第 20 课：修复循环（Repair Loop，v0.20）
 
-上一课：[单文件检查点与回滚](19-checkpoint-rollback.md) · [教程总览](README.md) · 下一课：[Trace & Replay](21-trace-replay.md)
+上一课：[单文件检查点与回滚](19-checkpoint-rollback.md) · [教程总览](README.md) · 下一课：[任务轨迹回放](21-trace-replay.md)
 
 > 代码快照：`v0.20` · 相邻差异：`v0.19..v0.20` · 命令环境：Bash/zsh
 
