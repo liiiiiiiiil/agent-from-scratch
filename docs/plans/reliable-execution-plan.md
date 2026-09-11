@@ -1,7 +1,7 @@
 # 阶段六：Reliable Execution 实施计划
 
-> 状态：`v0.19` 检查点与回滚（Checkpoint / Rollback）已实现；`v0.20`–`v0.21` 规划中
-> 当前基线：`v0.19`（单文件检查点与回滚）
+> 状态：`v0.20` Repair Loop 已实现；`v0.21` Trace & Replay 规划中
+> 当前基线：`v0.20`（阶段化失败—诊断—恢复—验证循环）
 > 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 
@@ -213,7 +213,7 @@ RecoveryAction
 
 ### 5.3 `v0.19` 检查点与回滚（Checkpoint / Rollback）
 
-实现状态：已完成单文件检查点与回滚；本节中的 `v0.20` 及以后内容仍为路线规划。
+实现状态：已完成单文件检查点与回滚；v0.20 在此基础上补齐阶段化 Repair Loop，本节保留实现边界与验收依据。
 
 目标：为可追踪的文件修改提供有限、可审计的恢复能力。
 
@@ -238,7 +238,9 @@ failure
   -> continue, next failure, blocked, or failed
 ```
 
-该版本只复用阶段五已有的 LLM 回合和 Todo 工具，不创建第二个 planner。每个周期必须能回答：失败事实是什么、选择动作的理由是什么、动作执行结果是什么、验证证据是否属于当前 generation。任何已接受的恢复动作都必须进入新 generation；旧 generation 的验证证据不得复用于 `done` 判定。
+该版本只复用阶段五已有的 LLM 回合和 Todo 工具，不创建第二个 planner。实现冻结三个运行阶段：`idle`、`diagnosis_required` 和 `verification_required`。失败进入诊断阶段；诊断阶段只允许只读调查、`update_todo` 或独占 `recover`，并且 recover 只能引用当前活动 failure。被授权并激活的 `retry`、`adjust`、`rollback` 才消耗一个 repair cycle；初始失败、拒绝、权限拒绝和 `ask`/`block` 不消耗。恢复结果回灌后，下一工具回合必须是单个独立 verification；通过后才回到 idle，失败则产生新的 FailureEvent 并回到诊断阶段。agent loop 与 ToolExecutor 都执行同一准入协议，拒绝调用仍按原始顺序回灌对应 `role=tool` 结果。
+
+Structured State 的 `repair_loop` 保存阶段、活动 failure/recovery、周期已用/剩余量和要求的下一动作；压缩后的 critical state 与 completion Runtime Notice 同步这些字段。这样每个周期都能回答：失败事实是什么、选择动作的理由是什么、动作执行结果是什么、验证证据是否属于当前 generation。任何已接受的恢复动作都必须进入新 generation；旧 generation 的验证证据不得复用于 `done` 判定。
 
 ### 5.5 `v0.21` Trace & Replay
 
@@ -283,7 +285,7 @@ failure
 - [ ] 所有失败都能关联到执行尝试和 generation；没有仅靠自然语言字符串驱动的隐藏状态。
 - [ ] 每次恢复动作都受 PermissionGate 和计数预算约束，并开启新的 Execution Generation；旧 generation 的验证证据不可复用于 `done` 判定。
 - [x] 回滚只在 `v0.19` 及以后对明确检查点的副作用可用。
-- [ ] Repair Loop 能在成功、继续修复、阻塞和失败四种结果间正确收口。
+- [x] Repair Loop 能在成功、继续修复、阻塞和失败四种结果间正确收口。
 - [ ] v0.21 能用冻结的结构化数据回放至少一个真实失败—恢复案例，展示每个 generation 的状态转换与原始证据。
 - [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，运行时仍只有标准库。
 

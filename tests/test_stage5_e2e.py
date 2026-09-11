@@ -70,7 +70,7 @@ def test_stage5_plan_execute_replan_verify_e2e(monkeypatch, capsys):
             )
             registry = create_registry(state)
             policy = PermissionPolicy({name: ALLOW for name in (
-                "update_todo", "read_file", "edit_file", "run_shell",
+                "update_todo", "read_file", "edit_file", "run_shell", "recover",
             )})
             executor = ToolExecutor(
                 registry, gate=PermissionGate(policy), on_result=state.record_tool
@@ -94,8 +94,13 @@ def test_stage5_plan_execute_replan_verify_e2e(monkeypatch, capsys):
                     {"content": "修正 VALUE 为 42", "status": "in_progress"},
                     {"content": "运行验证", "status": "pending"},
                 ]}),
-                _tool_call("tc6", "edit_file", {
-                    "path": str(app), "old_string": "VALUE = 1", "new_string": "VALUE = 42",
+                _tool_call("tc6", "recover", {
+                    "action": "adjust", "caused_by_failure_id": "f-1",
+                    "reason": "verification shows VALUE must be 42",
+                    "requested_tool": "edit_file",
+                    "requested_arguments": {
+                        "path": str(app), "old_string": "VALUE = 1", "new_string": "VALUE = 42",
+                    },
                 }),
                 _tool_call("tc7", "run_shell", {
                     "command": 'python -c "import app; assert app.VALUE == 42"',

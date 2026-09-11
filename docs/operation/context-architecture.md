@@ -4,10 +4,10 @@
 
 ## 0. 心智模型：一句话版本
 
-**上下文不是一份存储，而是一个每轮重新计算 的视图**：
+**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入：模型看到的不是“最近一次文字说了什么”，而是当前是否必须诊断、恢复或独立验证。
 
 ```text
-view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道)
+view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
      + [Historical Summary]? + Task + 历史轮次(协议轨道)     —— 再过一遍预算闸门
 ```
 
@@ -57,12 +57,14 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 │        ├─ 协议轨迹：history += {role:tool}（完整结果原文）
 │        │     LLM 下一轮直接读；受预算约束，可能被截断/折叠
 │        │
-│        └─ 语义事实：on_result → state.record_tool（brief ≤200 字符）
+│        └─ 语义事实：结构化 ExecutionResult → state.record_execution_result（兼容回调仍可写入 record_tool）
 │              files_changed / errors / todos / 验证证据
 │              免疫裁剪，下一轮渲染进 [Structured State] 锚定事实
 │
 └──► 两条轨道在下一轮的 ① 重新汇合 —— 循环，直到纯文本收尾或轮次上限
 ```
+
+Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、Todo 或独占 `recover`；`verification_required` 要求下一回合只有一个独立 verification。上下文压缩只处理协议历史，不能删除 `repair_loop`、活动 failure/recovery、generation 或预算。
 
 ## 2. 关键机制一：双轨记录（本架构的核心取舍）
 
@@ -70,7 +72,7 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 
 | | 协议轨迹 `history` | 语义事实 `AgentState` |
 |---|---|---|
-| 写入者 | `agent_loop` 回灌 `role=tool` 消息 | `ToolExecutor.on_result → record_tool`（base.py:112） |
+| 写入者 | `agent_loop` 回灌 `role=tool` 消息 | 结构化 `ExecutionResult → AgentState.record_execution_result`；兼容入口可用 `on_result → record_tool` |
 | 内容 | 完整结果原文（命令输出、文件片段） | brief 截断 ≤200 字符 + 派生事实 |
 | 预算下的命运 | 可被截断、整轮删除、折叠进摘要 | **免疫裁剪**，每轮完整重渲染 |
 | 读出方式 | 作为历史轮次原文进入视图 | 渲染为 `[Structured State]`（context.py:312） |
@@ -140,7 +142,7 @@ window = CONTEXT_WINDOW
 2. `history` 只追加不修改；trim/compact 只改副本——任何一轮的视图都可从完整 history 重建。
 3. 每轮 tool results 全部回灌后才进下一轮（无 v0.10 的"半截状态"）。
 4. 语义事实免疫裁剪：不管协议历史被削成什么样，`[Structured State]` 每轮完整重渲染。
-5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒。
+5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒；v0.20 的阶段性 Notice 会明确指出下一步合法动作。
 6. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
 
 ## 6. 代码速查
@@ -152,4 +154,4 @@ window = CONTEXT_WINDOW
 | `[Structured State]` | `context.py:312 _render_state` ← `state.py:171 snapshot` | 每轮 |
 | `[Historical Summary]` | `context.py:360 compact` ← `agent.py:136 summarize_messages` | 压缩后增量 |
 | Task / 历史轮次 | `__main__.py:45`、`agent.py:236,304` 追加 | 事件驱动 |
-| 语义事实 | `tools/base.py:112 _notify_result` → `state.py:48 record_tool` | 每次工具执行 |
+| 语义事实 | `agent.py` 提交 `ExecutionResult` → `state.py record_execution_result` | 每次结构化工具执行 |

@@ -72,6 +72,12 @@ def test_edit_preconditions_are_typed_and_deterministic():
         assert state.snapshot()["current_generation_id"] == 1
         assert state.status == "running"
 
+        # v0.20 requires diagnosis/recovery before another possible effect;
+        # use a fresh task to exercise the file handler's second precondition.
+        state = AgentState()
+        state.begin_task("adjust edit second precondition")
+        registry = create_registry(state)
+        executor = _executor(state, registry, {"edit_file": ALLOW})
         multi = executor.execute_result(
             "edit_file",
             {"path": path, "old_string": "foo", "new_string": "bar"},
@@ -352,7 +358,11 @@ def test_recovery_quota_is_consumed_once_and_exhaustion_skips_authorization():
     assert target_authorizations == ["target"]
     assert calls == ["executed"]
     assert state.current_generation_id == generation + 1
-    assert state.status == "blocked"
+    # The repeated request is rejected while the successor generation awaits
+    # independent verification; a rejected request does not consume another
+    # repair cycle or silently block the task.
+    assert state.status == "running"
+    assert state.snapshot()["repair_loop"]["cycles_used"] == 1
     assert state.snapshot()["verification_required"]
 
 

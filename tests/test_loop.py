@@ -77,10 +77,12 @@ def test_possible_round_is_serial_and_mixed_verification_is_invalid():
     with patch("mini_agent.agent.call_llm", side_effect=responses):
         assert agent_loop(context, executor) == "done"
 
-    assert events == ["write_a", "write_b"]
+    # The invalid mixed verification opens diagnosis, so later possible
+    # effects in the same batch receive protocol results without running.
+    assert events == ["write_a"]
     snapshot = state.snapshot()
-    assert snapshot["current_generation_id"] == 2
-    assert [item["outcome"] for item in snapshot["attempts"]] == ["succeeded", "invalid", "succeeded"]
+    assert snapshot["current_generation_id"] == 1
+    assert [item["outcome"] for item in snapshot["attempts"]] == ["succeeded", "invalid", "invalid"]
     assert "不能与 possible effect" in context.history[3]["content"]
 
 

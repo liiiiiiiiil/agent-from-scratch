@@ -85,6 +85,7 @@ def _recovery_rejection_content(state, arguments, detail):
         arguments.get("requested_attempt"),
         arguments.get("requested_tool"),
         arguments.get("requested_arguments"),
+        arguments.get("checkpoint_id"),
     )
     payload = {
         "status": "rejected",
@@ -419,6 +420,25 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             index for index, (name, args) in enumerate(parsed_calls)
             if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
         }
+        repair_batch_errors = {}
+        if state is not None and hasattr(state, "repair_phase"):
+            repair_phase = state.repair_phase
+            recovery_indexes = [
+                index for index, (name, _) in enumerate(parsed_calls)
+                if name == "recover"
+            ]
+            if repair_phase == "diagnosis_required" and recovery_indexes and len(parsed_calls) != 1:
+                detail = "工具调用失败: diagnosis_required 阶段的 recover 必须独占一个工具回合"
+                repair_batch_errors = {index: detail for index in range(len(parsed_calls))}
+            elif repair_phase == "verification_required":
+                valid_single_verification = (
+                    len(parsed_calls) == 1
+                    and parsed_calls[0][0] == "run_shell"
+                    and parsed_calls[0][1].get("purpose", "execution") == "verification"
+                )
+                if not valid_single_verification:
+                    detail = "工具调用失败: verification_required 阶段下一工具回合只能是单个独立 verification"
+                    repair_batch_errors = {index: detail for index in range(len(parsed_calls))}
 
         def _run(index_tc):
             index, tc = index_tc
@@ -444,6 +464,20 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 return tool_call_id, text, invalid, invalid
 
             name, args = parsed_calls[index]
+            if index in repair_batch_errors:
+                text = repair_batch_errors[index]
+                if structured and state is not None and name == "recover":
+                    content = _recovery_rejection_content(state, args, text)
+                    invalid = ExecutionResult(
+                        name, args, "not_checked", False, "invalid", 0, "none",
+                        content, content[:200], error_kind="recovery_rejected",
+                    )
+                    return tool_call_id, content, None, invalid
+                invalid = ExecutionResult(
+                    name, args, "not_checked", False, "invalid", 0, "none",
+                    text, text[:200], error_kind="repair_phase_gate",
+                ) if structured else None
+                return tool_call_id, text, invalid, invalid
             if index in invalid_verifications:
                 text = "工具调用失败: verification 不能与 possible effect 处于同一回合"
                 invalid = ExecutionResult(
@@ -503,7 +537,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             for item in indexed_calls:
                 result = _run(item)
                 results.append(result)
-                if structured and state is not None and result[2] is not None and parsed_calls[item[0]][0] != "recover":
+                if (structured and state is not None and result[2] is not None
+                        and parsed_calls[item[0]][0] != "recover"):
                     state.record_execution_result(result[2])
         else:
             with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:

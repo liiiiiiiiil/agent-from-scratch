@@ -16,6 +16,7 @@ from mini_agent.config import (MAX_ATTEMPT_FINGERPRINTS, MAX_FAILURE_RETRIES,
 EffectClass = Literal["none", "possible"]
 AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid"]
 FailureCategory = Literal["protocol", "permission", "transient", "deterministic", "validation", "unknown"]
+RepairPhase = Literal["idle", "diagnosis_required", "verification_required"]
 
 
 class AttemptBudgetExceeded(ValueError):
@@ -160,6 +161,10 @@ class AgentState:
     _next_failure: int = field(default=1, init=False, repr=False)
     _fingerprint_counts: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     _repair_cycles: int = field(default=0, init=False, repr=False)
+    _reserved_repair_cycles: int = field(default=0, init=False, repr=False)
+    _repair_phase: RepairPhase = field(default="idle", init=False, repr=False)
+    _active_failure_id: str | None = field(default=None, init=False, repr=False)
+    _active_recovery_id: str | None = field(default=None, init=False, repr=False)
     _failure_retry_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _next_recovery: int = field(default=1, init=False, repr=False)
@@ -170,6 +175,64 @@ class AgentState:
     def current_generation_id(self) -> int:
         with self._lock:
             return self._verification_generation
+
+    @property
+    def repair_phase(self) -> RepairPhase:
+        with self._lock:
+            return self._repair_phase
+
+    @property
+    def active_failure_id(self) -> str | None:
+        with self._lock:
+            return self._active_failure_id
+
+    @property
+    def active_recovery_id(self) -> str | None:
+        with self._lock:
+            return self._active_recovery_id
+
+    def repair_gate(self, name: str, arguments: dict[str, Any],
+                    effect_class: EffectClass = "none",
+                    reservation: AttemptReservation | None = None) -> str | None:
+        """Return a phase-gate error before permission or handler admission.
+
+        A recovery target carries a reservation and is the one controlled
+        exception: it runs inside the recovery action even though activation
+        has already moved the task into the successor verification phase.
+        """
+        with self._lock:
+            if reservation is not None and reservation.recovery_id:
+                return None
+            if self._repair_phase == "diagnosis_required":
+                if name == "recover" or name == "update_todo":
+                    return None
+                if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
+                    return "工具调用拒绝: diagnosis_required 阶段必须先处理当前 failure，不能直接 verification"
+                if effect_class == "possible":
+                    return "工具调用拒绝: diagnosis_required 阶段只允许只读调查、update_todo 或独占 recover"
+            elif self._repair_phase == "verification_required":
+                if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
+                    return None
+                return "工具调用拒绝: verification_required 阶段下一工具回合只能是单个独立 verification"
+            return None
+
+    def _enter_diagnosis(self, failure_id: str) -> None:
+        self._repair_phase = "diagnosis_required"
+        self._active_failure_id = failure_id
+        self._active_recovery_id = None
+        self._verification_required = False
+
+    def _enter_verification(self, recovery_id: str | None = None) -> None:
+        self._repair_phase = "verification_required"
+        self._active_recovery_id = recovery_id
+        self._verification_required = True
+
+    def _clear_repair(self) -> None:
+        self._repair_phase = "idle"
+        self._active_failure_id = None
+        self._active_recovery_id = None
+        self._verification_required = False
+        self.recovery_notice = ""
 
     @property
     def execution_generations(self) -> list[ExecutionGeneration]:
@@ -255,6 +318,10 @@ class AgentState:
                     open_reason="possible_effect"))
                 self.verification_evidence.clear()
                 self._last_verified_generation = -1
+                # Ordinary mutations invalidate completion evidence, but only
+                # an accepted recovery action enters the strict repair
+                # verification phase.  Normal multi-step edits may continue
+                # before their final verification.
                 self._verification_required = True
             return AttemptReservation(
                 attempt_id, before, self._verification_generation,
@@ -273,8 +340,15 @@ class AgentState:
                 return None, "未知 failure"
             if self.status in ("failed", "blocked"):
                 return None, "任务已终态"
+            if caused_by_failure_id != self._active_failure_id:
+                return None, "recover 只能针对当前活动 failure"
             if action not in ("retry", "adjust", "ask", "block", "rollback"):
                 return None, "不支持的 action"
+            if self._reserved_repair_cycles:
+                return None, "已有恢复动作正在授权"
+            if action in ("retry", "adjust", "rollback") and self._repair_cycles >= MAX_REPAIR_CYCLES:
+                self._terminal("failed", "Repair cycle 预算已耗尽", caused_by_failure_id)
+                return None, "Repair cycle 预算已耗尽"
             if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
                 self._terminal("blocked", "恢复动作预算已耗尽", caused_by_failure_id)
                 return None, "恢复动作预算已耗尽"
@@ -337,11 +411,21 @@ class AgentState:
                 return self._reject_recovery(action, caused_by_failure_id, reason, "未知 failure") + (None,)
             if self.status in ("failed", "blocked"):
                 return self._reject_recovery(action, caused_by_failure_id, reason, "任务已终态") + (None,)
+            if caused_by_failure_id != self._active_failure_id:
+                return self._reject_recovery(action, caused_by_failure_id, reason,
+                                             "recover 只能针对当前活动 failure") + (None,)
             if action not in ("retry", "adjust", "ask", "block", "rollback"):
                 return self._reject_recovery(action, caused_by_failure_id, reason, "不支持的 action") + (None,)
+            if self._reserved_repair_cycles:
+                return self._reject_recovery(action, caused_by_failure_id, reason,
+                                             "已有恢复动作正在授权") + (None,)
             if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
                 self._terminal("blocked", "恢复动作预算已耗尽", caused_by_failure_id)
                 return self._reject_recovery(action, caused_by_failure_id, reason, "恢复动作预算已耗尽") + (None,)
+            if action in ("retry", "adjust", "rollback") and self._repair_cycles >= MAX_REPAIR_CYCLES:
+                self._terminal("failed", "Repair cycle 预算已耗尽", caused_by_failure_id)
+                return self._reject_recovery(action, caused_by_failure_id, reason,
+                                             "Repair cycle 预算已耗尽") + (None,)
             source_attempt = next((a for a in self.attempts if a.attempt_id == requested_attempt), None)
             if action == "rollback":
                 if requested_attempt is not None or requested_tool is not None or requested_arguments is not None:
@@ -398,6 +482,10 @@ class AgentState:
                 self._fingerprint_counts[fingerprint] = self._fingerprint_counts.get(fingerprint, 0) + 1
                 if action == "retry":
                     self._failure_retry_counts[caused_by_failure_id] = count + 1
+            if action in ("retry", "adjust", "rollback"):
+                # Reserve the task-wide cycle before authorization. A denied
+                # target releases it; activation converts it to used quota.
+                self._reserved_repair_cycles += 1
             rid = f"r-{self._next_recovery}"; self._next_recovery += 1
             action_record = RecoveryAction(rid, self._verification_generation, action, str(reason or "")[:500], caused_by_failure_id, "proposed",
                 requested_attempt, requested_tool,
@@ -439,6 +527,8 @@ class AgentState:
             self._fingerprint_counts[fingerprint] -= 1
         if current.action == "retry":
             self._failure_retry_counts[current.caused_by_failure_id] -= 1
+        if current.action in ("retry", "adjust", "rollback"):
+            self._reserved_repair_cycles -= 1
         rejected = RecoveryAction(**{**asdict(current), "status": "rejected"})
         self.recovery_actions[index] = rejected
         self.recovery_notice = f"Recovery {current.recovery_id} rejected: {detail}."
@@ -451,6 +541,9 @@ class AgentState:
         action = action_record.action
         caused_by_failure_id = action_record.caused_by_failure_id
         failure = next(f for f in self.failures if f.failure_id == caused_by_failure_id)
+        if action in ("retry", "adjust", "rollback"):
+            self._reserved_repair_cycles -= 1
+            self._repair_cycles += 1
         gid = self._verification_generation + 1
         self._verification_generation = gid
         self.verification_evidence.clear(); self._last_verified_generation = -1; self._verification_required = True
@@ -460,6 +553,8 @@ class AgentState:
         self.recovery_actions[index] = action_record
         self.generations.append(ExecutionGeneration(gid, opened_by_failure_id=caused_by_failure_id,
             opened_by_recovery_id=rid, open_reason="recovery"))
+        self._active_failure_id = caused_by_failure_id
+        self._enter_verification(rid)
         self.recovery_notice = f"Recovery {rid} reserved: {action}; verify generation {gid} independently."
         if action in ("ask", "block"):
             self.status = "blocked"
@@ -513,6 +608,25 @@ class AgentState:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
         with self._lock:
             self._ensure_generation()
+            # A phase-gate rejection is a protocol fact, not a new business
+            # failure. Keep an auditable attempt while preserving the active
+            # failure that diagnosis/recovery is currently addressing.
+            if result.error_kind == "repair_phase_gate":
+                attempt_id = f"a-{self._next_attempt}"
+                self._next_attempt += 1
+                generation_id = self._verification_generation
+                args = deepcopy(result.arguments)
+                attempt = ExecutionAttempt(
+                    attempt_id, generation_id, generation_id, result.tool,
+                    canonical_arguments_hash(args), redacted_arguments(args),
+                    result.outcome, result.duration_ms, result.effect_class,
+                    result.handler_admitted, result.permission,
+                    output_excerpt=result.output_excerpt,
+                    error_kind=result.error_kind,
+                )
+                self.attempts.append(attempt)
+                self._original_attempt_arguments[attempt_id] = deepcopy(args)
+                return attempt
             was_terminal = self.status in ("blocked", "failed")
             reservation = result.reservation
             if reservation is None:
@@ -547,7 +661,6 @@ class AgentState:
                 elif result.outcome == "invalid": category = "protocol"
                 elif is_verify:
                     category, retryable, phase = "validation", True, "verify"
-                    self._repair_cycles += 1
                 elif result.error_kind in ("edit_no_match", "edit_multiple_matches"):
                     category = "deterministic"
                 elif result.error_kind in ("rollback_conflict", "rollback_restore_failed"):
@@ -604,6 +717,7 @@ class AgentState:
                 self.failures.append(FailureEvent(failure_id, generation_id, phase, category,
                                                   retryable, attempt_id, affected))
                 self.errors.append(f"{result.tool}: {result.output_excerpt}")
+                self._enter_diagnosis(failure_id)
                 if not was_terminal:
                     self.recovery_notice = (f"Failure {failure_id} ({category}) requires diagnosis; "
                                             f"caused by {attempt_id} in generation {generation_id}.")
@@ -648,6 +762,15 @@ class AgentState:
                     self._terminal("blocked", "同一参数指纹尝试预算已耗尽", failure_id)
                 elif retryable and exhausted:
                     self._terminal("blocked", "同一参数指纹尝试预算已耗尽", failure_id)
+                if (self.status not in ("blocked", "failed")
+                        and self._repair_cycles >= MAX_REPAIR_CYCLES):
+                    # The current failure would require another executable
+                    # recovery action, but all repair cycles have already run.
+                    self._terminal("failed", "Repair cycle 预算已耗尽", failure_id)
+            elif is_verify and result.handler_admitted:
+                passed = result.outcome == "succeeded" and result.exit_code == 0
+                if passed:
+                    self._clear_repair()
             return attempt
 
     def _terminal(self, status: str, reason: str, failure_id: str) -> None:
@@ -677,7 +800,13 @@ class AgentState:
                     str(args_copy.get("command", "")), "passed" if passed else "failed",
                     code, str(brief), self._verification_generation))
                 self._last_verified_generation = self._verification_generation if passed else -1
-                self._verification_required = not passed
+                if passed:
+                    self._clear_repair()
+                else:
+                    # Legacy callback integrations do not create FailureEvent
+                    # records, so they cannot participate in the structured
+                    # Repair Loop. Retain the historical completion signal.
+                    self._verification_required = True
             if not ok: self.errors.append(f"{name}: {brief}")
 
     def begin_task(self, task: str) -> None:
@@ -687,8 +816,10 @@ class AgentState:
             self.verification_evidence.clear(); self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
             self._verification_generation = 0; self._last_verified_generation = -1
-            self._verification_required = False; self._next_attempt = 1; self._next_failure = 1
-            self._fingerprint_counts.clear(); self._repair_cycles = 0
+            self._verification_required = False; self._repair_phase = "idle"
+            self._active_failure_id = None; self._active_recovery_id = None
+            self._next_attempt = 1; self._next_failure = 1
+            self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()
@@ -717,7 +848,8 @@ class AgentState:
             if self.status in ("blocked", "failed"): return None
             missing = [t.content for t in self.todos if t.status != "completed"]
             needs_verify = self._verification_required
-            if not missing and not needs_verify:
+            needs_repair = self._repair_phase != "idle"
+            if not missing and not needs_verify and not needs_repair:
                 return None
             # Describe observable completion facts instead of counting
             # reminders. The marker changes when Todo state, tool
@@ -728,15 +860,33 @@ class AgentState:
                 len(self.verification_evidence),
                 self._verification_generation,
                 needs_verify,
+                self._repair_phase,
+                self._active_failure_id,
+                self._active_recovery_id,
+                self._repair_cycles,
+                len(self.failures),
+                len(self.recovery_actions),
             )
+            if self._repair_phase == "diagnosis_required":
+                message = (
+                    "检测到失败。请在下一条回复中先进行只读调查、更新 Todo，或独占调用 recover "
+                    "处理当前活动 failure；不要直接执行副作用或 verification。"
+                )
+            elif self._repair_phase == "verification_required":
+                message = "恢复动作已完成或存在待验证 generation。下一条回复只能独占调用 run_shell(purpose=verification)。"
+            else:
+                message = (
+                    "任务尚未满足完成条件。请在下一条回复中调用能推进任务的工具 "
+                    "（更新 Todo、执行调查/操作或运行验证）；确实无法继续时才说明具体阻塞原因。"
+                )
             return {
                 "unfinished_todos": missing,
                 "verification_required": needs_verify,
+                "repair_phase": self._repair_phase,
+                "active_failure_id": self._active_failure_id,
+                "active_recovery_id": self._active_recovery_id,
                 "progress_marker": progress_marker,
-                "message": (
-                    "任务尚未满足完成条件。请在下一条回复中调用能推进任务的工具 "
-                    "（更新 Todo、执行调查/操作或运行验证）；确实无法继续时才说明具体阻塞原因。"
-                ),
+                "message": message,
             }
 
     def update_todos(self, todos: list[dict[str, Any]]) -> None:
@@ -766,6 +916,20 @@ class AgentState:
                 "todos": [asdict(x) for x in self.todos],
                 "verification_evidence": [asdict(x) for x in self.verification_evidence],
                 "verification_required": self._verification_required,
+                "repair_loop": {
+                    "phase": self._repair_phase,
+                    "active_failure_id": self._active_failure_id,
+                    "active_recovery_id": self._active_recovery_id,
+                    "cycles_used": self._repair_cycles,
+                    "cycles_remaining": max(
+                        0, MAX_REPAIR_CYCLES - self._repair_cycles - self._reserved_repair_cycles
+                    ),
+                    "required_next_action": (
+                        "diagnose_or_recover" if self._repair_phase == "diagnosis_required"
+                        else "独立 verification" if self._repair_phase == "verification_required"
+                        else "continue"
+                    ),
+                },
                 "current_generation_id": self._verification_generation,
                 "generations": [asdict(x) for x in self.generations],
                 "attempts": [asdict(x) for x in self.attempts],
@@ -786,5 +950,8 @@ class AgentState:
                                 for (tool, arguments_hash), count in sorted(self._fingerprint_counts.items())
                             ],
                             "recovery_actions_remaining": max(0, MAX_RECOVERY_ACTIONS - len(self.recovery_actions)),
-                            "repair_cycles_remaining": max(0, MAX_REPAIR_CYCLES - self._repair_cycles)},
+                            "repair_cycles_remaining": max(
+                                0, MAX_REPAIR_CYCLES - self._repair_cycles - self._reserved_repair_cycles
+                            ),
+                            "repair_cycles_used": self._repair_cycles},
             }

@@ -1,6 +1,22 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.19**（检查点与回滚，Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.20**（Repair Loop 修复循环；含 v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+
+## v0.20 Repair Loop（修复循环）
+
+失败后的执行不能直接跳回普通写入。`AgentState.snapshot()["repair_loop"]` 显示当前阶段、活动 failure/recovery 和周期预算：
+
+| 阶段 | 允许的下一步 |
+|---|---|
+| `idle` | 正常调查、执行和 Todo 推进 |
+| `diagnosis_required` | 只读调查、`update_todo`，或独占调用 `recover` 处理当前 `active_failure_id` |
+| `verification_required` | 下一工具回合只能是单个 `run_shell(purpose="verification")` |
+
+agent loop 在回合级检查批量调用，ToolExecutor 在权限和 handler 前再次检查；不合规调用会收到协议错误且不会运行 handler、询问权限或推进 generation。恢复目标携带受 State 锁保护的 reservation，是 verification 阶段唯一的受控执行例外；恢复结果回灌后仍必须有独立 verification。
+
+`MAX_REPAIR_CYCLES` 默认是 3。初始失败、schema/参数拒绝、权限拒绝以及 `ask`/`block` 不消耗周期；`retry`、`adjust`、`rollback` 只有在目标授权并激活 successor generation 后才计入。验证失败会重新进入 `diagnosis_required`，而不是直接增加周期；需要第四次恢复时以明确的 `failed` 原因收口。恢复成功本身不代表任务完成，只有当前 generation 的验证通过且 Todo 完成，完成提醒才会消失。
+
+Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`、最近失败/恢复动作、generation 与预算。完成提醒会按阶段说明唯一合法的推进动作；相同 `progress_marker` 下再次只输出文本仍会进入既有 `blocked` 保护。
 
 ## v0.19 检查点与回滚（Checkpoint / Rollback）
 
@@ -114,7 +130,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.19，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.20，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -136,6 +152,7 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
+| `repair_loop` | 当前修复阶段、活动 failure/recovery、已使用/剩余 repair cycle 和要求的下一动作 |
 | `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |
 | `budgets` / `recovery_notice` | 失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 

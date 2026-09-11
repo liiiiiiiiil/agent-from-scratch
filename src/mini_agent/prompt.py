@@ -96,6 +96,8 @@ _CORE_RULES = """<rules>
 - update_todo 每次提交完整列表，最多一个 Todo 处于 in_progress；Todo 是计划意图，不代表任务已验证完成。
 - 复杂任务通常遵循 Plan -> Execute -> Observe -> Verify：先调查，再执行，每次修改后用 run_shell(purpose="verification") 独立验证；如果观察或验证发现问题，再 Replan（调整 Todo）并继续执行。所有 run_shell(purpose="execution") 都按可能修改环境处理，即使命令看起来只读；把最终测试或检查作为最后一个 verification 调用。
 - 验证失败时根据结果调整 Todo 并重试；不要把普通 execution 命令当作验证证据。
+- Repair Loop 约束：Structured State 的 repair_loop.phase 为 diagnosis_required 时，先只读调查、更新 Todo，或独占调用 recover 处理 active_failure_id；不得直接执行副作用或 verification。recover 只能引用当前活动 failure。
+- recover 成功后 phase 会变为 verification_required；下一工具回合只能独占调用 run_shell(purpose="verification")。恢复动作结果不是验证证据；验证失败会重新进入 diagnosis_required，并消耗的是实际激活的恢复周期预算。
 - 只有所有 Todo 完成且最近一次修改后验证通过，任务才算完成。阶段性调查/汇报后若仍未完成，下一条回复必须携带能推进任务的工具调用（更新 Todo、执行调查/操作或验证），不能只口头描述“接下来执行”；确实无法继续时才说明具体阻塞原因。
 
 # Safety

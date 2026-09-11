@@ -361,6 +361,16 @@ class ContextManager:
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
+        repair_loop = snapshot.get("repair_loop", {})
+        if repair_loop and repair_loop.get("phase") != "idle":
+            base_lines.append(
+                "Repair loop: "
+                f"phase={repair_loop.get('phase', '?')}; "
+                f"active_failure={repair_loop.get('active_failure_id') or '-'}; "
+                f"active_recovery={repair_loop.get('active_recovery_id') or '-'}; "
+                f"cycles={repair_loop.get('cycles_used', '?')}/{repair_loop.get('cycles_used', 0) + repair_loop.get('cycles_remaining', 0)}; "
+                f"next={repair_loop.get('required_next_action', '?')}"
+            )
 
         optional_lines = []
         if snapshot["errors"]:
@@ -469,6 +479,8 @@ class ContextManager:
                 ("Recovery notice: " + bounded(snapshot["recovery_notice"], 350)
                  if snapshot.get("recovery_notice") else None, 350),
                 ("Verification required: true" if snapshot.get("verification_required") else None, 100),
+                ("Repair loop: " + bounded(str(repair_loop), 600)
+                 if repair_loop and repair_loop.get("phase") != "idle" else None, 600),
                 ("Blocking reason: " + bounded(snapshot["terminal_reason"], 350)
                  if snapshot.get("terminal_reason") else None, 350),
             ):
@@ -483,6 +495,8 @@ class ContextManager:
                 "[Structured State]",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
+            if repair_loop and repair_loop.get("phase") != "idle":
+                compact_lines.append("Repair loop: " + bounded(str(repair_loop), 800))
             if checkpoint_state_line is not None:
                 compact_lines.append(bounded(checkpoint_state_line, 1800))
             if rollback_state_line is not None:

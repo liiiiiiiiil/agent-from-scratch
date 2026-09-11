@@ -31,6 +31,7 @@ EXPECTED = {
     "17-failure-model.md": ("v0.17", "v0.16..v0.17"),
     "18-recovery-policy.md": ("v0.18", "v0.17..v0.18"),
     "19-checkpoint-rollback.md": ("v0.19", "v0.18.1..v0.19"),
+    "20-repair-loop.md": ("v0.20", "v0.19..v0.20"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

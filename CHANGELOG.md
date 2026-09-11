@@ -5,6 +5,13 @@
 - Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
 - Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
 
+## [v0.20.0] - Repair Loop
+
+- Added explicit `idle`, `diagnosis_required`, and `verification_required` repair phases with active failure/recovery references in Structured State.
+- Added bounded repair-cycle accounting: only an authorized and activated `retry`, `adjust`, or `rollback` consumes a cycle; rejected actions and the initial failure do not.
+- Enforced diagnosis and post-recovery verification admission in both the agent loop and ToolExecutor while preserving one `role=tool` result per model call.
+- Added independent post-recovery verification requirements, critical-state rendering, Runtime Notice guidance, and v0.20 Repair Loop tests/tutorial coverage.
+
 ## [v0.19.0] - Checkpoint / Rollback
 
 - Added task-local single-file checkpoints for admitted `write_file` and `edit_file` calls.

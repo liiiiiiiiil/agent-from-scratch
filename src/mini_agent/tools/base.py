@@ -204,6 +204,7 @@ class ToolExecutor:
             arguments.get("reason", ""),
             str(detail), arguments.get("requested_attempt"),
             arguments.get("requested_tool"), arguments.get("requested_arguments"),
+            arguments.get("checkpoint_id"),
         )
         return json.dumps({
             "status": "rejected", "recovery_id": record.recovery_id,
@@ -277,6 +278,24 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
+        if state is not None and hasattr(state, "repair_gate"):
+            phase_error = state.repair_gate(
+                name, normalized, effect_class, reservation=reservation,
+            )
+            if phase_error:
+                if name == "recover" and hasattr(state, "reject_recovery"):
+                    rejection = self._record_recovery_rejection(state, normalized, phase_error)
+                    return ExecutionResult(
+                        name, normalized, "not_checked", False, "invalid",
+                        int((monotonic() - started) * 1000), effect_class,
+                        rejection or phase_error, _brief(rejection or phase_error),
+                        error_kind="recovery_rejected",
+                    )
+                return ExecutionResult(
+                    name, normalized, "not_checked", False, "invalid", 0,
+                    effect_class, phase_error, _brief(phase_error),
+                    error_kind="repair_phase_gate",
+                )
         denied = None if permission_already_checked else self.gate.guard(name, normalized)
         if denied:
             if name == "recover":
