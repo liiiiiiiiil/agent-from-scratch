@@ -1,16 +1,16 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.19**（Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.19**（检查点与回滚，Checkpoint / Rollback；含 v0.18.1 Recovery Policy 修复）。
 
-## v0.19 Checkpoint / Rollback
+## v0.19 检查点与回滚（Checkpoint / Rollback）
 
-`write_file` 和 `edit_file` 在权限放行、attempt/generation 预留后，会为单个工作区内普通文件保存前镜像。前镜像最多 `MAX_CHECKPOINT_BYTES`（默认 1 MiB），不存在的文件记录为 `absent` tombstone；符号链接、工作区外路径、目录/特殊文件、无效父目录和读取失败只会让 checkpoint 变为 `unavailable`，不会改变原文件工具行为。
+`write_file` 和 `edit_file` 在权限放行、attempt/generation 预留后，会为单个工作区内普通文件保存前镜像。前镜像最多 `MAX_CHECKPOINT_BYTES`（默认 1 MiB），不存在的文件记录为 `absent` tombstone；符号链接、工作区外路径、目录/特殊文件、无效父目录和读取失败只会让检查点变为 `unavailable`，不会改变原文件工具行为。
 
-文件工具结果和 critical Structured State 会保留 checkpoint ID、相对路径、attempt、generation、状态和哈希；上下文压缩或超长状态降级后仍保留这些恢复元数据。若获准的文件 handler 抛错但前后镜像明确，任务保持可恢复并提示 rollback；前后镜像不可用时才按未知副作用阻塞。internal 工具不能作为 retry/adjust 目标，原始 mode 为 `0` 也会按原值恢复。
+文件工具结果和 critical Structured State 会保留检查点 ID、相对路径、attempt、generation、状态和哈希；上下文压缩或超长状态降级后仍保留这些恢复元数据。若获准的文件 handler 抛错但前后镜像明确，任务保持可恢复并提示回滚；前后镜像不可用时才按未知副作用阻塞。internal 工具不能作为 retry/adjust 目标，原始 mode 为 `0` 也会按原值恢复。
 
-模型通过 `recover(action="rollback", checkpoint_id=...)` 请求恢复。`rollback_checkpoint` 是内部工具，不出现在 LLM schema 中，也拒绝模型直接调用；RecoveryRuntime 会使用 checkpoint 保存的规范化相对路径经过同一 PermissionGate 授权。恢复前重新计算当前文件的类型和 SHA-256，发现外部修改就拒绝写入并进入 `blocked`。普通文件使用同目录临时文件、原 mode 和 `os.replace` 原子恢复；absent tombstone 只在后镜像仍匹配时删除目标。
+模型通过 `recover(action="rollback", checkpoint_id=...)` 请求恢复。`rollback_checkpoint` 是内部工具，不出现在 LLM schema 中，也拒绝模型直接调用；RecoveryRuntime 会使用检查点保存的规范化相对路径经过同一 PermissionGate 授权。恢复前重新计算当前文件的类型和 SHA-256，发现外部修改就拒绝写入并进入 `blocked`。普通文件使用同目录临时文件、原 mode 和 `os.replace` 原子恢复；absent tombstone 只在后镜像仍匹配时删除目标。
 
-恢复成功只证明恢复操作本身完成：它会打开新的 generation、清除旧 verification evidence，并要求下一轮独立 verification。checkpoint 元数据保留在 Structured State 中，但不包含前镜像内容或绝对路径；`/reset` 和 `/new` 会清除本任务全部 checkpoint 及私有字节。
+恢复成功只证明恢复操作本身完成：它会打开新的 generation、清除旧 verification evidence，并要求下一轮独立 verification。检查点元数据保留在 Structured State 中，但不包含前镜像内容或绝对路径；`/reset` 和 `/new` 会清除本任务全部检查点及私有字节。
 
 配置项：
 
@@ -136,7 +136,7 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
-| `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可 rollback 的 `ready` checkpoint，不含文件内容 |
+| `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |
 | `budgets` / `recovery_notice` | 失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
@@ -194,7 +194,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `list_dir` | `path?: str` | allow | 列出目录内容，目录加 `/` 后缀，上限 200 条 |
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
-| `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件 checkpoint |
+| `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件检查点 |
 
 ### 3.6 权限交互
 

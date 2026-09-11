@@ -1,7 +1,7 @@
 # 阶段六：Reliable Execution 实施计划
 
-> 状态：`v0.19` Checkpoint / Rollback 已实现；`v0.20`–`v0.21` 规划中
-> 当前基线：`v0.19`（单文件 Checkpoint / Rollback）
+> 状态：`v0.19` 检查点与回滚（Checkpoint / Rollback）已实现；`v0.20`–`v0.21` 规划中
+> 当前基线：`v0.19`（单文件检查点与回滚）
 > 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 
@@ -35,7 +35,7 @@ Execute
 | 正常执行 | 调用工具并记录事实 | 失败后的动作选择与预算控制 |
 | 验证 | 记录当前 generation 的完成证据 | 验证失败后驱动诊断、修复和再次验证 |
 | 重新规划 | 模型维护完整计划 | 不新增独立 planner；通过正常模型回合触发计划调整 |
-| 回滚 | 不提供 | `v0.19` 起提供有边界的 checkpoint/rollback |
+| 回滚 | 不提供 | `v0.19` 起提供有边界的检查点与回滚 |
 | 可靠性验收 | 不提供失败恢复的因果回放 | `v0.21` 只读回放已有执行事实与证据 |
 
 ## 2. 范围与非目标
@@ -47,7 +47,7 @@ Execute
 - 标准化失败分类、可恢复性和阻塞/失败收口规则
 - 对重试和恢复动作施加计数预算
 - 支持 `retry`、`adjust`、`ask`、`block` 四类基础恢复动作
-- 在明确边界内为文件修改建立 checkpoint 并回滚
+- 在明确边界内为文件修改建立检查点并回滚
 - 将诊断、修复、验证串成有上限的 Repair Loop
 - 按 generation 查询和回放已有的失败、恢复与验证证据，以验收可靠性约束
 
@@ -198,7 +198,7 @@ RecoveryAction
 
 ### 5.2 `v0.18` Recovery Policy
 
-目标：在不提供 rollback 的前提下，支持有限且可解释的恢复选择。
+目标：在不提供回滚的前提下，支持有限且可解释的恢复选择。
 
 动作集合只有：`retry`、`adjust`、`ask`、`block`。
 
@@ -211,18 +211,18 @@ RecoveryAction
 
 `v0.18` 明确不接受 `rollback` 作为 action 值。验证失败且模型判断必须撤销已有副作用时，系统只能记录原因并进入 `blocked`，不能模拟回滚成功。
 
-### 5.3 `v0.19` Checkpoint / Rollback
+### 5.3 `v0.19` 检查点与回滚（Checkpoint / Rollback）
 
-实现状态：已完成单文件 checkpoint/rollback；本节中的 `v0.20` 及以后内容仍为路线规划。
+实现状态：已完成单文件检查点与回滚；本节中的 `v0.20` 及以后内容仍为路线规划。
 
 目标：为可追踪的文件修改提供有限、可审计的恢复能力。
 
-- checkpoint 的作用域固定为**一次成功或失败的单文件 `write_file`/`edit_file` 调用**，不尝试提供多文件事务。创建 checkpoint 时在 handler 前捕获同一真实路径的前镜像：规范化后的工作区内相对路径、`absent | regular-file` 类型、原始字节、mode、前镜像 SHA-256、创建 generation 与 attempt ID。路径解析到工作区外、符号链接、非普通文件、超过 `MAX_CHECKPOINT_BYTES` 的文件一律不支持 checkpoint，调用仍可执行但不可 rollback。
-- 每个 checkpoint 只绑定一个文件和一次写入；写入结束后记录预期的后镜像 SHA-256。原文件不存在时以 `absent` tombstone 表示，rollback 的目标是删除这次创建的文件。
-- `v0.19` 将 `rollback` 加入 `recover` action schema，且该 action 必须引用一个 checkpoint ID。Runtime 据此调用不直接暴露给模型的 `rollback_checkpoint` 工具；该工具仍必须经 PermissionGate 按目标路径授权，模型不能提供替换内容。执行前必须验证当前文件类型和 digest 仍等于该 checkpoint 的后镜像，否则判为外部改变并拒绝写入。
-- 恢复使用同目录临时文件加原子 replace；对于 `absent` tombstone，只能删除 digest 仍匹配后镜像的普通文件。restore 的任一步骤失败都记录为副作用未知、保留 checkpoint，并进入 `blocked`，不能声称已经回滚。
-- rollback 仅对上述 checkpoint 文件承诺恢复；任意 shell、网络或外部服务副作用不承诺可回滚。每次 rollback 都是 `possible` 调用：在 handler 前预留新 generation、清除旧验证证据，并要求下一 LLM 回合的独立 Verify。
-- checkpoint 缺失、文件已被外部改变或副作用范围未知时，动作结果为失败并按 `blocked` / `failed` 规则收口。
+- 检查点的作用域固定为**一次成功或失败的单文件 `write_file`/`edit_file` 调用**，不尝试提供多文件事务。创建检查点时在 handler 前捕获同一真实路径的前镜像：规范化后的工作区内相对路径、`absent | regular-file` 类型、原始字节、mode、前镜像 SHA-256、创建 generation 与 attempt ID。路径解析到工作区外、符号链接、非普通文件、超过 `MAX_CHECKPOINT_BYTES` 的文件一律不支持检查点，调用仍可执行但不可回滚。
+- 每个检查点只绑定一个文件和一次写入；写入结束后记录预期的后镜像 SHA-256。原文件不存在时以 `absent` tombstone 表示，回滚的目标是删除这次创建的文件。
+- `v0.19` 将 `rollback` 加入 `recover` action schema，且该 action 必须引用一个检查点 ID。Runtime 据此调用不直接暴露给模型的 `rollback_checkpoint` 工具；该工具仍必须经 PermissionGate 按目标路径授权，模型不能提供替换内容。执行前必须验证当前文件类型和 digest 仍等于该检查点的后镜像，否则判为外部改变并拒绝写入。
+- 恢复使用同目录临时文件加原子 replace；对于 `absent` tombstone，只能删除 digest 仍匹配后镜像的普通文件。restore 的任一步骤失败都记录为副作用未知、保留检查点，并进入 `blocked`，不能声称已经回滚。
+- 回滚仅对上述检查点文件承诺恢复；任意 shell、网络或外部服务副作用不承诺可回滚。每次回滚都是 `possible` 调用：在 handler 前预留新 generation、清除旧验证证据，并要求下一 LLM 回合的独立 Verify。
+- 检查点缺失、文件已被外部改变或副作用范围未知时，动作结果为失败并按 `blocked` / `failed` 规则收口。
 
 ### 5.4 `v0.20` Repair Loop
 
@@ -248,7 +248,7 @@ failure
 
 回放视图按 generation 顺序呈现状态转换，并以 schema 中冻结的因果链接连接每条记录到其触发的 attempt 或 failure。每个节点必须能显示原始、已脱敏的执行/验证证据及其来源，且明确标出证据所属 generation；终态必须显示为 `continue`、`done`、`blocked` 或 `failed` 及其最后依据。
 
-验收重点：对 `v0.17`–`v0.20` 产生的至少一次真实失败—恢复案例，能够完整回放每个 generation 的状态转换，以及每个分类、诊断、恢复和终态所依据的原始证据。该案例应能直接用于核验 `v0.18` 的恢复策略与预算、`v0.19` 的 rollback 边界和 `v0.20` 的验证证据隔离是否按预期生效。
+验收重点：对 `v0.17`–`v0.20` 产生的至少一次真实失败—恢复案例，能够完整回放每个 generation 的状态转换，以及每个分类、诊断、恢复和终态所依据的原始证据。该案例应能直接用于核验 `v0.18` 的恢复策略与预算、`v0.19` 的回滚边界和 `v0.20` 的验证证据隔离是否按预期生效。
 
 ## 6. 测试与验收
 
@@ -264,7 +264,7 @@ failure
 - `RecoveryAction.result_attempt` 不会被当作 Verify 证据；验证失败仍保持 `verification_required`。
 - `blocked` / `failed` 判定表覆盖每种输入，状态转换可重复测试。
 - `v0.18` 的 action schema 拒绝 `rollback`。
-- checkpoint 覆盖既有文件、新建文件、外部修改、符号链接/工作区外路径、大小上限和 restore 中断；失败恢复不会把任务表述为已回滚。
+- 检查点覆盖既有文件、新建文件、外部修改、符号链接/工作区外路径、大小上限和 restore 中断；失败恢复不会把任务表述为已回滚。
 - Trace & Replay 能仅依赖冻结 schema 的 generation 与因果链接重建一条失败—恢复—验证链；缺失链接或跨 generation 复用验证证据会被明确标为不可验收，而不是由展示层猜测补全。
 
 ### 6.2 阶段级 E2E 场景
@@ -273,7 +273,7 @@ failure
 2. 参数错误，模型调整参数后成功。
 3. 修改后测试失败，模型根据输出二次修复并重新验证通过。
 4. 权限拒绝或连续失败，最终以明确原因进入 `blocked` 或 `failed`，没有死循环。
-5. `v0.19` 中单文件 checkpoint 回滚后，旧验证证据失效；外部修改或 restore 中断时进入 blocked；新验证通过才能继续。
+5. `v0.19` 中单文件检查点回滚后，旧验证证据失效；外部修改或 restore 中断时进入 blocked；新验证通过才能继续。
 6. 至少一次上下文压缩后，generation、失败事件、剩余预算和 recovery notice 仍然准确。
 7. 对一次真实失败—恢复案例，按 generation 回放计划、attempt、failure、诊断、recovery、验证证据和终态；每一状态转换都能定位其原始、已脱敏证据与因果前驱。
 
@@ -282,7 +282,7 @@ failure
 - [ ] `v0.17`–`v0.21` 各有独立教程、变更记录和可运行测试。
 - [ ] 所有失败都能关联到执行尝试和 generation；没有仅靠自然语言字符串驱动的隐藏状态。
 - [ ] 每次恢复动作都受 PermissionGate 和计数预算约束，并开启新的 Execution Generation；旧 generation 的验证证据不可复用于 `done` 判定。
-- [x] rollback 只在 `v0.19` 及以后对明确 checkpoint 的副作用可用。
+- [x] 回滚只在 `v0.19` 及以后对明确检查点的副作用可用。
 - [ ] Repair Loop 能在成功、继续修复、阻塞和失败四种结果间正确收口。
 - [ ] v0.21 能用冻结的结构化数据回放至少一个真实失败—恢复案例，展示每个 generation 的状态转换与原始证据。
 - [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，运行时仍只有标准库。

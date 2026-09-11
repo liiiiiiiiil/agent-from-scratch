@@ -1,6 +1,6 @@
 # 第 18 课：受限恢复策略（Recovery Policy，v0.18）
 
-上一课：[失败模型](17-failure-model.md) · [教程总览](README.md) · 下一课：[单文件 Checkpoint / Rollback](19-checkpoint-rollback.md)
+上一课：[失败模型](17-failure-model.md) · [教程总览](README.md) · 下一课：[单文件检查点与回滚（Checkpoint / Rollback）](19-checkpoint-rollback.md)
 
 > 代码快照：`v0.18` · 相邻差异：`v0.17..v0.18` · 命令环境：Bash/zsh
 
@@ -163,7 +163,7 @@ retry/adjust 复用该预留 generation 创建 ExecutionAttempt；ask/block 虽�
 - schema、预算或权限拒绝的恢复不打开 generation，但仍记录拒绝事实。
 - hash 只用于关联和计数，脱敏摘要只用于展示；两者都不是授权凭证。
 - recover 与 possible effect 同轮时按模型顺序串行提交；verification 不得与副作用同轮，恢复后必须下一轮验证。
-- rollback 明确拒绝。v0.18 没有 checkpoint，不承诺撤销文件、shell、网络或未知副作用，也不提供跨进程持久化。
+- rollback 明确拒绝。v0.18 没有检查点，不承诺撤销文件、shell、网络或未知副作用，也不提供跨进程持久化。
 - ask 和 block 都是 blocked；前者等待外部条件，后者表示策略停止。
 - 运行中的 Structured State 也会展示 recovery notice、最近三条失败与恢复动作、失败对应的工具/attempt/generation/分类/可重试性，以及 hash 形式的剩余预算；失败调用不会再被标作“已完成，不要重复”。裁剪或压缩后这些字段仍从 State 快照重建。
 - 一旦状态进入 `blocked` 或 `failed`，调度和 Executor 都拒绝后续 handler 与权限询问。批次中剩余的每个 tool call 仍会逐一得到 `task_terminal` 结果并全部回灌；终态原因不会被后续记录改写。
@@ -206,7 +206,7 @@ RecoveryRuntime.recover() 的顺序是：检查 reason 与 rollback；adjust 校
 
 v0.18 将失败后的选择限制为精确重试、显式调参、等待外部条件或保守停止。它不撤销副作用，也不把恢复 attempt 当作完成证据；每个已接受动作都要求当前 generation 的独立验证。
 
-下一课将讨论 checkpoint 与有边界的 rollback：只有保存明确文件前镜像的场景才可能恢复内容，shell 和外部副作用仍不承诺可回滚。
+下一课将讨论检查点与有边界的回滚：只有保存明确文件前镜像的场景才可能恢复内容，shell 和外部副作用仍不承诺可回滚。
 
 - [recovery.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/recovery.py)
 - [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.18.1/src/mini_agent/state.py)
@@ -326,7 +326,7 @@ git diff v0.18..v0.18.1 -- src/mini_agent/recovery.py src/mini_agent/state.py sr
 
 运行一次 `edit_file` 无匹配场景时，应观察到 `error_kind=edit_no_match`、failure category 为 `deterministic`、文件内容不变，任务仍可继续。若改为让一个已获准的 possible-effect handler 抛出普通异常，则应观察到 category 为 `unknown`、任务进入 `blocked`，同批后续调用只收到 `task_terminal`，不会进入 handler。
 
-v0.18.1 仍然不提供 checkpoint、rollback、自动 repair 调度或 trace replay；这些属于后续版本。补丁只让 v0.18 已经声明的恢复协议在拒绝、预算、权限、异常与终态路径上保持一致。
+v0.18.1 仍然不提供检查点、回滚、自动 repair 调度或 trace replay；这些属于后续版本。补丁只让 v0.18 已经声明的恢复协议在拒绝、预算、权限、异常与终态路径上保持一致。
 
 补丁固定源码：
 
