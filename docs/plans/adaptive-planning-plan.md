@@ -9,12 +9,12 @@
 
 阶段五已经让模型用 Todo 维护动态工作清单，阶段六又让失败、恢复、验证和终态成为可审计的运行时事实。但现有 Todo 仍主要回答“接下来做什么”：它没有稳定步骤 ID、依赖、步骤完成标准和计划修订原因，也没有由 Runtime 强制的只读规划边界。当新证据证明原方案不再成立时，模型可以重写 Todo，却无法结构化说明哪部分计划被保留、替换或取消，以及为什么需要改变方案。
 
-阶段七解决的是更高一层的问题：**先基于只读调查提交可验证计划；执行中出现足以推翻原方案的新事实时，显式触发重规划并形成新的不可变修订；最后能够回放从触发证据、计划变化到执行和验证的完整因果链。**
+阶段七解决的是更高一层的问题：**先基于只读调查提交可验证计划；执行中出现足以推翻原方案的新事实时，显式触发重规划并形成新的不可变修订；当普通调查、执行或重规划没有产生新事实和任务进展时及时收口；最后能够回放从触发证据、计划变化到执行和验证的完整因果链。**
 
 阶段七的设计原则是：
 
 ```text
-明确目标 + 只读调查 + 可验证计划 + 证据驱动修订 + 有界重规划 + 可回放验收
+明确目标 + 只读调查 + 可验证计划 + 证据驱动修订 + 有界推进 + 可回放验收
 ```
 
 目标流程：
@@ -54,6 +54,7 @@ Task
 - 提供强制只读的 `--plan` 模式，以及计划提交后的用户批准、驳回和继续调查交接
 - 根据明确的失败或观察事实创建 `ReplanTrigger`，再提交引用该触发器的新计划修订
 - 对计划修订次数和无进展重规划施加稳定计数预算
+- 对 Direct、Explore、Execute 和 Replan 共用的 Agent Loop 增加确定性的停滞检测，在连续工具回合既无任务进展也无新有效事实时提醒并有界收口
 - 将计划修订、阶段转换和批准记录接入阶段六的 Trace & Replay
 - 保留简单任务无需建计划的最短路径
 
@@ -62,6 +63,7 @@ Task
 - 不引入独立 Planner Agent、Explore Agent、Reviewer Agent 或多 agent 协议
 - 不让 Runtime 从自然语言任务中推断“唯一正确”的计划、业务约束或成功标准
 - 不做候选计划树搜索、自我打分、投票或自动选择最优方案
+- 不调用额外 LLM 或 Agent 判断两个动作、两段输出是否“语义等价”，也不尝试评价调查事实的业务价值
 - 不让计划声明改变工具的 `effect_class`，也不让模型把有副作用工具声明为只读
 - 不把计划批准视为工具授权；执行时仍逐次经过 `PermissionGate`
 - 不因进入新计划修订而清除 FailureEvent、RecoveryAction、verification history 或旧 PlanRevision
@@ -167,7 +169,31 @@ Runtime 根据相邻 revision 计算 `retained`、`added`、`cancelled` 和 `rep
 
 用户任务原文、项目级指令和 PermissionGate 始终高于模型提交的 Plan Contract。`constraints` 只是模型对已知约束的工作摘要：遗漏某条规则不代表该规则失效，写入冲突内容也不能覆盖受保护指令。
 
-## 4. 状态模型（`v0.22` 冻结的最小 schema）
+### D10：通用停滞检测是 Agent Loop 的确定性护栏
+
+`MAX_REPLAN_REVISIONS` 和 `MAX_NO_PROGRESS_REPLANS` 只约束计划修订，不能把普通 Agent Loop 从“调用成功但原地打转”中收口。阶段七在现有单 Agent loop 中增加一个轻量、任务内的 `LoopStagnationState`；它不是新的 planner、phase 或失败恢复子系统，也不调用模型评价自己的进展。
+
+检测单位是一个完整工具回合：assistant 一次回复中的全部 `tool_calls` 都按既有规则执行或拒绝、写入 State，并回灌对应 `role=tool` 结果后，Runtime 才观察这一回合。这样检测不会破坏批次顺序、并发只读提交顺序或“每个 call 都有结果”的协议。无 `tool_calls` 的阶段性文本继续由现有 completion reminder 处理，不建立第二套文本回复循环规则。
+
+Runtime 使用三类确定性信号：
+
+- **动作指纹**：复用阶段六的 canonical JSON 和 SHA-256，按模型顺序组成 `(tool, arguments_hash)` 回合指纹。这里的“等价动作”只指工具名和校验后参数完全相同；不通过改写 shell 文本、路径或自然语言参数猜测语义等价。
+- **持久进展标记**：只包含会改变任务含义或可完成性的事实，例如 Plan Contract 的结构差异、步骤状态、planning / repair phase、active trigger、用户决定、文件集合变化和当前 generation 的验证结论。attempt 数量、tool history 长度、自动分配 ID、generation 自增、预算消耗和无结构差异的 revision 都不算进展，避免“制造记录”绕过检测。
+- **有效新事实**：已通过 phase gate、PermissionGate 和 handler 且 outcome 为 `succeeded` 的 `effect_class=none` 调查调用，其工具结果去除 attempt ID、耗时等易变展示字段后，以稳定摘要计算 hash，并且该 hash 在当前进展 epoch 中首次出现；只保存 hash，不把完整输出复制进 State。`begin_plan`、`commit_plan`、`update_plan_progress`、`request_replan`、`recover` 等状态控制工具以及 verification 不走这条“调查事实”捷径，它们只能通过持久进展标记证明推进。重复读取同一内容、重复得到同一搜索结果、schema / phase / permission 拒绝和重复错误都不算新事实。成功的 `possible` 调用不伪装成调查事实，但一个此前未执行过的动作指纹可在当前 epoch 中记作一次候选推进；相同指纹的后续成功不会再次记作推进。
+
+现有 `completion_reminder.progress_marker` 不能直接复用：它为“未满足完成条件却输出最终文本”的兼容提醒服务，包含 tool history 长度、generation 等机械变化；停滞检测必须使用上述更窄的持久进展标记，否则每次重复调用都会因新记录而错误清零。
+
+持久进展标记发生变化时开启新的 progress epoch，并清零停滞计数；epoch 内首次出现的只读事实或执行动作也会清零当前连续计数，但其 hash 继续保留到下一次持久进展，防止在两组旧结果之间交替即可规避检测。若一个完整工具回合既没有改变持久进展标记，也没有产生 epoch 内首次出现的有效事实或动作，则 `consecutive_no_progress_rounds += 1`。
+
+唯一新增的行为上限是 `MAX_STAGNANT_ROUNDS`，默认值为 `3`，配置必须大于 `1`：
+
+1. 达到上限前一回合时，Runtime 通过受保护的 Runtime Notice 显示停滞类型、连续回合数和当前 phase 下合法的脱离方式，例如改变调查方向、`commit_plan`、更新步骤进度、引用真实触发事实 `request_replan`，或明确说明外部阻塞。
+2. 下一回合仍无进展时，State 进入 `blocked`，`terminal_reason` 记录 `repeated_action`、`no_new_observation`、`explore_without_commit` 或 `execute_without_progress` 及相关脱敏指纹；停滞本身不伪造 `FailureEvent`，因为工具未必失败。
+3. 终态前已产生的全部 tool result 必须先回灌 history；随后 loop 直接返回明确的 blocked 结果，不再让模型用另一次调用覆盖终态。
+
+`LoopStagnationState` 只保存计数、hash、告警和最后原因，并进入 Structured State 与 compaction 的关键快照；hash 集合必须有固定内存上限，且只向模型渲染计数和最近的脱敏短指纹。Planning gate 与 Repair gate 始终优先，停滞提醒不能放宽它们的下一动作限制。`MAX_ITERATIONS` 继续作为全局最终保险，但不替代更早、可解释的停滞收口。
+
+## 4. 状态模型（Plan core 于 `v0.22` 冻结；停滞护栏于 `v0.24` 追加）
 
 ```text
 PlanStep
@@ -225,6 +251,15 @@ PlanningState
 - active_trigger_id: optional
 - replans_used
 - replans_remaining
+
+LoopStagnationState
+- progress_epoch
+- consecutive_no_progress_rounds
+- last_round_fingerprint: optional
+- seen_observation_hashes: bounded set[hash]
+- seen_effect_action_hashes: bounded set[hash]
+- warning_kind: optional
+- last_reason: optional
 ```
 
 不变量：
@@ -237,11 +272,14 @@ PlanningState
 - 结构相同但仅步骤状态变化时不得创建新 revision，应产生 `PlanProgressEvent`
 - revision、progress、trigger 和 user decision 都绑定提交时的 `generation_id`，但这些记录本身不推进 generation
 - `UserPlanDecision` 不包含权限规则，也不能作为 VerificationEvidence
+- 停滞计数只能在一个完整工具回合的所有结果已提交后更新；同一回合不能部分判定、提前终止或遗漏 tool result
+- progress epoch 只由持久进展标记变化开启；新的 attempt ID、generation ID、计数预算消耗或重复事实不能单独开启 epoch
 
 字段所有权：
 
 - 模型提供 goal、constraints、success criteria、步骤 ID 与内容、依赖、替代关系、修订理由和 replan 请求
 - Runtime 分配 revision / progress / trigger 等事实记录 ID，校验步骤 ID、依赖图与状态转换，计算 revision 差异和预算，并维护 planning phase
+- Agent loop 在整轮结果提交后计算动作指纹、有效事实 hash 和持久进展标记，原子更新停滞计数；模型不能声明某回合“有进展”或清零计数
 - Executor 继续独占工具执行事实；PermissionGate 继续独占授权决定
 - 用户通过 CLI 或明确的后续输入产生 approve / reject / resume_blocked 决定；模型不能伪造这些记录
 - Trace 只消费公开 snapshot，不读取模型私有参数或修改 State
@@ -289,9 +327,10 @@ PlanningState
 3. `commit_plan` 对 replan 强制要求 active trigger 与 parent revision，提交后原子解决 trigger。
 4. Runtime 计算相邻 revision 的 retained / added / cancelled / replaced 差异；结构无变化时记为无进展提交并受单独预算约束。
 5. 按 D8 接入 `diagnosis_required`，保持 FailureEvent、repair budget、generation 与 verification 边界不被重规划绕过。
-6. Structured State 和 Runtime Notice 显示当前 replan 原因、来源、剩余预算和唯一合法下一动作。
+6. 按 D10 在现有 agent loop 增加跨 Direct / Explore / Execute / Replan 的停滞计数与单一 `MAX_STAGNANT_ROUNDS` 上限；该护栏复用结构化工具结果和计划状态，不新增 Agent 或规划分支。
+7. Structured State 和 Runtime Notice 显示当前 replan 原因、来源、剩余预算、停滞计数和唯一合法下一动作。
 
-验收重点：retry、adjust 与 replan 的入口和计数相互独立；每次 replan 都能定位触发事实；无变化重规划或预算耗尽能够明确收口，不形成隐藏循环。
+验收重点：retry、adjust 与 replan 的入口和计数相互独立；每次 replan 都能定位触发事实；无变化重规划、重复工具回合、无新事实的调查或执行不推进都能在各自预算内明确收口，不形成隐藏循环。
 
 ### 5.4 `v0.25` Plan Trace & Evaluation
 
@@ -305,9 +344,10 @@ PlanningState
 - plan-only 的批准或驳回
 - trigger 引用的 attempt / failure / feedback
 - revision 生效后的执行、恢复和 verification 事实
+- 最后一次停滞告警或停滞终态的计数、类型和脱敏指纹
 - 最终 `done`、`blocked` 或 `failed` 的依据
 
-回放不得推测模型没有记录的修订理由，也不得把“后续验证通过”倒推成旧计划正确。缺失 parent、悬空 step dependency、重复 trigger 消费、无来源批准或跨 revision 进度事件必须标记为 unresolved，而不是由展示层修补。
+回放不得推测模型没有记录的修订理由，也不得把“后续验证通过”倒推成旧计划正确。Trace 只能展示 Runtime 已保存的停滞摘要，不能重新读取工具输出或用语义规则重判进展。缺失 parent、悬空 step dependency、重复 trigger 消费、无来源批准或跨 revision 进度事件必须标记为 unresolved，而不是由展示层修补。
 
 验收重点：对至少一次“初始方案失败—证据触发重规划—新方案验证通过”的真实案例，能够证明计划为何改变、改变了什么、哪一代执行事实和验证证据支持最终结论。
 
@@ -326,6 +366,8 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 
 若两个状态组合不在表内，Runtime 应拒绝动作并返回结构化协议错误，不能自行选择较宽松分支。
 
+通用停滞检测不加入上表的状态笛卡尔积。它只在每个完整工具回合结束后观察“该回合是否推进”，不会创造第三套 phase，也不会改变允许动作集合。处于 `awaiting_approval` 时没有模型工具回合，因此不累计停滞；等待用户不是 doom loop。进入 `blocked` 或 `failed` 后停止计数。
+
 ## 7. 测试与验收
 
 ### 7.1 单元测试
@@ -340,6 +382,12 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 - replan trigger 的 failure / attempt / rejected decision / blocked resume 引用与唯一消费规则可重复测试
 - blocked 只有在用户明确产生 resume decision 后才能回到 running / exploring；failed 不能原地恢复
 - replan revision 预算和无进展预算在同一把 State 锁内检查并预留
+- 相同 tool 与 canonical arguments 连续返回相同结果时不会因 attempt / generation 自增而被视为进展，并在 `MAX_STAGNANT_ROUNDS` 内收口
+- Explore 中重复读取、重复搜索或在旧结果之间交替不会产生新有效事实；真正不同的只读结果只在当前 progress epoch 首次出现时重置连续计数
+- Explore 连续无新事实且不 `commit_plan`、Execute 连续执行相同动作但不更新计划/任务事实、Direct Path 普通调用原地循环，都会得到对应的停滞原因
+- phase / permission / schema 拒绝和重复错误不算进展；达到停滞终态前仍为每个调用回灌一个 tool result
+- commit 新结构、合法步骤进度、真实 phase 转换、新用户决定或新验证结论会开启 progress epoch；纯 ID、generation、预算或历史长度变化不会
+- 停滞告警经过 compaction 后仍保留计数和脱敏 hash；Planning / Repair gate 比告警建议更严格时以 gate 为准
 - diagnosis → replan → execute → verification 的组合不清除原 failure，不复用旧验证证据
 - compaction 后当前 revision、active trigger、planning phase、预算和步骤进度保持准确
 - Plan Trace 只依赖公开 snapshot；断链、环、重复消费和损坏记录显示 unresolved
@@ -353,8 +401,9 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 4. 用户驳回初始计划并提供反馈，模型基于该反馈提交新 revision，旧 revision 保留。
 5. 初始方案导致确定性失败或验证失败；模型引用真实 failure 发起 replan，新方案执行并在新 generation 验证通过。
 6. 同一触发事实重复提交无结构变化的计划，预算耗尽后明确进入 blocked 或 failed，不死循环。
-7. 至少发生一次 compaction 后，步骤依赖、active revision / trigger、Repair Loop 和 verification 边界仍准确。
-8. Plan Trace 能把上述重规划案例与阶段六 attempt / failure / recovery / verification 因果链连接起来。
+7. 普通模式分别复现“相同工具与参数重复调用”“Explore 重复读取无新事实”“Execute 重复动作但步骤不推进”，在告警后仍无变化时进入带明确原因的 blocked；改为新调查或提交真实进度时计数正确恢复。
+8. 至少发生一次 compaction 后，步骤依赖、active revision / trigger、Repair Loop、停滞计数和 verification 边界仍准确。
+9. Plan Trace 能把上述重规划案例与阶段六 attempt / failure / recovery / verification 因果链连接起来，并显示停滞终态依据。
 
 ### 7.3 阶段完成定义
 
@@ -365,6 +414,7 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 - [ ] 所有 replan 都引用真实触发事实，并保留 parent revision 和结构差异
 - [ ] 失败触发重规划时，阶段六的 failure、generation、repair budget 和验证隔离仍然成立
 - [ ] 重规划次数和无进展提交有硬上限，超限后不会隐藏循环
+- [ ] Direct、Explore、Execute 与 Replan 共用确定性停滞护栏；重复动作、无新事实调查和无状态推进执行会先收到一次告警，再以明确 blocked 原因收口
 - [ ] Plan Trace 能回放至少一个失败—重规划—执行—验证案例，并明确标记损坏引用
 - [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，核心运行时仍只有标准库
 - [ ] 各版本 tag 由用户手动创建后，教程事实检查通过并完成发布验收
@@ -379,12 +429,12 @@ v0.22 Plan Contract
 v0.23 Plan Mode & Handoff
     ↓ 提供 Explore 边界与用户批准事实
 v0.24 Replanning Policy
-    ↓ 用触发证据产生有界的新 revision
+    ↓ 用触发证据产生有界的新 revision，并为整个单 Agent loop 补齐通用停滞护栏
 v0.25 Plan Trace & Evaluation
     ↓ 只读验收完整规划与执行链
 ```
 
-不要在 `v0.22` 提前加入强制只读 Plan Mode，不要在 `v0.23` 用 prompt 模拟 replan trigger，也不要在 `v0.24` 同时引入独立 Planner Agent。每版只增加一个可观察的新概念，保持相邻 tag 的代码 diff 可教学。
+不要在 `v0.22` 提前加入强制只读 Plan Mode，不要在 `v0.23` 用 prompt 模拟 replan trigger，也不要在 `v0.24` 同时引入独立 Planner Agent。通用停滞检测作为 `v0.24`“有界推进”策略的横切护栏落地，不改变 Explore → Commit → Execute → Replan 主线，也不派生新的规划角色或状态机。每版保持一个清晰主题，使相邻 tag 的代码 diff 可教学。
 
 ## 9. 文档与发布同步
 
@@ -411,6 +461,6 @@ PYTHONPATH=src python scripts/check_readme.py
 
 ## 10. 阶段完成后的能力边界
 
-阶段七完成后，mini_agent 不只是“有一份会变化的 Todo”，而是：**复杂任务可以先在无副作用边界内调查并提交可验证计划；计划执行中出现新事实时，能够说明为什么必须重规划、保留旧方案并提交有界的新 revision；用户批准、工具授权、实际执行和最终验证各有独立事实来源，整条链可以只读回放。**
+阶段七完成后，mini_agent 不只是“有一份会变化的 Todo”，而是：**复杂任务可以先在无副作用边界内调查并提交可验证计划；计划执行中出现新事实时，能够说明为什么必须重规划、保留旧方案并提交有界的新 revision；普通调查、执行和重规划若持续没有新事实或任务进展，也会被确定性护栏提醒并收口；用户批准、工具授权、实际执行和最终验证各有独立事实来源，整条链可以只读回放。**
 
 仍未解决的问题包括跨进程恢复、长期记忆、通用沙箱和多 agent 协作。下一阶段应从真实使用中的主要失败模式选择其中一个，而不是在阶段七提前混入。
