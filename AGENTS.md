@@ -16,6 +16,7 @@
 - **完成与上限**：无 `tool_calls` 才能结束；Todo、修改后的验证等完成条件由当前实现决定；默认最多 50 轮，超限返回明确结果。
 - **回放只读**：Trace & Replay 只能消费当前进程、当前任务的结构化 State 快照；不得调用 LLM、执行工具、经过权限授权、修改 history、状态、预算或 generation。当前 generation 的验证证据用于完成判定，append-only verification history 用于跨 generation 回放；断链和跨 generation 证据必须标记为不完整，不得推测补全。
 - **教程读者优先**：撰写或修改 `docs/tutorials/` 时，默认读者具备基础 Python 和命令行能力，但刚接触 Agent，也不了解本项目内部架构。必须先讲问题和直观含义，再讲模块、字段、协议与实现；术语、缩写和项目内部概念首次出现时必须就近解释，不得用代码、符号或文件清单代替教学说明。具体要求见[教程作者规范](docs/governance/tutorial-authoring.md)。
+- **主 README 编辑**：修改 `README.md` 的学习路径、阶段名或版本主题前，必须遵守[主 README 编写规范](docs/governance/readme-authoring.md)：主题默认使用通俗中文，只有协议字段、代码标识和公认技术名词可保留英文；修改后运行 `PYTHONPATH=src python scripts/check_readme.py`。
 - **修改后验证**：文件修改完成后，至少运行与改动相关的测试；交付前运行下列完整验证命令（或说明无法运行的原因）。
 - **破坏性操作**：未经用户明确授权，不执行删除、重置、覆盖大量文件或其他难以恢复的操作。
 - **Tag 操作专属权限**：Git tag 的创建、移动、覆盖、删除和远程推送只能由用户本人手动完成。助手不得代为执行任何 tag 操作，即使用户在任务中要求打 tag；如任务涉及 tag，只能说明步骤或提供命令，等待用户手动完成。

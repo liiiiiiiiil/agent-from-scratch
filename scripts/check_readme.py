@@ -2,6 +2,7 @@
 """Check the Chinese main README's navigation and naming conventions."""
 from __future__ import annotations
 
+import html
 import re
 import sys
 from pathlib import Path
@@ -9,6 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 TUTORIALS = ROOT / "docs" / "tutorials"
+ENGLISH_TOPIC_ALLOWLIST = {"Trace & Replay"}
+
+
+def _plain_text(fragment: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", "", fragment)
+    return re.sub(r"\s+", " ", html.unescape(without_tags)).strip()
 
 
 def main() -> int:
@@ -20,6 +27,15 @@ def main() -> int:
     for stale in ("阶段四 · Context Management", "阶段六 · Reliable Execution"):
         if stale in text:
             errors.append(f"阶段标题未使用中文：{stale}")
+    topic_rows = re.findall(
+        r"<tr>\s*<td>.*?</td>\s*<td>(.*?)</td>\s*<td>",
+        text,
+        flags=re.DOTALL,
+    )
+    for topic_fragment in topic_rows:
+        topic = _plain_text(topic_fragment)
+        if topic not in ENGLISH_TOPIC_ALLOWLIST and not re.search(r"[\u4e00-\u9fff]", topic):
+            errors.append(f"学习路径主题默认应使用中文：{topic}")
     if "docs/tutorials/README.md" not in text:
         errors.append("缺少教程索引入口：docs/tutorials/README.md")
     for tutorial in sorted(TUTORIALS.glob("[0-9][0-9]-*.md")):
