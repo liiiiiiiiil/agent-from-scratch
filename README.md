@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程到 `v0.20`（第 20 课的 Repair Loop 修复循环）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程到 `v0.21`（第 21 课的 Trace & Replay 只读回放）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -53,6 +53,7 @@
     <tr><td><strong>v0.18</strong>（补丁 <code>v0.18.1</code>）</td><td><a href="./docs/tutorials/18-recovery-policy.md">受限恢复策略</a></td><td>用受限动作恢复失败并隔离 generation；补丁修正边界一致性。</td></tr>
     <tr><td><strong>v0.19</strong></td><td><a href="./docs/tutorials/19-checkpoint-rollback.md">单文件检查点与回滚</a></td><td>为单文件写入保存前镜像，在冲突检测下原子恢复，并保持恢复状态可见、可验证。</td></tr>
     <tr><td><strong>v0.20</strong></td><td><a href="./docs/tutorials/20-repair-loop.md">修复循环</a></td><td>把失败、诊断、受限恢复和独立验证串成有上限的阶段化循环。</td></tr>
+    <tr><td><strong>v0.21</strong></td><td><a href="./docs/tutorials/21-trace-replay.md">Trace &amp; Replay</a></td><td>按 generation 只读回放 Todo、执行、失败、恢复、验证和终态的因果链。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展回放、记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>

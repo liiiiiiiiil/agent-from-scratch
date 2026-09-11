@@ -1,6 +1,23 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.20**（Repair Loop 修复循环；含 v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.21**（Trace & Replay 只读回放；含 v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+
+## v0.21 Trace & Replay（只读回放）
+
+`/trace` 回放当前进程、当前任务已经保存的结构化事实：Todo revision、generation、执行尝试、失败、恢复动作、验证证据和终态。`/trace 3` 只显示 generation 3。命令在 `run_task()` 之前拦截，不追加 user history，不调用 LLM、工具 handler 或 PermissionGate，也不修改 State、预算或 generation。
+
+回放也可通过标准库 Python API 使用：
+
+```python
+from mini_agent.trace import build_trace, render_trace
+
+report = build_trace(state.snapshot(), generation_id=None)
+print(render_trace(report))
+```
+
+`report["integrity"]` 为 `complete` 时，当前保存的引用可以完整验收；为 `incomplete` 时，`issues` 会说明断链、缺失的历史验证证据或跨 generation 证据，报告仍保留可确认的原始记录，不能据此推测缺失事实。失败诊断优先使用已有 `cause_hint`，否则显示关联恢复动作的 `reason`，两者都没有时显示“未记录诊断”。
+
+Todo 每次成功提交都会在 State 锁内追加一个不可变 `TodoRevision`，包含 revision ID、generation、完整列表和 current goal；校验失败不追加。它只进入回放快照，不注入 Structured State。`/reset` 和 `/new` 会清除任务内回放事实，完成任务后在清除前仍可查询。
 
 ## v0.20 Repair Loop（修复循环）
 
@@ -130,7 +147,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.20，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.21，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -150,7 +167,9 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `errors` | 权限拒绝或工具失败记录 |
 | `status` | `running` / `done` / `blocked` / `failed` |
 | `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
+| `todo_revisions` | 每次成功 Todo 提交的完整回放快照；不注入 LLM 上下文 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
+| `verification_history` | append-only 的任务内 verification 审计记录；跨 generation 回放使用，不参与完成判定或 LLM 上下文 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
 | `repair_loop` | 当前修复阶段、活动 failure/recovery、已使用/剩余 repair cycle 和要求的下一动作 |
 | `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |

@@ -4,7 +4,7 @@
 
 ## 0. 心智模型：一句话版本
 
-**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入：模型看到的不是“最近一次文字说了什么”，而是当前是否必须诊断、恢复或独立验证。
+**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入：模型看到的不是“最近一次文字说了什么”，而是当前是否必须诊断、恢复或独立验证。v0.21 新增的 `todo_revisions` 和 `verification_history` 只供 Trace & Replay 消费，不进入这条 LLM 上下文生产线。
 
 ```text
 view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
@@ -143,7 +143,8 @@ window = CONTEXT_WINDOW
 3. 每轮 tool results 全部回灌后才进下一轮（无 v0.10 的"半截状态"）。
 4. 语义事实免疫裁剪：不管协议历史被削成什么样，`[Structured State]` 每轮完整重渲染。
 5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒；v0.20 的阶段性 Notice 会明确指出下一步合法动作。
-6. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
+6. Trace & Replay 读取独立的 `state.snapshot()` 视图，不进入 LLM 消息，不调用执行链，也不改变上下文或 State。
+7. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
 
 ## 6. 代码速查
 

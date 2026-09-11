@@ -18,6 +18,7 @@ from mini_agent.state import AgentState
 from mini_agent.tools import create_registry, registry
 from mini_agent.tools.base import ToolExecutor
 from mini_agent.output import TerminalOutput
+from mini_agent.trace import TraceQueryError, build_trace, render_trace
 
 
 def _single_line_notice(value, limit=240):
@@ -102,6 +103,28 @@ def main():
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
         cli_output.input_end()
+        if user_input == "/trace" or user_input.startswith("/trace "):
+            if not state.task:
+                cli_notice("当前没有活动任务，无法回放。")
+                continue
+            parts = user_input.split()
+            if len(parts) > 2:
+                cli_notice("用法: /trace [generation_id]")
+                continue
+            requested_generation = None
+            if len(parts) == 2:
+                try:
+                    requested_generation = int(parts[1])
+                except ValueError:
+                    cli_notice("用法: /trace [generation_id]，generation_id 必须是非负整数。")
+                    continue
+            try:
+                report = build_trace(state.snapshot(), requested_generation)
+            except TraceQueryError as error:
+                cli_notice(f"Trace 查询失败：{error}")
+                continue
+            cli_notice(render_trace(report))
+            continue
         if user_input == "/reset":
             context.reset_task()
             if hasattr(state, "reset_task"):

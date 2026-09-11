@@ -52,6 +52,16 @@ class TodoItem:
 
 
 @dataclass(frozen=True)
+class TodoRevision:
+    """One committed, task-local Todo snapshot for trace replay."""
+
+    revision_id: int
+    generation_id: int
+    todos: tuple[TodoItem, ...]
+    current_goal: str
+
+
+@dataclass(frozen=True)
 class VerificationEvidence:
     command: str
     outcome: str
@@ -148,7 +158,9 @@ class AgentState:
     status: str = "running"
     terminal_reason: str = ""
     todos: list[TodoItem] = field(default_factory=list)
+    todo_revisions: list[TodoRevision] = field(default_factory=list)
     verification_evidence: list[VerificationEvidence] = field(default_factory=list)
+    verification_history: list[VerificationEvidence] = field(default_factory=list)
     generations: list[ExecutionGeneration] = field(default_factory=list)
     attempts: list[ExecutionAttempt] = field(default_factory=list)
     failures: list[FailureEvent] = field(default_factory=list)
@@ -159,6 +171,7 @@ class AgentState:
     _verification_required: bool = field(default=False, init=False, repr=False)
     _next_attempt: int = field(default=1, init=False, repr=False)
     _next_failure: int = field(default=1, init=False, repr=False)
+    _next_todo_revision: int = field(default=1, init=False, repr=False)
     _fingerprint_counts: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     _repair_cycles: int = field(default=0, init=False, repr=False)
     _reserved_repair_cycles: int = field(default=0, init=False, repr=False)
@@ -551,8 +564,9 @@ class AgentState:
                                          "generation_id": gid, "result_generation_id": gid})
         index = next(i for i, a in enumerate(self.recovery_actions) if a.recovery_id == rid)
         self.recovery_actions[index] = action_record
-        self.generations.append(ExecutionGeneration(gid, opened_by_failure_id=caused_by_failure_id,
-            opened_by_recovery_id=rid, open_reason="recovery"))
+        self.generations.append(ExecutionGeneration(
+            gid, opened_by_recovery_id=rid, open_reason="recovery"
+        ))
         self._active_failure_id = caused_by_failure_id
         self._enter_verification(rid)
         self.recovery_notice = f"Recovery {rid} reserved: {action}; verify generation {gid} independently."
@@ -563,7 +577,7 @@ class AgentState:
             return self.recovery_actions[index], None, requested_arguments
         ar = AttemptReservation(
             f"a-{self._next_attempt}", gid - 1, gid,
-            caused_by_failure_id, failure.caused_by_attempt_id, rid,
+            caused_by_failure_id, None, rid,
             fingerprint_reserved=True,
         )
         self._next_attempt += 1
@@ -707,9 +721,11 @@ class AgentState:
                     self.files_changed.append(path)
             if is_verify and result.handler_admitted:
                 passed = result.outcome == "succeeded" and result.exit_code == 0
-                self.verification_evidence.append(VerificationEvidence(
+                evidence = VerificationEvidence(
                     str(args.get("command", "")), "passed" if passed else "failed",
-                    result.exit_code, result.output_excerpt, generation_id, attempt_id))
+                    result.exit_code, result.output_excerpt, generation_id, attempt_id)
+                self.verification_evidence.append(evidence)
+                self.verification_history.append(evidence)
                 self._last_verified_generation = generation_id if passed else -1
                 self._verification_required = not passed
             if failure_id and category:
@@ -796,9 +812,11 @@ class AgentState:
                 match = re.search(r"\[exit=(-?\d+)\]", str(brief))
                 code = int(match.group(1)) if match else (0 if ok and not timeout else None)
                 passed = bool(ok and not timeout and code == 0)
-                self.verification_evidence.append(VerificationEvidence(
+                evidence = VerificationEvidence(
                     str(args_copy.get("command", "")), "passed" if passed else "failed",
-                    code, str(brief), self._verification_generation))
+                    code, str(brief), self._verification_generation)
+                self.verification_evidence.append(evidence)
+                self.verification_history.append(evidence)
                 self._last_verified_generation = self._verification_generation if passed else -1
                 if passed:
                     self._clear_repair()
@@ -813,12 +831,14 @@ class AgentState:
         with self._lock:
             self.task = task; self.current_goal = ""; self.status = "running"; self.terminal_reason = ""
             self.tool_history.clear(); self.files_changed.clear(); self.errors.clear(); self.todos.clear()
-            self.verification_evidence.clear(); self.generations.clear(); self.attempts.clear()
+            self.todo_revisions.clear()
+            self.verification_evidence.clear(); self.verification_history.clear()
+            self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
             self._verification_generation = 0; self._last_verified_generation = -1
             self._verification_required = False; self._repair_phase = "idle"
             self._active_failure_id = None; self._active_recovery_id = None
-            self._next_attempt = 1; self._next_failure = 1
+            self._next_attempt = 1; self._next_failure = 1; self._next_todo_revision = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             if self._checkpoint_store is not None:
@@ -906,6 +926,13 @@ class AgentState:
         with self._lock:
             self.todos = parsed
             self.current_goal = next((t.content for t in parsed if t.status == "in_progress"), "")
+            self.todo_revisions.append(TodoRevision(
+                self._next_todo_revision,
+                self._verification_generation,
+                tuple(parsed),
+                self.current_goal,
+            ))
+            self._next_todo_revision += 1
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -914,7 +941,17 @@ class AgentState:
                 "tool_history": deepcopy(self.tool_history), "files_changed": deepcopy(self.files_changed),
                 "errors": deepcopy(self.errors), "status": self.status, "terminal_reason": self.terminal_reason,
                 "todos": [asdict(x) for x in self.todos],
+                "todo_revisions": [
+                    {
+                        "revision_id": revision.revision_id,
+                        "generation_id": revision.generation_id,
+                        "todos": [asdict(todo) for todo in revision.todos],
+                        "current_goal": revision.current_goal,
+                    }
+                    for revision in self.todo_revisions
+                ],
                 "verification_evidence": [asdict(x) for x in self.verification_evidence],
+                "verification_history": [asdict(x) for x in self.verification_history],
                 "verification_required": self._verification_required,
                 "repair_loop": {
                     "phase": self._repair_phase,

@@ -1,7 +1,7 @@
 # 阶段六：Reliable Execution 实施计划
 
-> 状态：`v0.20` Repair Loop 已实现；`v0.21` Trace & Replay 规划中
-> 当前基线：`v0.20`（阶段化失败—诊断—恢复—验证循环）
+> 状态：`v0.21` Trace & Replay 已实现；阶段六实现验收完成，发布 tag 待用户创建
+> 当前基线：`v0.21`（阶段化失败—诊断—恢复—验证循环与只读回放）
 > 前置阶段：阶段五项目感知与任务编排（Project-Aware Task Orchestration，`v0.14`–`v0.16`）
 > 版本范围：`v0.17`–`v0.21`
 
@@ -60,7 +60,7 @@ Execute
 - 不绕过现有 `PermissionGate`，不因失败自动提升权限
 - 不引入第三方依赖、跨进程持久化或事务数据库
 - 不让运行时替模型判断业务正确性；任务级结论仍以 Verify 证据为准
-- `v0.21` 不引入任何新的执行、恢复、诊断或状态转换逻辑；它只查询和展示 `v0.17`–`v0.20` 已记录的数据
+- `v0.21` 不引入任何新的执行、恢复、诊断或状态转换逻辑；它只查询和展示 `v0.17`–`v0.20` 已记录的数据；本版新增的 TodoRevision 只记录提交快照，不改变执行逻辑
 - `v0.21` 不属于阶段七的规划系统范畴。阶段七（Planning & Replanning）保持独立阶段；其重规划触发依赖阶段六的 `blocked` 状态，并可使用 `v0.21` 的回放能力进行调试，但不合并代码或阶段编号
 
 ## 3. 先冻结的架构决策
@@ -246,9 +246,11 @@ Structured State 的 `repair_loop` 保存阶段、活动 failure/recovery、周�
 
 目标：支持按 generation 回放一次任务的完整决策链：计划 → 执行 → 失败 → 分类/诊断 → 恢复 → 再验证 → 终态。
 
-本版是阶段六的验收和调试收尾，不引入新的执行、恢复、诊断或状态转换逻辑。它只查询并展示 `v0.17`–`v0.20` 已产生的 `ExecutionGeneration`、`ExecutionAttempt`、`FailureEvent`、`RecoveryAction`、Todo/计划变更、验证证据和终态；回放不得补写、推测或修复缺失的运行时事实。
+本版是阶段六的验收和调试收尾，不引入新的执行、恢复、诊断或状态转换逻辑。它只查询并展示 `v0.17`–`v0.21` 已产生的 `ExecutionGeneration`、`ExecutionAttempt`、`FailureEvent`、`RecoveryAction`、Todo/计划变更、append-only verification history 和终态；回放不得补写、推测或修复缺失的运行时事实。当前 `verification_evidence` 仍只保留当前 generation 并服务完成判定，历史记录不参与 `done` 判定。
 
 回放视图按 generation 顺序呈现状态转换，并以 schema 中冻结的因果链接连接每条记录到其触发的 attempt 或 failure。每个节点必须能显示原始、已脱敏的执行/验证证据及其来源，且明确标出证据所属 generation；终态必须显示为 `continue`、`done`、`blocked` 或 `failed` 及其最后依据。
+
+实现状态：已新增不可变 `TodoRevision`、append-only `verification_history`、`src/mini_agent/trace.py` 的 `build_trace()` / `render_trace()` 和 `/trace [generation_id]` CLI。报告校验重复/缺失引用、generation opener、attempt/failure 双向引用、recovery 结果、verification 历史完整性和当前证据隔离；损坏快照保留可确认记录并输出 unresolved 边。回放只读，不调用 LLM、工具或权限闸门，也不修改 history、预算、State 或 generation。
 
 验收重点：对 `v0.17`–`v0.20` 产生的至少一次真实失败—恢复案例，能够完整回放每个 generation 的状态转换，以及每个分类、诊断、恢复和终态所依据的原始证据。该案例应能直接用于核验 `v0.18` 的恢复策略与预算、`v0.19` 的回滚边界和 `v0.20` 的验证证据隔离是否按预期生效。
 
@@ -268,6 +270,7 @@ Structured State 的 `repair_loop` 保存阶段、活动 failure/recovery、周�
 - `v0.18` 的 action schema 拒绝 `rollback`。
 - 检查点覆盖既有文件、新建文件、外部修改、符号链接/工作区外路径、大小上限和 restore 中断；失败恢复不会把任务表述为已回滚。
 - Trace & Replay 能仅依赖冻结 schema 的 generation 与因果链接重建一条失败—恢复—验证链；缺失链接或跨 generation 复用验证证据会被明确标为不可验收，而不是由展示层猜测补全。
+- 当前 verification evidence 在 generation 变化后失效，但 append-only verification history 仍保留每一代的原始审计证据；两者不能互相替代。
 
 ### 6.2 阶段级 E2E 场景
 
@@ -281,12 +284,14 @@ Structured State 的 `repair_loop` 保存阶段、活动 failure/recovery、周�
 
 ### 6.3 阶段完成定义
 
-- [ ] `v0.17`–`v0.21` 各有独立教程、变更记录和可运行测试。
-- [ ] 所有失败都能关联到执行尝试和 generation；没有仅靠自然语言字符串驱动的隐藏状态。
-- [ ] 每次恢复动作都受 PermissionGate 和计数预算约束，并开启新的 Execution Generation；旧 generation 的验证证据不可复用于 `done` 判定。
+- [x] `v0.17`–`v0.21` 各有独立教程、变更记录和可运行测试。
+- [x] 所有失败都能关联到执行尝试和 generation；没有仅靠自然语言字符串驱动的隐藏状态。
+- [x] 每次恢复动作都受 PermissionGate 和计数预算约束，并开启新的 Execution Generation；旧 generation 的验证证据不可复用于 `done` 判定。
 - [x] 回滚只在 `v0.19` 及以后对明确检查点的副作用可用。
 - [x] Repair Loop 能在成功、继续修复、阻塞和失败四种结果间正确收口。
-- [ ] v0.21 能用冻结的结构化数据回放至少一个真实失败—恢复案例，展示每个 generation 的状态转换与原始证据。
-- [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，运行时仍只有标准库。
+- [x] v0.21 能用冻结的结构化数据回放至少一个真实失败—恢复案例，展示每个 generation 的状态转换与原始证据。
+- [x] Trace & Replay 只读回放、断链标记和按 generation CLI 查询已完成。
+- [x] 默认测试套件、教程检查和阶段级 E2E 全部通过，运行时仍只有标准库。
+- [ ] 用户手动创建 `v0.21` tag 后，教程事实检查通过并完成发布验收。
 
 阶段六完成后，mini_agent 的完成标准不再只是“工具调用过且测试曾经通过”，而是：**失败有结构化事实，恢复有明确边界，结果有属于当前 generation 的新验证证据；这些事实还能按 generation 完整回放，以验证可靠性机制真的按预期工作；无法继续时也能准确说明是 blocked 还是 failed。**

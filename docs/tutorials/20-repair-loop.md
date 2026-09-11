@@ -1,6 +1,6 @@
 # 第 20 课：修复循环（Repair Loop，v0.20）
 
-上一课：[单文件检查点与回滚](19-checkpoint-rollback.md) · [教程总览](README.md) · 下一课：按需追加
+上一课：[单文件检查点与回滚](19-checkpoint-rollback.md) · [教程总览](README.md) · 下一课：[Trace & Replay](21-trace-replay.md)
 
 > 代码快照：`v0.20` · 相邻差异：`v0.19..v0.20` · 命令环境：Bash/zsh
 
@@ -113,7 +113,7 @@ Structured State 和压缩后的 critical state 都保留 repair loop。失败�
 
 本版包含：阶段化 Repair Loop、活动 failure/recovery、恢复周期预算、恢复后独立 verification、agent loop 与 executor 双层准入、Structured State/Runtime Notice 同步，以及 `ask`/`block`/预算耗尽的明确终态。
 
-本版不包含自动推断修复方案、自动重试、外部等待恢复、通用事务回滚或 Trace & Replay；下一课（如实现）只读消费 v0.17–v0.20 已记录的事实，不应重新执行工具。
+本版不包含自动推断修复方案、自动重试、外部等待恢复、通用事务回滚或 Trace & Replay；下一课会只读消费 v0.17–v0.21 已记录的事实，不应重新执行工具。
 
 代码索引：
 

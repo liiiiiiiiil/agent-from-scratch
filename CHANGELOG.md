@@ -5,6 +5,13 @@
 - Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
 - Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
 
+## [v0.21.0] - Trace & Replay
+
+- Added immutable task-local `TodoRevision` snapshots for every successful Todo submission, with generation binding and reset/new-task cleanup.
+- Added append-only verification history without changing current-generation completion evidence, plus read-only `build_trace()` / `render_trace()` APIs with generation grouping, strict causal validation, terminal conclusions, and unresolved links for damaged snapshots.
+- Added `/trace` and `/trace <generation_id>` CLI replay with forced visibility in quiet mode; replay never calls the LLM, tools, permission gate, or mutates task state.
+- Added Trace & Replay tutorial, CLI/API documentation, security-boundary tests, and a real registry/file/shell failure-recovery-verification E2E.
+
 ## [v0.20.0] - Repair Loop
 
 - Added explicit `idle`, `diagnosis_required`, and `verification_required` repair phases with active failure/recovery references in Structured State.
