@@ -92,7 +92,7 @@ def test_recovery_must_reference_active_failure_and_rejection_does_not_consume_c
     payload = json.loads(result.output)
     assert payload["status"] == "rejected"
     assert state.snapshot()["repair_loop"]["cycles_used"] == 0
-    assert state.snapshot()["current_generation_id"] == 0
+    assert state.snapshot()["current_generation_id"] == 1
 
 
 def test_ordinary_possible_effects_do_not_enter_strict_repair_verification():

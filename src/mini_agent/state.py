@@ -1263,6 +1263,19 @@ class AgentState:
             clean_reason = self._plan_text(reason, "reason", _PLAN_REASON_MAX)
             parsed_steps = self._parse_plan_steps(steps)
             active = self._active_revision_locked()
+            if self.planning_state.mode == "plan_only" and active is None and not any(
+                attempt.outcome == "succeeded"
+                and attempt.handler_admitted
+                and attempt.permission == "allowed"
+                and attempt.effect_class == "none"
+                and attempt.tool not in {
+                    "begin_plan", "cancel_planning", "commit_plan",
+                    "update_plan_progress", "request_replan", "recover",
+                    "rollback_checkpoint", "run_shell",
+                }
+                for attempt in self.attempts
+            ):
+                raise PlanRejected("--plan 首次提交前必须完成一次获准的只读调查")
             active_trigger = self.planning_state.active_trigger_id
             if active_trigger is None:
                 if trigger_id is not _MISSING:
@@ -2156,7 +2169,7 @@ class AgentState:
                 path = args_copy.get("path")
                 if isinstance(path, str) and path not in self.files_changed: self.files_changed.append(path)
                 self._invalidate_verification()
-            if name == "run_shell" and args_copy.get("purpose", "execution") == "execution" and "权限拒绝" not in brief:
+            if name == "run_shell" and "权限拒绝" not in brief:
                 self._invalidate_verification()
             if name == "run_shell" and args_copy.get("purpose", "execution") == "verification":
                 timeout = "[timeout]" in str(brief) or "超时" in str(brief)

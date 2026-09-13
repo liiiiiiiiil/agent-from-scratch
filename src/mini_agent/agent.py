@@ -508,9 +508,15 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "commit_plan 必须独占一个工具回合"
             )
             planning_batch_errors = {index: detail for index in range(len(parsed_calls))}
+        has_other_possible = any(
+            effect == "possible" and not (
+                name == "run_shell" and args.get("purpose", "execution") == "verification"
+            )
+            for (name, args), effect in zip(parsed_calls, effects)
+        )
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
-            if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
+            if has_other_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
         }
         repair_batch_errors = {}
         if state is not None and hasattr(state, "repair_phase"):

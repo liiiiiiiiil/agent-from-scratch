@@ -36,8 +36,41 @@ def _call(name, arguments, call_id="c1"):
 def _executor(state, gate=None):
     return ToolExecutor(create_registry(state), gate or PermissionGate(PermissionPolicy({
         "begin_plan": ALLOW, "cancel_planning": ALLOW, "commit_plan": ALLOW,
-        "read_file": ALLOW, "write_file": ALLOW, "run_shell": ALLOW,
+        "read_file": ALLOW, "list_dir": ALLOW, "write_file": ALLOW, "run_shell": ALLOW,
     })))
+
+
+def _investigate(state):
+    result = _executor(state).execute_result("list_dir", {}, state)
+    assert result.ok
+    state.record_execution_result(result)
+
+
+def test_plan_only_requires_successful_read_only_investigation():
+    state = AgentState(); state.begin_task("task", mode="plan_only")
+    executor = _executor(state)
+    rejected = executor.execute_result("commit_plan", _plan(), state)
+    assert rejected.error_kind == "plan_rejected"
+    assert state.snapshot()["current_generation_id"] == 0
+    assert not state.snapshot()["plan_revisions"]
+    _investigate(state)
+    assert executor.execute_result("commit_plan", _plan(), state).ok
+
+
+def test_verification_shell_reserves_generation_for_possible_side_effect(tmp_path):
+    state = AgentState(); state.begin_task("verify")
+    executor = _executor(state)
+    target = tmp_path / "written-by-verification.txt"
+    result = executor.execute_result("run_shell", {
+        "command": f"printf changed > '{target}'", "purpose": "verification",
+    }, state)
+    state.record_execution_result(result)
+    assert result.ok and result.effect_class == "possible"
+    assert target.read_text() == "changed"
+    snapshot = state.snapshot()
+    assert snapshot["current_generation_id"] == 1
+    assert snapshot["attempts"][-1]["pre_generation_id"] == 0
+    assert snapshot["verification_evidence"][-1]["generation_id"] == 1
 
 
 def test_auto_entry_and_cancel_keep_direct_path():
@@ -83,6 +116,7 @@ def test_executor_rejects_effects_and_verification_before_permission_or_handler(
 
 def test_plan_only_commit_waits_for_current_revision_approval():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     executor = _executor(state)
     committed = executor.execute_result("commit_plan", _plan(), state)
     assert committed.ok
@@ -105,6 +139,7 @@ def test_plan_only_commit_waits_for_current_revision_approval():
 
 def test_approval_does_not_authorize_write(tmp_path):
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     state.commit_plan(**_plan())
     state.decide_plan("approved", 1)
     target = tmp_path / "not-created.txt"
@@ -120,6 +155,7 @@ def test_approval_does_not_authorize_write(tmp_path):
 
 def test_feedback_revision_and_unchanged_review_paths():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     state.commit_plan(**_plan())
     state.decide_plan("continue_exploring", 1, "inspect another module")
     trigger = state.planning_state.active_trigger_id
@@ -133,6 +169,7 @@ def test_feedback_revision_and_unchanged_review_paths():
     state.decide_plan("approved", 1)
 
     second = AgentState(); second.begin_task("task", mode="plan_only")
+    _investigate(second)
     second.commit_plan(**_plan())
     second.decide_plan("rejected", 1, "need a second check")
     with pytest.raises(PlanRejected): second.review_current_plan(1)
@@ -151,6 +188,7 @@ def test_feedback_revision_and_unchanged_review_paths():
 
 def test_loop_rejects_mixed_commit_and_returns_after_plan_handoff():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     context = ContextManager(state, [{"role": "user", "content": "task"}])
     executor = _executor(state)
     mixed = {"role": "assistant", "content": None, "tool_calls": [
@@ -189,6 +227,7 @@ def test_mixed_begin_plan_does_not_run_effect_before_phase_switch(tmp_path):
 
 def test_continued_investigation_can_pause_for_unchanged_review():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     state.commit_plan(**_plan())
     state.decide_plan("continue_exploring", 1, "look again")
     context = ContextManager(state, [{"role": "user", "content": "look again"}])
@@ -205,6 +244,7 @@ def test_continued_investigation_can_pause_for_unchanged_review():
 
 def test_feedback_survives_context_compaction_and_new_task_clears_it():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     state.commit_plan(**_plan())
     state.decide_plan("rejected", 1, "check the dependency first")
     history = [{"role": "user", "content": "task"}]
@@ -227,6 +267,7 @@ def test_cli_plan_flag_and_revision_approval_resume_same_task():
         state = context.state
         phases.append(state.planning_state.phase)
         if len(phases) == 1:
+            _investigate(state)
             state.commit_plan(**_plan())
             return "计划等待用户决定"
         assert state.planning_state.active_revision_id == 1
@@ -246,6 +287,7 @@ def test_cli_continue_review_then_approve_keeps_revision():
         state = context.state
         phases.append(state.planning_state.phase)
         if len(phases) == 1:
+            _investigate(state)
             state.commit_plan(**_plan())
             return "计划等待用户决定"
         if len(phases) == 2:
@@ -269,6 +311,7 @@ def test_cli_handoff_renders_committed_plan_in_quiet_mode(capsys):
 
     def fake_loop(context, executor):
         calls.append(context.state.planning_state.phase)
+        _investigate(context.state)
         context.state.commit_plan(**_plan(
             goal="实现文件检索器", reason="先确认现有工具",
             constraints=["保持标准库实现"],
@@ -309,6 +352,7 @@ def test_cli_review_renders_same_plan_again(capsys):
     def fake_loop(context, executor):
         calls.append(context.state.planning_state.phase)
         if len(calls) == 1:
+            _investigate(context.state)
             context.state.commit_plan(**_plan(goal="原计划目标"))
         return "计划仍合适"
 
@@ -350,6 +394,7 @@ def test_plan_renderer_uses_active_projection_and_never_executes():
 
 def test_plan_renderer_shows_revision_parent_replacements_and_status():
     state = AgentState(); state.begin_task("task", mode="plan_only")
+    _investigate(state)
     state.commit_plan(**_plan())
     state.decide_plan("continue_exploring", 1, "replace inspect")
     trigger = state.planning_state.active_trigger_id
@@ -383,6 +428,7 @@ def test_plan_renderer_reports_missing_or_mismatched_active_plan(active_plan):
 
 def test_cli_handoff_reports_missing_active_plan_without_crashing(capsys):
     def inconsistent_loop(context, executor):
+        _investigate(context.state)
         context.state.commit_plan(**_plan())
         context.state.plan_revisions.clear()  # Simulate a corrupt State snapshot.
         return "计划等待用户决定"

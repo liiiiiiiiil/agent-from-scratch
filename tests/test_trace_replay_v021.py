@@ -120,11 +120,11 @@ def test_real_registry_failure_retry_and_verification_trace_is_complete():
 
     report = build_trace(state.snapshot())
     assert report["integrity"]["status"] == "complete"
-    assert [item["generation_id"] for item in report["generations"]] == [0, 1]
-    assert report["generations"][0]["failures"][0]["diagnosis_source"] == "recovery.reason"
-    assert report["generations"][0]["verification_evidence"][0]["outcome"] == "failed"
-    assert report["generations"][1]["recovery_actions"][0]["result_attempt"] == "a-2"
-    assert report["generations"][1]["verification_evidence"][0]["caused_by_attempt_id"] == "a-3"
+    assert [item["generation_id"] for item in report["generations"]] == [0, 1, 2, 3]
+    assert report["generations"][1]["failures"][0]["diagnosis_source"] == "recovery.reason"
+    assert report["generations"][1]["verification_evidence"][0]["outcome"] == "failed"
+    assert report["generations"][2]["recovery_actions"][0]["result_attempt"] == "a-2"
+    assert report["generations"][3]["verification_evidence"][0]["caused_by_attempt_id"] == "a-3"
     edge_types = {edge["type"] for edge in report["causal_edges"]}
     assert {"generation_opener", "attempt_failure", "failure_recovery",
             "recovery_successor", "recovery_result", "attempt_verification"} <= edge_types
@@ -155,8 +155,8 @@ def test_verification_failure_again_is_a_new_failure_in_the_successor_generation
 
     report = build_trace(state.snapshot())
     assert report["integrity"]["status"] == "complete"
-    assert report["generations"][1]["failures"][0]["failure_id"] == "f-2"
-    assert report["generations"][1]["failures"][0]["phase"] == "verify"
+    assert report["generations"][3]["failures"][0]["failure_id"] == "f-2"
+    assert report["generations"][3]["failures"][0]["phase"] == "verify"
     assert report["conclusion"]["status"] == "continue"
 
 
@@ -173,7 +173,7 @@ def test_budget_exhaustion_is_replayed_as_failed_with_rejected_recovery():
     report = build_trace(state.snapshot())
     assert report["conclusion"]["status"] == "failed"
     assert "预算" in report["conclusion"]["terminal_reason"]
-    assert report["generations"][0]["recovery_actions"][0]["status"] == "rejected"
+    assert report["generations"][1]["recovery_actions"][0]["status"] == "rejected"
     assert report["integrity"]["status"] == "complete"
 
 
@@ -192,8 +192,8 @@ def test_cause_hint_has_priority_and_ask_maps_to_blocked():
     })
 
     report = build_trace(state.snapshot())
-    assert report["generations"][0]["failures"][0]["diagnosis"] == "explicit diagnosis"
-    assert report["generations"][0]["failures"][0]["diagnosis_source"] == "cause_hint"
+    assert report["generations"][1]["failures"][0]["diagnosis"] == "explicit diagnosis"
+    assert report["generations"][1]["failures"][0]["diagnosis_source"] == "cause_hint"
     assert report["conclusion"]["status"] == "blocked"
     assert report["conclusion"]["terminal_reason"]
     assert report["conclusion"]["last_failure"]["failure_id"] == "f-1"
@@ -241,7 +241,7 @@ def test_checkpoint_rollback_and_new_verification_form_a_complete_chain():
         assert report["conclusion"]["status"] == "done"
         assert report["generations"][-1]["verification_evidence"][0]["outcome"] == "passed"
         assert report["generations"][1]["recovery_actions"] == []
-        assert report["generations"][-1]["recovery_actions"][0]["checkpoint_id"] == "cp-1"
+        assert report["generations"][-2]["recovery_actions"][0]["checkpoint_id"] == "cp-1"
 
 
 def test_generation_filter_and_snapshot_are_read_only():
@@ -296,17 +296,17 @@ def test_old_verification_evidence_is_incomplete_even_when_its_source_exists():
     _record(executor, state, "run_shell", {"command": "true", "purpose": "verification"})
     snapshot = state.snapshot()
     snapshot["generations"].append({
-        "generation_id": 1, "opened_by_attempt_id": "a-2",
+        "generation_id": 2, "opened_by_attempt_id": "a-2",
         "opened_by_failure_id": None, "opened_by_recovery_id": None,
         "open_reason": "possible_effect",
     })
     snapshot["attempts"].append({
-        "attempt_id": "a-2", "pre_generation_id": 0, "generation_id": 1,
+        "attempt_id": "a-2", "pre_generation_id": 1, "generation_id": 2,
         "tool": "mutate", "arguments_hash": "hash", "redacted_arguments": {},
         "outcome": "succeeded", "duration_ms": 1, "effect_class": "possible",
         "handler_admitted": True, "permission": "allowed",
     })
-    snapshot["current_generation_id"] = 1
+    snapshot["current_generation_id"] = 2
     report = build_trace(snapshot)
     assert report["integrity"]["status"] == "incomplete"
     assert any("复用了旧 generation" in issue for issue in report["integrity"]["issues"])
@@ -360,13 +360,13 @@ def test_generation_opener_must_match_reason_and_generation():
     _record(executor, state, "run_shell", {"command": "true", "purpose": "verification"})
     snapshot = state.snapshot()
     snapshot["generations"].append({
-        "generation_id": 1,
+        "generation_id": 2,
         "opened_by_attempt_id": "a-1",
         "opened_by_failure_id": None,
         "opened_by_recovery_id": None,
         "open_reason": "possible_effect",
     })
-    snapshot["current_generation_id"] = 1
+    snapshot["current_generation_id"] = 2
     snapshot["verification_evidence"] = []
 
     report = build_trace(snapshot)
@@ -397,7 +397,7 @@ def test_recovery_generation_and_attempt_have_one_causal_predecessor():
         shell.handler = original
 
     snapshot = state.snapshot()
-    generation = snapshot["generations"][1]
+    generation = snapshot["generations"][2]
     attempt = snapshot["attempts"][1]
     assert generation["opened_by_failure_id"] is None
     assert generation["opened_by_recovery_id"] == "r-1"

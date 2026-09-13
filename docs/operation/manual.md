@@ -53,7 +53,7 @@ Direct Path 因 failure 或 blocked 恢复进入 Explore 时可能还没有 pare
 
 普通任务仍从 `direct` 开始。模型认为任务需要先规划时，独占调用 `begin_plan` 进入 `exploring`；尚未提交计划时可用 `cancel_planning` 回到 Direct Path。命令行使用 `PYTHONPATH=src python -m mini_agent --plan "<任务>"` 时，首条任务从 `plan_only / exploring` 开始，不能取消强制规划。该命令处理首条任务后仍进入交互循环。
 
-`exploring` 只允许无副作用调查、独占调用 `commit_plan`，以及普通模式尚无计划时的 `cancel_planning`。执行 shell、文件写入、verification、恢复和进度更新会在 PermissionGate 之前被拒绝；同回合混合 `commit_plan` 与其他调用会整体拒绝。每个被拒绝的调用仍有对应工具结果，但不运行 handler、不推进 generation、不生成验证证据。
+`exploring` 只允许无副作用调查、独占调用 `commit_plan`，以及普通模式尚无计划时的 `cancel_planning`。shell、文件写入、verification、恢复和进度更新会在 PermissionGate 之前被拒绝；同回合混合 `commit_plan` 与其他调用会整体拒绝。`--plan` 首次提交还要求至少一条成功、获准且已执行的只读调查记录，否则返回 `plan_rejected`。每个被拒绝的调用仍有对应工具结果，但不运行 handler、不推进 generation、不生成验证证据。
 
 普通模式提交计划后进入 `executing`。`--plan` 模式提交后停在 `awaiting_approval`，CLI 从 State 中的 `active_plan` 打印完整待批计划及当前 revision ID，再等待用户决定；即使 `OUTPUT_MODE=quiet` 也会显示，模型不会重新复述计划或继续执行。继续调查后使用 `/review`，CLI 会再次打印同一份计划和决定命令。交接命令：
 
@@ -135,11 +135,11 @@ Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`
 
 ## v0.17 失败模型
 
-每个任务从 generation 0 开始。可能产生副作用的工具（文件写入、编辑和 execution shell）在权限放行后、handler 前原子推进 generation；即使 handler 失败也不会回退。Executor 产出结构化 `ExecutionResult`，State 保存 `ExecutionAttempt`、`FailureEvent` 和绑定 generation 的 verification evidence。参数以 canonical JSON 的 SHA-256 指纹计数，Structured State 仅显示 hash/脱敏摘要。全只读回合可并发，包含副作用的回合按模型顺序串行提交；verification 不得与副作用同轮。
+每个任务从 generation 0 开始。可能产生副作用的工具（文件写入、编辑和所有 shell 命令）在权限放行后、handler 前原子推进 generation；即使 handler 失败也不会回退。`purpose="verification"` 只指定命令结果用作验证证据，不证明 shell 命令只读，因此验证命令也会打开新 generation，证据绑定这一代。Executor 产出结构化 `ExecutionResult`，State 保存 `ExecutionAttempt`、`FailureEvent` 和绑定 generation 的 verification evidence。参数以 canonical JSON 的 SHA-256 指纹计数，Structured State 仅显示 hash/脱敏摘要。全只读回合可并发，包含 shell 的回合按模型顺序串行提交；verification 不得与其他可能有副作用的调用同轮。
 
 ## v0.16 计划驱动执行（Plan-driven Execution）
 
-复杂任务通常按 Plan → Execute → Observe → Verify 推进；如果观察结果或验证结果暴露问题，模型再 Replan（重排 Todo）并继续执行。文件修改以及所有实际执行的 `run_shell(purpose="execution")` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。
+复杂任务通常按 Plan → Execute → Observe → Verify 推进；如果观察结果或验证结果暴露问题，模型再 Replan（重排 Todo）并继续执行。文件修改以及所有实际执行的 `run_shell` 都按可能改变环境处理，会使旧验证失效；使用 `run_shell` 的 `purpose="verification"` 且退出码为 0 的结果作为完成证据，建议将最终测试或检查作为最后一个 verification 调用。验证命令本身应只检查结果，不承担文件修改；Runtime 保守记账可能的副作用，但不提供通用 shell 沙箱。
 
 v0.16.1 修复了完成提醒：当模型在 Todo 未完成或仍需验证时输出阶段性文本，运行时注入明确的 Runtime Notice，要求下一回复调用推进工具（更新 Todo、调查/操作或验证），而不是只口头描述下一步。提醒按进展状态最多一次：完整 Todo、非 Todo 工具结果、验证证据数量、generation 或 `verification_required` 发生变化后，可以再次提醒；相同标记下再次输出无工具文本才标记 `blocked`。没有 `progress_marker` 的旧式 State 保持一次提醒兼容行为。这种保守策略不依赖第三方库或命令解析。
 

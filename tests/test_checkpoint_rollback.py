@@ -76,7 +76,7 @@ def test_existing_file_checkpoint_restores_bytes_and_mode():
         assert path.read_bytes() == b"before\n"
         assert stat.S_IMODE(path.stat().st_mode) == 0o640
         snapshot = state.snapshot()
-        assert snapshot["current_generation_id"] == 2
+        assert snapshot["current_generation_id"] == 3
         assert snapshot["checkpoints"][0]["status"] == "restored"
         assert snapshot["recovery_actions"][0]["checkpoint_id"] == "cp-1"
         assert snapshot["attempts"][-1]["tool"] == "rollback_checkpoint"

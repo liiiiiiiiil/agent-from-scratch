@@ -43,7 +43,7 @@ def _executor(state, extra=None):
     rules = {
         "begin_plan": ALLOW, "cancel_planning": ALLOW,
         "commit_plan": ALLOW, "update_plan_progress": ALLOW,
-        "request_replan": ALLOW, "read_file": ALLOW,
+        "request_replan": ALLOW, "read_file": ALLOW, "list_dir": ALLOW,
         "run_shell": ALLOW, "recover": ALLOW,
     }
     if extra is not None:
@@ -255,12 +255,13 @@ def test_failure_replan_keeps_failure_and_requires_new_generation_verification()
     assert verified.ok
     snapshot = state.snapshot()
     assert snapshot["repair_loop"]["phase"] == "idle"
-    assert snapshot["verification_evidence"][-1]["generation_id"] == first_generation + 1
+    assert snapshot["verification_evidence"][-1]["generation_id"] == first_generation + 2
     assert snapshot["failures"][0]["failure_id"] == "f-1"
 
 
 def test_user_feedback_and_blocked_resume_triggers_keep_source_fields_separate():
     state = AgentState(); state.begin_task("handoff", mode="plan_only")
+    _record(_executor(state), state, "list_dir", {})
     state.commit_plan(**_plan())
     state.decide_plan("rejected", 1, "change the execution order")
     trigger = state.snapshot()["replan_triggers"][-1]
@@ -391,7 +392,7 @@ def test_ask_resume_returns_to_diagnosis_and_keeps_verification_obligation():
         "command": "true", "purpose": "verification",
     })
     assert verified.ok
-    assert state.snapshot()["verification_evidence"][-1]["generation_id"] == generation
+    assert state.snapshot()["verification_evidence"][-1]["generation_id"] == generation + 1
     assert state.snapshot()["verification_required"] is False
 
 
@@ -483,7 +484,7 @@ def test_real_loop_recover_ask_resume_explore_commit_and_verify():
     assert len(second_calls) == 6
     assert state.status == "running"
     assert state.repair_phase == "idle"
-    assert state.current_generation_id == generation
+    assert state.current_generation_id == generation + 1
     snapshot = state.snapshot()
     assert snapshot["verification_required"] is False
     assert snapshot["failures"][0]["failure_id"] == "f-1"
@@ -613,7 +614,9 @@ def test_repeated_successful_verification_does_not_open_progress_epochs():
     assert result.startswith("任务已阻塞：")
     assert state.snapshot()["loop_stagnation"]["progress_epoch"] == 1
     assert state.snapshot()["loop_stagnation"]["consecutive_no_progress_rounds"] == 3
-    assert len(state.snapshot()["verification_evidence"]) == 4
+    assert len(state.snapshot()["verification_evidence"]) == 1
+    assert len(state.snapshot()["verification_history"]) == 4
+    assert state.current_generation_id == 4
     assert len(notices) == 1
 
 

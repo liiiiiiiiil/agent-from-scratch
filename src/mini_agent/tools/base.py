@@ -47,8 +47,9 @@ class Tool:
             "parameters": self.parameters}}
 
     def effect_for(self, arguments: dict[str, Any]) -> EffectClass:
-        if self.name == "run_shell" and arguments.get("purpose", "execution") == "verification":
-            return "none"
+        # A shell command may write files regardless of its declared purpose.
+        if self.name == "run_shell":
+            return "possible"
         return self.effect_class
 
 

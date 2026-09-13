@@ -136,7 +136,7 @@ def test_real_failure_replan_new_generation_trace_is_ordered_and_complete():
     assert report["integrity"] == {"status": "complete", "issues": []}
     assert report["conclusion"]["status"] == "done"
     assert report["conclusion"]["evidence"]["active_revision_id"] == 2
-    assert report["conclusion"]["evidence"]["verification_generation"] == 1
+    assert report["conclusion"]["evidence"]["verification_generation"] == 3
 
     first, second = report["plan_revisions"]
     assert first["failures"][0]["failure_id"] == "f-1"
@@ -144,7 +144,7 @@ def test_real_failure_replan_new_generation_trace_is_ordered_and_complete():
     assert second["trigger_source"]["failure_id"] == "f-1"
     assert second["diff"]["replaced"] == ["edit"]
     assert [item["attempt_id"] for item in second["attempts"]] == ["a-2", "a-3"]
-    assert second["verification_evidence"][0]["generation_id"] == 1
+    assert second["verification_evidence"][0]["generation_id"] == 3
     assert any(edge["type"] == "revision_parent" and edge["status"] == "resolved"
                for edge in report["causal_edges"])
     assert any(edge["type"] == "trigger_revision" and edge["status"] == "resolved"
@@ -158,7 +158,7 @@ def test_revision_query_keeps_trigger_predecessor_and_generation_query_is_compat
     revision_report = build_trace(snapshot, revision_id=2)
     assert revision_report["query"]["scope"] == "revision"
     assert [item["revision_id"] for item in revision_report["plan_revisions"]] == [2]
-    assert revision_report["query"]["generation_ids"] == [0, 1]
+    assert revision_report["query"]["generation_ids"] == [1, 2, 3]
     assert any(event.get("record_type") == "failure" for event in revision_report["plan_timeline"])
     assert any(edge["type"] == "trigger_source" and edge["status"] == "resolved"
                for edge in revision_report["causal_edges"])
@@ -173,10 +173,10 @@ def test_revision_query_keeps_trigger_predecessor_and_generation_query_is_compat
 
 def test_generation_query_includes_revisions_active_after_their_commit_generation():
     snapshot = _real_replan_snapshot()
-    report = build_trace(snapshot, 1)
+    report = build_trace(snapshot, 2)
     assert report["integrity"]["status"] == "complete"
     assert [item["revision_id"] for item in report["plan_revisions"]] == [2]
-    assert report["plan_revisions"][0]["generation_id"] == 0
+    assert report["plan_revisions"][0]["generation_id"] == 1
     assert report["plan_revisions"][0]["generation_role"] == "active"
     assert report["generations"][0]["plan_revisions"][0]["generation_role"] == "active"
 
@@ -219,6 +219,8 @@ def test_missing_fact_event_is_unresolved_even_with_contiguous_sequence(record_t
 def test_plan_only_decisions_review_and_same_generation_revisions_have_events():
     state = AgentState()
     state.begin_task("plan-only", mode="plan_only")
+    executor = ToolExecutor(create_registry(state), PermissionGate(PermissionPolicy({"list_dir": ALLOW})))
+    _execute(executor, state, "list_dir", {})
     state.commit_plan(**_plan())
     state.decide_plan("continue_exploring", 1, "inspect the dependency first")
     state.review_current_plan(1)
@@ -262,6 +264,8 @@ def test_plan_only_decisions_review_and_same_generation_revisions_have_events():
 
     rejected = AgentState()
     rejected.begin_task("plan-only rejection", mode="plan_only")
+    executor = ToolExecutor(create_registry(rejected), PermissionGate(PermissionPolicy({"list_dir": ALLOW})))
+    _execute(executor, rejected, "list_dir", {})
     rejected.commit_plan(**_plan())
     decision = rejected.decide_plan("rejected", 1, "change the edit order")
     trigger = rejected.snapshot()["replan_triggers"][-1]
