@@ -4,7 +4,7 @@
 
 ## 0. 心智模型：一句话版本
 
-**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入，v0.22 又把 active Plan Contract 的有界执行视图放入同一条语义轨道：模型看到的不是“最近一次文字说了什么”，而是当前计划、步骤依赖以及是否必须诊断、恢复或独立验证。完整 `plan_revisions` 和 `plan_progress_history` 保存在 State，不直接复制进 LLM 上下文；v0.21 的 Trace 对缺失 `todo_revisions` 继续安全降级为空。
+**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入，v0.22 又把 active Plan Contract 的有界执行视图放入同一条语义轨道；v0.24 继续加入活动 replan trigger、修订预算和 LoopStagnationState：模型看到的不是“最近一次文字说了什么”，而是当前计划、步骤依赖、真实触发来源以及是否必须诊断、恢复、重规划或独立验证。完整 `plan_revisions` 和 `plan_progress_history` 保存在 State，不直接复制进 LLM 上下文；v0.21 的 Trace 对缺失 `todo_revisions` 继续安全降级为空。
 
 ```text
 view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
@@ -52,7 +52,7 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 │  │
 │  └─ 有 tool_calls：ThreadPoolExecutor 并发执行（含 PermissionGate 拦截）
 │        │
-│        │   ★ 同一次执行，写两条轨道：
+│        │   ★ 同一次执行，写两条轨道；全部 role=tool 回灌后再观察停滞：
 │        │
 │        ├─ 协议轨迹：history += {role:tool}（完整结果原文）
 │        │     LLM 下一轮直接读；受预算约束，可能被截断/折叠
@@ -64,7 +64,7 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 └──► 两条轨道在下一轮的 ① 重新汇合 —— 循环，直到纯文本收尾或轮次上限
 ```
 
-Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、提交或推进计划，或独占 `recover`；`verification_required` 要求下一回合只有一个独立 verification。上下文压缩只处理协议历史，不能删除计划执行视图、`repair_loop`、活动 failure/recovery、generation 或预算。
+Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、独占 `recover` 或独占 `request_replan`；failure trigger 进入 Explore 后只允许只读调查或独占 `commit_plan`；`verification_required` 要求下一回合只有一个独立 verification。v0.24 的停滞计数、短 hash、活动 trigger 来源和 gate 合法下一动作也来自同一份 State 快照。上下文压缩只处理协议历史，不能删除计划执行视图、`repair_loop`、活动 failure/recovery、generation、预算或停滞状态。
 
 ## 2. 关键机制一：双轨记录（本架构的核心取舍）
 
@@ -142,7 +142,7 @@ window = CONTEXT_WINDOW
 2. `history` 只追加不修改；trim/compact 只改副本——任何一轮的视图都可从完整 history 重建。
 3. 每轮 tool results 全部回灌后才进下一轮（无 v0.10 的"半截状态"）。
 4. 语义事实免疫裁剪：不管协议历史被削成什么样，`[Structured State]` 每轮完整重渲染。
-5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒；v0.20 的阶段性 Notice 会明确指出下一步合法动作。
+5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒；v0.20 的阶段性 Notice 会明确指出下一步合法动作，v0.24 的停滞 Notice 还会显示计数、类别和同时满足 Planning / Repair gate 的下一动作。
 6. Trace & Replay 读取独立的 `state.snapshot()` 视图，不进入 LLM 消息，不调用执行链，也不改变上下文或 State。
 7. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
 

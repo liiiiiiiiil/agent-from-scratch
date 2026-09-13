@@ -281,7 +281,7 @@ def test_terminal_batch_displays_each_result_without_recording_or_dropping_proto
     with patch.object(agent_module, "OUTPUT_MODE", "normal"), \
             patch.object(agent_module, "call_llm", side_effect=fake_llm), \
             redirect_stdout(output):
-        assert agent_loop(context, executor) == "terminal explained"
+        assert agent_loop(context, executor) == "任务已阻塞：already stopped"
 
     rendered = output.getvalue()
     assert "无效 · read_file · path=x.py" in rendered

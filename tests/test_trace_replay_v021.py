@@ -10,7 +10,7 @@ import pytest
 
 from mini_agent import __main__ as cli
 from mini_agent.permission import ALLOW, DENY, PermissionGate, PermissionPolicy
-from mini_agent.state import AgentState
+from mini_agent.state import AgentState, ExecutionAttempt
 from mini_agent.tools import create_registry
 from mini_agent.tools.base import ToolExecutor
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
@@ -55,11 +55,18 @@ def test_todo_revision_is_atomic_generation_bound_and_resettable():
     state.update_plan_progress(1, "inspect", "completed", "done")
     reservation = state.reserve_attempt("possible", "mutate", {})
     assert reservation.generation_id == 1
+    state.attempts.append(ExecutionAttempt(
+        "a-1", 0, 1, "observe", "hash", {}, "succeeded", 0,
+        "none", True, "allowed",
+    ))
+    state._revision_attempt_boundaries[1] = 0
+    trigger = state.request_replan("observation", "a-1", "the old plan needs a revision")
     state.commit_plan(
         goal="trace task revised", constraints=[], success_criteria=["check passes"],
         steps=[{"step_id": "inspect", "content": "inspect", "depends_on": [],
                 "success_criteria": ["done"], "replaces": []}],
         reason="revised", parent_revision_id=1,
+        trigger_id=trigger.trigger_id,
     )
     revisions = state.snapshot()["plan_revisions"]
     assert [item["revision_id"] for item in revisions] == [1, 2]

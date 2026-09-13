@@ -1,6 +1,7 @@
 """带工具的 Agent Loop（流式）：调 LLM -> 若要工具则执行 -> 结果回灌 -> 再调，循环到纯文本回复或上限。"""
 
 import http.client
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -9,6 +10,8 @@ from mini_agent.context import ContextManager
 from mini_agent.output import TerminalOutput
 from mini_agent.tools import registry
 from mini_agent.tools.base import ExecutionResult, ToolExecutor
+from mini_agent.state import canonical_arguments_hash
+from mini_agent.tools.base import validate_arguments
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
 
 
@@ -95,6 +98,56 @@ def _recovery_rejection_content(state, arguments, detail):
     if getattr(state, "status", None) in ("blocked", "failed"):
         payload["error_kind"] = "task_terminal"
     return json.dumps(payload, ensure_ascii=False)
+
+
+_PLAN_CONTROL_TOOLS = {
+    "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
+    "request_replan",
+}
+_STAGNATION_EXCLUDED_TOOLS = _PLAN_CONTROL_TOOLS | {
+    "recover", "rollback_checkpoint",
+}
+
+
+def _normalized_action_arguments(registry, name, arguments):
+    try:
+        return validate_arguments(registry.get(name).parameters, arguments)
+    except (TypeError, ValueError):
+        return arguments
+
+
+def _round_fingerprint(registry, parsed_calls):
+    parts = [
+        (name, canonical_arguments_hash(
+            _normalized_action_arguments(registry, name, arguments),
+        ))
+        for name, arguments in parsed_calls
+    ]
+    encoded = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stable_observation_hash(execution):
+    """Hash a successful read-only result without copying it into State."""
+    def scrub(value):
+        if isinstance(value, dict):
+            return {
+                key: scrub(item) for key, item in value.items()
+                if key not in {"attempt_id", "duration_ms", "elapsed_ms", "timing_ms"}
+            }
+        if isinstance(value, (list, tuple)):
+            return [scrub(item) for item in value]
+        return value
+
+    payload = {
+        "tool": execution.tool,
+        "outcome": execution.outcome,
+        "output": scrub(execution.output),
+        "exit_code": execution.exit_code,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
@@ -271,6 +324,15 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         output.close()
         return value
 
+    def _terminal_state_result(state):
+        """Return the loop result for a terminal State, if it became terminal."""
+        status = getattr(state, "status", None) if state is not None else None
+        if status == "blocked":
+            return f"任务已阻塞：{getattr(state, 'terminal_reason', '') or '任务已阻塞'}"
+        if status == "failed":
+            return f"任务已失败：{getattr(state, 'terminal_reason', '') or '任务已失败'}"
+        return None
+
     initial_state = getattr(context_manager, "state", None)
     if (initial_state is not None and
             getattr(getattr(initial_state, "planning_state", None), "phase", None) == "awaiting_approval"):
@@ -431,17 +493,20 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             effects.append(effect)
         has_possible = "possible" in effects or any(name == "recover" for name, _ in parsed_calls)
         has_serial_plan_write = any(
-            name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
-            for name, _ in parsed_calls
+            name in _PLAN_CONTROL_TOOLS for name, _ in parsed_calls
         )
         planning_batch_errors = {}
         planning_phase = getattr(getattr(state, "planning_state", None), "phase", "direct")
         plan_controls = {"begin_plan", "cancel_planning"}
         if (len(parsed_calls) != 1 and
                 (any(name in plan_controls for name, _ in parsed_calls) or
+                 any(name == "request_replan" for name, _ in parsed_calls) or
                  (planning_phase == "exploring" and
                   any(name == "commit_plan" for name, _ in parsed_calls)))):
-            detail = "工具调用拒绝: 规划阶段切换或 exploring 中的 commit_plan 必须独占一个工具回合"
+            detail = (
+                "工具调用拒绝: request_replan、规划阶段切换或 exploring 中的 "
+                "commit_plan 必须独占一个工具回合"
+            )
             planning_batch_errors = {index: detail for index in range(len(parsed_calls))}
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
@@ -493,7 +558,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             name, args = parsed_calls[index]
             if index in planning_batch_errors:
                 text = planning_batch_errors[index]
-                is_plan = name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
+                is_plan = name in _PLAN_CONTROL_TOOLS
                 if is_plan:
                     text = json.dumps({"status": "plan_rejected", "message": text}, ensure_ascii=False)
                 invalid = ExecutionResult(
@@ -504,7 +569,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 return tool_call_id, text, None, invalid
             if index in repair_batch_errors:
                 text = repair_batch_errors[index]
-                if parsed_calls[index][0] in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress"):
+                if parsed_calls[index][0] in _PLAN_CONTROL_TOOLS:
                     text = json.dumps({
                         "status": "plan_rejected",
                         "message": text,
@@ -614,6 +679,56 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "tool_call_id": tool_call_id,
                 "content": content,
             })
+
+        # A tool handler may exhaust a budget or apply a recovery strategy
+        # that makes the task terminal.  All results above must still be
+        # visible to the model protocol, but no additional LLM call may
+        # overwrite that terminal fact.
+        terminal_result = _terminal_state_result(state)
+        if terminal_result is not None:
+            return _finish(terminal_result)
+
+        # Observe only after every call has been executed or rejected, its
+        # State fact has been committed in model order, and its tool result is
+        # visible in history.  This keeps stagnation detection from creating a
+        # second, partial tool-round protocol.
+        if (state is not None and hasattr(state, "observe_tool_round")
+                and structured):
+            action_fingerprint = _round_fingerprint(run_registry, parsed_calls)
+            observations = []
+            effect_actions = []
+            for execution in (
+                item[2] for item in results
+                if isinstance(item[2], ExecutionResult)
+            ):
+                if (execution.outcome != "succeeded" or not execution.handler_admitted
+                        or execution.permission != "allowed"):
+                    continue
+                is_verification = (
+                    execution.tool == "run_shell"
+                    and execution.arguments.get("purpose", "execution") == "verification"
+                )
+                if execution.effect_class == "none" and not is_verification:
+                    if execution.tool not in _STAGNATION_EXCLUDED_TOOLS:
+                        observations.append(_stable_observation_hash(execution))
+                elif execution.effect_class == "possible" and not is_verification:
+                    if execution.tool not in _STAGNATION_EXCLUDED_TOOLS:
+                        effect_actions.append(canonical_arguments_hash({
+                            "tool": execution.tool,
+                            "arguments": execution.arguments,
+                        }))
+            observation = state.observe_tool_round(
+                action_fingerprint, observations, effect_actions,
+                tuple(name for name, _ in parsed_calls),
+            )
+            if observation.get("warning") and hasattr(context_manager, "set_runtime_notice"):
+                context_manager.set_runtime_notice(str(observation["warning"]))
+            if observation.get("blocked"):
+                reason = observation.get("terminal_reason") or getattr(state, "terminal_reason", "")
+                return _finish(f"任务已阻塞：{reason}")
+            terminal_result = _terminal_state_result(state)
+            if terminal_result is not None:
+                return _finish(terminal_result)
         if state is not None and getattr(state.planning_state, "phase", None) == "awaiting_approval":
             return _finish("计划等待用户决定")
 

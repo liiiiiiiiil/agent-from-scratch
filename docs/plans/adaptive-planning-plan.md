@@ -1,7 +1,7 @@
 # 阶段七：自适应规划与重规划（Adaptive Planning & Replanning）实施计划
 
-> 状态：`v0.22` Plan Contract 与 `v0.23` Plan Mode & Handoff 已实现；`v0.24`–`v0.25` 仍为后续规划
-> 当前基线：`v0.23`（Plan Mode & Handoff；`v0.22` Plan Contract 为前一版基线）
+> 状态：`v0.22` Plan Contract、`v0.23` Plan Mode & Handoff 与 `v0.24` Replanning Policy 已实现；`v0.25` 仍为后续规划
+> 当前基线：`v0.24`（Replanning Policy；`v0.23` Plan Mode & Handoff 为前一版基线）
 > 前置阶段：阶段五项目感知与任务编排（`v0.14`–`v0.16`）与阶段六可靠执行（`v0.17`–`v0.21`）
 > 版本范围：`v0.22`–`v0.25`
 
@@ -209,12 +209,13 @@ PlanRevision
 - revision_id
 - generation_id
 - parent_revision_id: optional
-- trigger_id: optional                 # 初始计划为空，replan 必填
+- trigger_id: optional                 # 普通初始计划为空；Direct failure / blocked resume 的首个 revision 有 trigger 但无 parent
 - goal
 - constraints: list[string]
 - success_criteria: list[string]
 - steps: tuple[PlanStep]
 - reason
+- diff: optional PlanDifference           # retained / added / cancelled / replaced 与变化标记
 
 PlanProgressEvent
 - progress_id
@@ -252,6 +253,7 @@ PlanningState
 - active_trigger_id: optional
 - replans_used
 - replans_remaining
+- trigger_no_progress_commits            # 只属于当前活动 trigger
 
 LoopStagnationState
 - progress_epoch
@@ -318,7 +320,7 @@ LoopStagnationState
 
 验收重点：即使模型请求写文件或 execution shell，`exploring` 和 `awaiting_approval` 也不会产生副作用；批准旧 revision 不会错误启动执行；批准后高风险工具仍触发 PermissionGate。
 
-### 5.3 `v0.24` Replanning Policy
+### 5.3 `v0.24` Replanning Policy（已实现）
 
 目标：在新事实推翻原方案时，以明确触发器和有限预算修订计划，而不是静默覆盖 Todo 或无限重写方案。
 
@@ -334,7 +336,7 @@ LoopStagnationState
 
 验收重点：retry、adjust 与 replan 的入口和计数相互独立；每次 replan 都能定位触发事实；无变化重规划、重复工具回合、无新事实的调查或执行不推进都能在各自预算内明确收口，不形成隐藏循环。
 
-### 5.4 `v0.25` Plan Trace & Evaluation
+### 5.4 `v0.25` Plan Trace & Evaluation（后续规划）
 
 目标：只读回放一次任务的规划链：调查 → 初始计划 → 批准 → 执行 → 触发事实 → 新 revision → 验证 → 终态。
 
@@ -362,7 +364,7 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 | direct / executing | idle | 按现有规则执行、更新进度或验证 |
 | exploring | idle | 只读调查，或独占 `commit_plan` |
 | awaiting_approval | idle | 等待用户批准、驳回或结束；模型工具调用全部拒绝 |
-| direct / executing | diagnosis_required | 只读诊断、recover，或独占 `request_replan` |
+| direct / executing | diagnosis_required | 只读诊断、独占 `recover`，或独占 `request_replan` |
 | exploring | diagnosis_required | 只读调查，或独占 `commit_plan`；active failure 保留 |
 | 任意 | verification_required | 仅允许阶段六要求的单个独立 verification，不得发起或提交 replan |
 
@@ -411,7 +413,8 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 
 - [x] `v0.22` Plan Contract 已有独立教程、变更记录和可运行测试
 - [x] `v0.23` 已有独立教程、变更记录和可运行测试（tag 事实检查待用户手动创建 tag）
-- [ ] `v0.24`–`v0.25` 各有独立教程、变更记录和可运行测试
+- [x] `v0.24` 已有独立教程、变更记录和可运行测试（tag 事实检查待用户手动创建 tag）
+- [ ] `v0.25` 有独立教程、变更记录和可运行测试
 - [ ] 计划结构、步骤进度、执行事实和验证证据有单一且不同的写入来源
 - [ ] 简单任务保持短路径，复杂任务可以显式进入受 Runtime 约束的 Explore → Commit → Execute 流程
 - [ ] `--plan` 在用户批准前不产生副作用，批准也不会绕过 PermissionGate

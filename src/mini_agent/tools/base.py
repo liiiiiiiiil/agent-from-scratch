@@ -247,7 +247,10 @@ class ToolExecutor:
         started = monotonic()
         if state is not None and getattr(state, "is_terminal", lambda: False)():
             return self._terminal_result(name, arguments, state)
-        is_plan_tool = name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
+        is_plan_tool = name in (
+            "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
+            "request_replan",
+        )
 
         def plan_rejected(detail: object) -> ExecutionResult:
             text = json.dumps({
@@ -274,7 +277,8 @@ class ToolExecutor:
                 "not_checked", False, "invalid", 0, "none", text, text,
                 error_kind="internal_tool",
             )
-        if state is not None and hasattr(state, "planning_gate"):
+        if (name != "request_replan" and state is not None
+                and hasattr(state, "planning_gate")):
             raw_arguments = arguments if isinstance(arguments, dict) else {}
             phase_error = state.planning_gate(
                 name, raw_arguments, tool.effect_for(raw_arguments),
@@ -293,7 +297,9 @@ class ToolExecutor:
             if is_plan_tool:
                 return plan_rejected(error)
             text = f"工具调用失败: {type(error).__name__}: {error}"
-            if str(name) == "recover" and state is not None:
+            planning_phase = getattr(getattr(state, "planning_state", None), "phase", None)
+            if str(name) == "recover" and state is not None and planning_phase not in (
+                    "exploring", "awaiting_approval"):
                 rejection = self._record_recovery_rejection(state, arguments, text)
                 if rejection is not None:
                     return ExecutionResult(

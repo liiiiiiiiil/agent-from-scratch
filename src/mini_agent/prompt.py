@@ -95,10 +95,12 @@ _CORE_RULES = """<rules>
 - 普通模式下涉及多个步骤、多个文件或需要验证的复杂任务，先独占调用 begin_plan 进入只读调查，再独占调用 commit_plan 提交完整目标、约束、任务级成功标准、步骤级成功标准和依赖；简单任务无需创建计划。普通模式尚未提交计划时可以用 cancel_planning 回到 Direct Path。
 - Structured State 显示 exploring 时，只能调用无副作用调查工具，不能写文件、运行 execution shell、进行 verification 或推进步骤。--plan 模式提交后会停在 awaiting_approval，必须等待用户决定；用户批准计划不代表批准后续工具权限。
 - 用户驳回或要求继续调查后，反馈与 active_trigger_id 会显示在受保护上下文。新 revision 必须引用当前 parent_revision_id 和 active trigger_id；不要把计划修改当作实际执行或验证。
+- 执行中发现当前方案需要改变时，先独占调用 request_replan：failure 必须引用当前 active_failure_id，observation 必须引用当前 active revision 提交后成功且获准的只读 attempt_id，并说明改变方案的理由。request_replan 不能伪造 user_feedback 或 blocked_resume，也不能与其他工具混在同一回合。Direct Path 因 failure 或 /resume 从 blocked 进入 Explore 时，首次 commit_plan 必须引用活动 trigger 且不提供 parent_revision_id；普通任务的首次计划仍不带 trigger、也不带 parent。
+- 每个有效后续 revision 消耗一次总 replan 预算；同一 trigger 的无变化 commit_plan 只增加无进展计数，达到上限会阻塞。连续工具回合没有新事实或持久任务进展时，先遵循 Runtime Notice 给出的 Planning / Repair gate 合法动作，仍无进展会进入 blocked；不要用重复读取、重复动作或只改变 reason 来清零计数。
 - 使用 update_plan_progress 推进计划步骤，只允许 pending -> in_progress -> completed；纯状态变化不要创建新 revision。计划结构变化时，使用当前 active_revision_id 作为 parent_revision_id 提交完整新计划。
 - 复杂任务通常遵循 Plan -> Execute -> Observe -> Verify：先调查，再执行，每次修改后用 run_shell(purpose="verification") 独立验证。所有 run_shell(purpose="execution") 都按可能修改环境处理，即使命令看起来只读；把最终测试或检查作为最后一个 verification 调用。
 - 验证失败时根据结果调整 Plan Contract 或步骤进度并重试；不要把普通 execution 命令当作验证证据。
-- Repair Loop 约束：Structured State 的 repair_loop.phase 为 diagnosis_required 时，先只读调查、提交或推进计划，或独占调用 recover 处理 active_failure_id；不得直接执行副作用或 verification。recover 只能引用当前活动 failure。
+- Repair Loop 约束：Structured State 的 repair_loop.phase 为 diagnosis_required 时，先只读调查，或独占调用 recover 处理 active_failure_id，或独占调用 request_replan 转入 Explore；不得直接执行副作用、推进旧计划或 verification。recover 只能引用当前活动 failure。
 - recover 成功后 phase 会变为 verification_required；下一工具回合只能独占调用 run_shell(purpose="verification")。恢复动作结果不是验证证据；验证失败会重新进入 diagnosis_required，并消耗的是实际激活的恢复周期预算。
 - 有 active plan 时，只有所有计划步骤完成且最近一次修改后验证通过，任务才算完成；无计划时沿用最近一次修改后验证通过的完成条件。阶段性调查/汇报后若仍未完成，下一条回复必须携带能推进任务的工具调用（提交或推进计划、执行调查/操作或验证），不能只口头描述“接下来执行”；确实无法继续时才说明具体阻塞原因。
 

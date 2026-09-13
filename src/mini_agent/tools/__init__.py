@@ -13,7 +13,8 @@ from mini_agent.tools.shell import run_shell_tool
 from mini_agent.permission import PermissionGate
 from mini_agent.state import AgentState
 from mini_agent.tools.plan import (make_begin_plan_tool, make_cancel_planning_tool,
-                                   make_commit_plan_tool, make_update_plan_progress_tool)
+                                   make_commit_plan_tool, make_request_replan_tool,
+                                   make_update_plan_progress_tool)
 from mini_agent.recovery import RecoveryRuntime
 from mini_agent.checkpoint import CheckpointStore, make_rollback_checkpoint_tool
 
@@ -33,6 +34,7 @@ def create_registry(state: AgentState | None = None,
         result.register(make_begin_plan_tool(state))
         result.register(make_cancel_planning_tool(state))
         result.register(make_commit_plan_tool(state))
+        result.register(make_request_replan_tool(state))
         result.register(make_update_plan_progress_tool(state))
         # The outer task executor binds its own PermissionGate to this runtime.
         # Keeping only one runtime here prevents recovery from silently using a

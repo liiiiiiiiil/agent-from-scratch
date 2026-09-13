@@ -11,7 +11,9 @@ from typing import Any, Literal
 
 from mini_agent.checkpoint import CheckpointStore
 from mini_agent.config import (MAX_ATTEMPT_FINGERPRINTS, MAX_FAILURE_RETRIES,
-                               MAX_RECOVERY_ACTIONS, MAX_REPAIR_CYCLES)
+                               MAX_NO_PROGRESS_REPLANS, MAX_REPLAN_REVISIONS,
+                               MAX_RECOVERY_ACTIONS, MAX_REPAIR_CYCLES,
+                               MAX_STAGNANT_ROUNDS)
 
 EffectClass = Literal["none", "possible"]
 AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid"]
@@ -38,6 +40,34 @@ class AttemptBudgetExceeded(ValueError):
 
 class PlanRejected(ValueError):
     """A model plan request failed validation without becoming an execution failure."""
+
+
+@dataclass(frozen=True)
+class PlanStepDifference:
+    step_id: str
+    dependencies_changed: bool = False
+
+
+@dataclass(frozen=True)
+class PlanDifference:
+    retained: tuple[PlanStepDifference, ...] = ()
+    added: tuple[str, ...] = ()
+    cancelled: tuple[str, ...] = ()
+    replaced: tuple[str, ...] = ()
+    goal_changed: bool = False
+    constraints_changed: bool = False
+    success_criteria_changed: bool = False
+
+
+@dataclass(frozen=True)
+class LoopStagnationState:
+    progress_epoch: int = 0
+    consecutive_no_progress_rounds: int = 0
+    last_round_fingerprint: str | None = None
+    seen_observation_hashes: tuple[str, ...] = ()
+    seen_effect_action_hashes: tuple[str, ...] = ()
+    warning_kind: str | None = None
+    last_reason: str | None = None
 
 
 def canonical_arguments_hash(arguments: dict[str, Any]) -> str:
@@ -83,6 +113,7 @@ class PlanRevision:
     success_criteria: tuple[str, ...]
     steps: tuple[PlanStep, ...]
     reason: str
+    diff: PlanDifference | None = None
 
 
 @dataclass(frozen=True)
@@ -103,25 +134,30 @@ class PlanningState:
     active_revision_id: int | None = None
     active_trigger_id: int | None = None
     replans_used: int = 0
-    replans_remaining: None = None
+    replans_remaining: int = MAX_REPLAN_REVISIONS
+    trigger_no_progress_commits: int = 0
 
 
 @dataclass(frozen=True)
 class UserPlanDecision:
     decision_id: int
-    revision_id: int
-    decision: Literal["approved", "rejected", "continue_exploring"]
+    revision_id: int | None
+    decision: Literal["approved", "rejected", "continue_exploring", "resume_blocked"]
     feedback: str | None
     generation_id: int
+    previous_terminal_reason: str | None = None
+    caused_by_failure_id: str | None = None
 
 
 @dataclass(frozen=True)
 class ReplanTrigger:
     trigger_id: int
     generation_id: int
-    kind: Literal["user_feedback"]
+    kind: Literal["failure", "observation", "user_feedback", "blocked_resume"]
     reason: str
-    caused_by_decision_id: int
+    caused_by_failure_id: str | None = None
+    caused_by_attempt_id: str | None = None
+    caused_by_decision_id: int | None = None
     status: Literal["active", "resolved", "rejected"] = "active"
     result_revision_id: int | None = None
 
@@ -227,6 +263,7 @@ class AgentState:
     user_plan_decisions: list[UserPlanDecision] = field(default_factory=list)
     replan_triggers: list[ReplanTrigger] = field(default_factory=list)
     planning_state: PlanningState = field(default_factory=PlanningState)
+    stagnation_state: LoopStagnationState = field(default_factory=LoopStagnationState)
     verification_evidence: list[VerificationEvidence] = field(default_factory=list)
     verification_history: list[VerificationEvidence] = field(default_factory=list)
     generations: list[ExecutionGeneration] = field(default_factory=list)
@@ -252,6 +289,8 @@ class AgentState:
     _failure_retry_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _next_recovery: int = field(default=1, init=False, repr=False)
+    _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    _stagnation_progress_marker: str | None = field(default=None, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
     _lock: Any = field(default_factory=Lock, init=False, repr=False, compare=False)
     _projection_ready: bool = field(default=False, init=False, repr=False, compare=False)
@@ -262,6 +301,7 @@ class AgentState:
         # active Plan Contract and never from that input value.
         object.__setattr__(self, "current_goal", "")
         object.__setattr__(self, "_projection_ready", True)
+        object.__setattr__(self, "_stagnation_progress_marker", self._progress_marker_locked())
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "current_goal" and getattr(self, "_projection_ready", False):
@@ -288,6 +328,206 @@ class AgentState:
         with self._lock:
             return self._active_recovery_id
 
+    def _progress_marker_locked(self) -> str:
+        """Return the narrow, durable task marker used by stagnation detection."""
+        active = self._plan_view_locked()
+        trigger = next(
+            (item for item in self.replan_triggers
+             if item.trigger_id == self.planning_state.active_trigger_id),
+            None,
+        )
+        latest_verification = next(
+            (
+                (item.outcome, item.exit_code)
+                for item in reversed(self.verification_evidence)
+                if item.generation_id == self._verification_generation
+            ),
+            None,
+        )
+        active_failure = next(
+            (item for item in self.failures
+             if item.failure_id == self._active_failure_id),
+            None,
+        )
+        source_attempt = next(
+            (item for item in self.attempts
+             if active_failure is not None
+             and item.attempt_id == active_failure.caused_by_attempt_id),
+            None,
+        )
+        failure_summary = (
+            active_failure.category,
+            active_failure.phase,
+            active_failure.retryable,
+            active_failure.affected_files,
+            source_attempt.tool if source_attempt is not None else None,
+            source_attempt.arguments_hash if source_attempt is not None else None,
+            source_attempt.outcome if source_attempt is not None else None,
+            source_attempt.error_kind if source_attempt is not None else None,
+            source_attempt.exit_code if source_attempt is not None else None,
+        ) if active_failure is not None else None
+        marker = {
+            "plan": (
+                active.get("goal"), active.get("constraints"),
+                active.get("success_criteria"),
+                tuple((step["step_id"], step["content"], step["status"],
+                       tuple(step["depends_on"]), tuple(step["success_criteria"]),
+                       tuple(step["replaces"])) for step in active.get("steps", [])),
+            ) if active else None,
+            "planning_phase": self.planning_state.phase,
+            "repair_phase": self._repair_phase,
+            # Failure IDs are task-local sequence numbers.  They must not
+            # turn the same underlying failure into apparent progress.
+            "active_failure": failure_summary,
+            "trigger": (
+                trigger.kind, trigger.caused_by_failure_id,
+                trigger.caused_by_attempt_id, trigger.caused_by_decision_id,
+            ) if trigger is not None else None,
+            "decisions": tuple(
+                (decision.revision_id, decision.decision, decision.feedback,
+                 decision.previous_terminal_reason, decision.caused_by_failure_id)
+                for decision in self.user_plan_decisions
+            ),
+            "files_changed": tuple(sorted(self.files_changed)),
+            "verification_required": self._verification_required,
+            "verification_conclusion": latest_verification,
+        }
+        return json.dumps(marker, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), default=str)
+
+    def _allowed_next_action_locked(self) -> str:
+        if self.status == "failed":
+            return "使用 /new <任务>"
+        if self.status == "blocked":
+            resumable = (
+                self.planning_state.active_trigger_id is None
+                and self.planning_state.replans_remaining > 0
+                and "预算已耗尽" not in (self.terminal_reason or "")
+                and "budget_exhausted" not in (self.terminal_reason or "")
+            )
+            return "使用 /resume <反馈>，或 /new <任务>" if resumable else "使用 /new <任务>"
+        if self.planning_state.phase == "awaiting_approval":
+            return "等待 CLI 用户批准、驳回或继续调查"
+        if self._repair_phase == "verification_required":
+            return "独占调用 run_shell(purpose=verification)"
+        if self._repair_phase == "diagnosis_required":
+            if self.planning_state.phase == "exploring":
+                return "只读调查，或独占调用 commit_plan"
+            return (
+                "只读诊断、独占 recover，或独占调用 "
+                "request_replan(kind=failure, source_id=active_failure_id)"
+            )
+        if self.planning_state.phase == "exploring":
+            return "只读调查，或独占调用 commit_plan"
+        return "执行能推进任务的工具；有合格观察时可独占 request_replan"
+
+    @staticmethod
+    def _short_hash(value: str | None) -> str:
+        return (value or "")[:12] or "-"
+
+    def _stagnation_kind_locked(self, repeated_round: bool,
+                                tool_names: tuple[str, ...],
+                                has_observation: bool = False) -> str:
+        phase = self.planning_state.phase
+        if phase == "exploring":
+            if any(name not in {
+                "commit_plan", "update_plan_progress", "request_replan",
+                "begin_plan", "cancel_planning", "recover",
+            } for name in tool_names):
+                return "no_new_observation"
+            return "explore_without_commit"
+        if phase == "direct" and repeated_round:
+            return "repeated_action"
+        if phase == "direct":
+            if has_observation:
+                return "no_new_observation"
+            return "execute_without_progress"
+        return "execute_without_progress"
+
+    def observe_tool_round(self, action_fingerprint: str | None,
+                           observation_hashes: list[str] | tuple[str, ...] = (),
+                           effect_action_hashes: list[str] | tuple[str, ...] = (),
+                           tool_names: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+        """Observe one complete tool round after all facts and results are committed."""
+        with self._lock:
+            if self.status in ("blocked", "failed") or self.planning_state.phase == "awaiting_approval":
+                return {"blocked": False, "warning": None,
+                        "count": self.stagnation_state.consecutive_no_progress_rounds,
+                        "allowed_next_action": self._allowed_next_action_locked()}
+            marker = self._progress_marker_locked()
+            current = self.stagnation_state
+            current_fingerprint = action_fingerprint
+            if self._stagnation_progress_marker != marker:
+                observation_seen = tuple(dict.fromkeys(observation_hashes))[:256]
+                effect_seen = tuple(dict.fromkeys(effect_action_hashes))[:256]
+                self.stagnation_state = LoopStagnationState(
+                    current.progress_epoch + 1, 0, current_fingerprint,
+                    observation_seen, effect_seen, None, None,
+                )
+                self._stagnation_progress_marker = marker
+                return {"blocked": False, "warning": None, "progress": True,
+                        "count": 0, "allowed_next_action": self._allowed_next_action_locked()}
+
+            observation_seen = list(current.seen_observation_hashes)
+            effect_seen = list(current.seen_effect_action_hashes)
+            first_fact = False
+            for value in observation_hashes:
+                if value in observation_seen:
+                    continue
+                if len(observation_seen) >= 256:
+                    break
+                observation_seen.append(value)
+                first_fact = True
+            for value in effect_action_hashes:
+                if value in effect_seen:
+                    continue
+                if len(effect_seen) >= 256:
+                    break
+                effect_seen.append(value)
+                first_fact = True
+            repeated_round = bool(
+                current_fingerprint and current_fingerprint == current.last_round_fingerprint
+            )
+            if first_fact:
+                self.stagnation_state = replace(
+                    current, consecutive_no_progress_rounds=0,
+                    last_round_fingerprint=current_fingerprint,
+                    seen_observation_hashes=tuple(observation_seen),
+                    seen_effect_action_hashes=tuple(effect_seen),
+                    warning_kind=None, last_reason=None,
+                )
+                return {"blocked": False, "warning": None, "progress": True,
+                        "count": 0, "allowed_next_action": self._allowed_next_action_locked()}
+
+            count = current.consecutive_no_progress_rounds + 1
+            kind = self._stagnation_kind_locked(
+                repeated_round, tuple(tool_names), bool(observation_hashes),
+            )
+            short_fingerprint = self._short_hash(current_fingerprint)
+            reason = f"{kind}; fingerprint={short_fingerprint}; count={count}"
+            if count >= MAX_STAGNANT_ROUNDS:
+                self.status = "blocked"
+                self.terminal_reason = reason
+            warning = count == MAX_STAGNANT_ROUNDS - 1
+            self.stagnation_state = replace(
+                current, consecutive_no_progress_rounds=count,
+                last_round_fingerprint=current_fingerprint,
+                seen_observation_hashes=tuple(observation_seen),
+                seen_effect_action_hashes=tuple(effect_seen),
+                warning_kind=kind if warning else current.warning_kind,
+                last_reason=reason,
+            )
+            return {
+                "blocked": count >= MAX_STAGNANT_ROUNDS,
+                "warning": (
+                    f"Runtime Notice：连续 {count} 个完整工具回合没有任务进展，"
+                    f"类别={kind}。下一步必须是：{self._allowed_next_action_locked()}。"
+                ) if warning else None,
+                "progress": False, "count": count, "kind": kind,
+                "terminal_reason": self.terminal_reason if count >= MAX_STAGNANT_ROUNDS else None,
+                "allowed_next_action": self._allowed_next_action_locked(),
+            }
+
     def repair_gate(self, name: str, arguments: dict[str, Any],
                     effect_class: EffectClass = "none",
                     reservation: AttemptReservation | None = None) -> str | None:
@@ -301,8 +541,16 @@ class AgentState:
             if reservation is not None and reservation.recovery_id:
                 return None
             if self._repair_phase == "diagnosis_required":
-                if name in ("recover", "commit_plan", "update_plan_progress"):
+                if name in ("recover", "request_replan"):
                     return None
+                if name in ("begin_plan", "cancel_planning"):
+                    return "工具调用拒绝: diagnosis_required 阶段只能只读诊断、recover 或 request_replan"
+                if name == "commit_plan":
+                    if self.planning_state.phase == "exploring":
+                        return None
+                    return "工具调用拒绝: diagnosis_required 阶段必须先通过 request_replan 转入 exploring"
+                if name == "update_plan_progress":
+                    return "工具调用拒绝: diagnosis_required 阶段不能推进旧计划步骤"
                 if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
                     return "工具调用拒绝: diagnosis_required 阶段必须先处理当前 failure，不能直接 verification"
                 if effect_class == "possible":
@@ -317,7 +565,6 @@ class AgentState:
         self._repair_phase = "diagnosis_required"
         self._active_failure_id = failure_id
         self._active_recovery_id = None
-        self._verification_required = False
 
     def _enter_verification(self, recovery_id: str | None = None) -> None:
         self._repair_phase = "verification_required"
@@ -476,6 +723,20 @@ class AgentState:
         return (step.step_id, step.content, step.depends_on,
                 step.success_criteria, step.replaces)
 
+    @staticmethod
+    def _plan_difference_view(difference: PlanDifference | None) -> dict[str, Any] | None:
+        if difference is None:
+            return None
+        return {
+            "retained": [asdict(item) for item in difference.retained],
+            "added": list(difference.added),
+            "cancelled": list(difference.cancelled),
+            "replaced": list(difference.replaced),
+            "goal_changed": difference.goal_changed,
+            "constraints_changed": difference.constraints_changed,
+            "success_criteria_changed": difference.success_criteria_changed,
+        }
+
     def _active_revision_locked(self) -> PlanRevision | None:
         active_id = self.planning_state.active_revision_id
         if active_id is None:
@@ -514,6 +775,7 @@ class AgentState:
                 for step in revision.steps
             ],
             "reason": revision.reason,
+            "diff": self._plan_difference_view(revision.diff),
         }
 
     def _sync_current_goal_locked(self) -> None:
@@ -558,6 +820,158 @@ class AgentState:
             self.planning_state = replace(self.planning_state, phase="direct")
             return self.planning_state
 
+    def request_replan(self, kind: Any, source_id: Any, reason: Any) -> ReplanTrigger:
+        """Create one active, source-backed replan trigger atomically."""
+        with self._lock:
+            if self.status != "running":
+                raise PlanRejected("只有 running 任务可以请求重规划")
+            if self.planning_state.phase not in ("direct", "executing"):
+                raise PlanRejected("只有 direct 或 executing 阶段可以请求重规划")
+            if self.planning_state.active_trigger_id is not None:
+                raise PlanRejected("当前已有活动 replan trigger")
+            if self._repair_phase == "verification_required":
+                raise PlanRejected("verification_required 时不能请求重规划")
+            if kind not in ("failure", "observation"):
+                raise PlanRejected("模型只能请求 failure 或 observation 类型的重规划")
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise PlanRejected("source_id 必须是非空字符串")
+            source_id = source_id.strip()
+            if len(source_id) > 120:
+                raise PlanRejected("source_id 不能超过 120 个字符")
+            clean_reason = self._plan_text(reason, "reason", _PLAN_REASON_MAX)
+            failure = None
+            attempt = None
+            if kind == "failure":
+                if self._repair_phase != "diagnosis_required":
+                    raise PlanRejected("failure trigger 只能在 diagnosis_required 阶段请求")
+                if source_id != self._active_failure_id:
+                    raise PlanRejected("failure source_id 必须精确引用当前 active_failure_id")
+                failure = next((item for item in self.failures if item.failure_id == source_id), None)
+                if failure is None:
+                    raise PlanRejected("当前 active failure 记录不存在")
+            else:
+                if self._repair_phase != "idle":
+                    raise PlanRejected("observation trigger 只能在 idle repair 阶段请求")
+                active_revision = self._active_revision_locked()
+                if active_revision is None:
+                    raise PlanRejected("observation trigger 需要已有 active revision")
+                boundary = self._revision_attempt_boundaries.get(active_revision.revision_id)
+                for candidate in self.attempts:
+                    if candidate.attempt_id != source_id:
+                        continue
+                    attempt = candidate
+                    break
+                if attempt is None:
+                    raise PlanRejected("observation source_id 必须引用当前任务中存在的 attempt")
+                attempt_index = next(
+                    (index for index, item in enumerate(self.attempts)
+                     if item.attempt_id == attempt.attempt_id),
+                    -1,
+                )
+                if boundary is None or attempt_index < boundary:
+                    raise PlanRejected("observation 必须发生在当前 active revision 提交之后")
+                if (attempt.outcome != "succeeded" or not attempt.handler_admitted
+                        or attempt.permission != "allowed" or attempt.effect_class != "none"
+                        or attempt.tool in {
+                            "begin_plan", "cancel_planning", "commit_plan",
+                            "update_plan_progress", "request_replan", "recover",
+                            "rollback_checkpoint",
+                        }
+                        or (attempt.tool == "run_shell"
+                            and attempt.redacted_arguments.get("purpose") == "verification")):
+                    raise PlanRejected("observation 必须引用成功且获准的只读调查 attempt")
+
+            if self.planning_state.replans_remaining <= 0:
+                self.status = "blocked"
+                self.terminal_reason = (
+                    "replan_budget_exhausted; MAX_REPLAN_REVISIONS="
+                    f"{MAX_REPLAN_REVISIONS}"
+                )
+                raise PlanRejected("重规划预算已耗尽，任务已阻塞")
+
+            trigger = ReplanTrigger(
+                trigger_id=self._next_plan_trigger,
+                generation_id=self._verification_generation,
+                kind=kind,
+                reason=clean_reason,
+                caused_by_failure_id=source_id if kind == "failure" else None,
+                caused_by_attempt_id=source_id if kind == "observation" else None,
+            )
+            self.replan_triggers.append(trigger)
+            self._next_plan_trigger += 1
+            self.planning_state = replace(
+                self.planning_state, phase="exploring",
+                active_trigger_id=trigger.trigger_id,
+                trigger_no_progress_commits=0,
+            )
+            return trigger
+
+    def resume_blocked(self, feedback: Any) -> UserPlanDecision:
+        """Resume a blocked task only through an explicit CLI decision."""
+        with self._lock:
+            if self.status != "blocked":
+                if self.status == "failed":
+                    raise PlanRejected("failed 任务不能恢复，请使用 /new <任务>")
+                raise PlanRejected("只有 blocked 任务可以使用 /resume")
+            if self.planning_state.active_trigger_id is not None:
+                raise PlanRejected("当前 blocked 任务已有活动恢复 trigger，不能重复恢复，请使用 /new <任务>")
+            if (self.planning_state.replans_remaining <= 0
+                    or "预算已耗尽" in (self.terminal_reason or "")
+                    or "budget_exhausted" in (self.terminal_reason or "")):
+                raise PlanRejected("重规划预算已耗尽，请使用 /new <任务>")
+            clean_feedback = self._plan_text(feedback, "feedback", _PLAN_REASON_MAX)
+            previous_reason = self.terminal_reason or None
+            active_failure = self._active_failure_id
+            revision_id = self.planning_state.active_revision_id
+            decision = UserPlanDecision(
+                decision_id=self._next_plan_decision,
+                revision_id=revision_id,
+                decision="resume_blocked",
+                feedback=clean_feedback,
+                generation_id=self._verification_generation,
+                previous_terminal_reason=previous_reason,
+                caused_by_failure_id=active_failure,
+            )
+            self.user_plan_decisions.append(decision)
+            self._next_plan_decision += 1
+            trigger = ReplanTrigger(
+                trigger_id=self._next_plan_trigger,
+                generation_id=self._verification_generation,
+                kind="blocked_resume",
+                reason=clean_feedback,
+                caused_by_decision_id=decision.decision_id,
+            )
+            self.replan_triggers.append(trigger)
+            self._next_plan_trigger += 1
+            self.status = "running"
+            self.terminal_reason = ""
+            self.planning_state = replace(
+                self.planning_state, phase="exploring",
+                active_trigger_id=trigger.trigger_id,
+                trigger_no_progress_commits=0,
+            )
+            terminal_recovery = next(
+                (item for item in self.recovery_actions
+                 if item.recovery_id == self._active_recovery_id
+                 and item.status == "terminal"
+                 and item.action in ("ask", "block")),
+                None,
+            )
+            if self._repair_phase == "verification_required" and terminal_recovery is not None:
+                # ask/block already opened a successor generation and left a
+                # verification obligation.  An explicit user resume permits
+                # read-only diagnosis and a new revision, but must retain the
+                # original failure, generation, repair budget, and obligation
+                # to verify the revised path independently.
+                self._repair_phase = "diagnosis_required"
+                self._active_recovery_id = None
+            current = self.stagnation_state
+            self.stagnation_state = LoopStagnationState(
+                current.progress_epoch + 1, 0, None, (), (), None, None,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return decision
+
     def planning_gate(self, name: str, arguments: dict[str, Any],
                       effect_class: EffectClass) -> str | None:
         """Check the planning boundary before permission and handler admission."""
@@ -568,6 +982,8 @@ class AgentState:
             if phase == "exploring":
                 if name == "commit_plan":
                     return None
+                if name == "request_replan":
+                    return "工具调用拒绝: exploring 阶段不能重复请求 replan"
                 if name == "cancel_planning" and self.planning_state.mode == "auto" and self.planning_state.active_revision_id is None and self.planning_state.active_trigger_id is None:
                     return None
                 if name in ("begin_plan", "update_plan_progress", "cancel_planning", "recover"):
@@ -600,6 +1016,13 @@ class AgentState:
             clean_feedback = None
             if decision != "approved":
                 clean_feedback = self._plan_text(feedback, "feedback", _PLAN_REASON_MAX)
+                if decision == "rejected" and self.planning_state.replans_remaining <= 0:
+                    self.status = "blocked"
+                    self.terminal_reason = (
+                        "replan_budget_exhausted; MAX_REPLAN_REVISIONS="
+                        f"{MAX_REPLAN_REVISIONS}"
+                    )
+                    raise PlanRejected("重规划预算已耗尽，请使用 /new <任务>")
             elif feedback is not None:
                 raise PlanRejected("批准计划不接受反馈参数")
             record = UserPlanDecision(
@@ -612,14 +1035,18 @@ class AgentState:
                 self.planning_state = replace(self.planning_state, phase="executing")
             else:
                 trigger = ReplanTrigger(
-                    self._next_plan_trigger, self._verification_generation,
-                    "user_feedback", clean_feedback, record.decision_id,
+                    trigger_id=self._next_plan_trigger,
+                    generation_id=self._verification_generation,
+                    kind="user_feedback",
+                    reason=clean_feedback,
+                    caused_by_decision_id=record.decision_id,
                 )
                 self.replan_triggers.append(trigger)
                 self._next_plan_trigger += 1
                 self.planning_state = replace(
                     self.planning_state, phase="exploring",
                     active_trigger_id=trigger.trigger_id,
+                    trigger_no_progress_commits=0,
                 )
             return record
 
@@ -678,7 +1105,7 @@ class AgentState:
             active_trigger = self.planning_state.active_trigger_id
             if active_trigger is None:
                 if trigger_id is not _MISSING:
-                    raise PlanRejected("当前没有需要引用的用户反馈 trigger")
+                    raise PlanRejected("当前没有需要引用的 replan trigger")
                 resolved_trigger = None
             else:
                 if (isinstance(trigger_id, bool) or not isinstance(trigger_id, int)
@@ -688,6 +1115,10 @@ class AgentState:
                                          if item.trigger_id == trigger_id and item.status == "active"), None)
                 if resolved_trigger is None:
                     raise PlanRejected("当前 trigger 已失效")
+                if active is None and resolved_trigger.kind not in ("failure", "blocked_resume"):
+                    raise PlanRejected("该 trigger 必须引用当前 active revision")
+            if active is not None and resolved_trigger is None:
+                raise PlanRejected("后续 revision 必须引用当前活动 trigger")
             parent_provided = parent_revision_id is not _MISSING
             if active is None:
                 if parent_provided:
@@ -751,7 +1182,34 @@ class AgentState:
                     tuple(self._plan_step_structure(step) for step in parsed_steps),
                 )
                 if old_structure == new_structure:
+                    if resolved_trigger is not None:
+                        count = self.planning_state.trigger_no_progress_commits + 1
+                        self.planning_state = replace(
+                            self.planning_state,
+                            trigger_no_progress_commits=count,
+                        )
+                        if count >= MAX_NO_PROGRESS_REPLANS:
+                            self.status = "blocked"
+                            self.terminal_reason = (
+                                "replan_no_progress; "
+                                f"trigger={resolved_trigger.trigger_id}; commits={count}"
+                            )
+                            raise PlanRejected(
+                                "同一 trigger 的计划结构连续无变化提交达到上限，任务已阻塞"
+                            )
+                        raise PlanRejected(
+                            "计划结构没有变化；纯状态变化请使用 update_plan_progress；"
+                            f"同一 trigger 无进展提交 {count}/{MAX_NO_PROGRESS_REPLANS}"
+                        )
                     raise PlanRejected("计划结构没有变化；纯状态变化请使用 update_plan_progress")
+
+            if resolved_trigger is not None and self.planning_state.replans_remaining <= 0:
+                self.status = "blocked"
+                self.terminal_reason = (
+                    "replan_budget_exhausted; MAX_REPLAN_REVISIONS="
+                    f"{MAX_REPLAN_REVISIONS}"
+                )
+                raise PlanRejected("重规划预算已耗尽，任务已阻塞")
 
             final_steps = tuple(
                 PlanStep(
@@ -769,24 +1227,63 @@ class AgentState:
                         raise PlanRejected(
                             f"已继承为 {step.status} 的步骤 {step.step_id} 依赖未完成: {', '.join(not_completed)}"
                         )
+            difference = None
+            if parent is not None:
+                parent_steps = {step.step_id: step for step in parent.steps}
+                new_steps = {step.step_id: step for step in final_steps}
+                replaced = tuple(
+                    replaced_id for step in final_steps for replaced_id in step.replaces
+                )
+                difference = PlanDifference(
+                    retained=tuple(
+                        PlanStepDifference(
+                            step_id,
+                            parent_steps[step_id].depends_on != new_steps[step_id].depends_on,
+                        )
+                        for step_id in parent_steps
+                        if step_id in new_steps
+                    ),
+                    added=tuple(step_id for step_id in new_steps if step_id not in parent_steps),
+                    cancelled=tuple(
+                        step_id for step_id in parent_steps
+                        if step_id not in new_steps and step_id not in replaced
+                    ),
+                    replaced=replaced,
+                    goal_changed=parent.goal != clean_goal,
+                    constraints_changed=parent.constraints != clean_constraints,
+                    success_criteria_changed=parent.success_criteria != clean_success,
+                )
             revision = PlanRevision(
                 self._next_plan_revision, self._verification_generation,
                 parent.revision_id if parent is not None else None, active_trigger,
                 clean_goal, clean_constraints, clean_success, final_steps, clean_reason,
+                difference,
             )
             self.plan_revisions.append(revision)
             self._next_plan_revision += 1
+            self._revision_attempt_boundaries[revision.revision_id] = len(self.attempts)
             if resolved_trigger is not None:
                 index = self.replan_triggers.index(resolved_trigger)
                 self.replan_triggers[index] = replace(
                     resolved_trigger, status="resolved", result_revision_id=revision.revision_id,
                 )
+            replans_used = self.planning_state.replans_used + (1 if resolved_trigger is not None else 0)
             self.planning_state = PlanningState(
                 mode=self.planning_state.mode,
                 phase="awaiting_approval" if self.planning_state.mode == "plan_only" else "executing",
                 active_revision_id=revision.revision_id,
-                active_trigger_id=None, replans_used=0, replans_remaining=None,
+                active_trigger_id=None, replans_used=replans_used,
+                replans_remaining=max(0, MAX_REPLAN_REVISIONS - replans_used),
+                trigger_no_progress_commits=0,
             )
+            if resolved_trigger is not None and self._repair_phase == "diagnosis_required":
+                # Replanning resolves diagnosis into a new executable proposal;
+                # it does not claim the original failure was fixed and therefore
+                # deliberately preserves verification_required.
+                self._repair_phase = "idle"
+                self._active_failure_id = None
+                self._active_recovery_id = None
+                self.recovery_notice = ""
             self._sync_current_goal_locked()
             return revision
 
@@ -940,7 +1437,9 @@ class AgentState:
                     self._terminal("blocked", "failure retry 预算已耗尽", caused_by_failure_id)
                     return None, "failure retry 预算已耗尽"
                 if source_attempt.tool in (
-                    "recover", "rollback_checkpoint", "commit_plan", "update_plan_progress",
+                    "begin_plan", "cancel_planning", "recover", "rollback_checkpoint",
+                    "commit_plan", "update_plan_progress",
+                    "request_replan",
                 ):
                     return None, "control/plan 工具不能作为恢复目标"
                 target = (
@@ -953,7 +1452,9 @@ class AgentState:
                 if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
                     return None, "adjust 需要目标工具和参数"
                 if requested_tool in (
-                    "recover", "rollback_checkpoint", "commit_plan", "update_plan_progress",
+                    "begin_plan", "cancel_planning", "recover", "rollback_checkpoint",
+                    "commit_plan", "update_plan_progress",
+                    "request_replan",
                 ):
                     return None, "control/plan 工具不能作为恢复目标"
                 target = (requested_tool, deepcopy(requested_arguments))
@@ -1022,7 +1523,9 @@ class AgentState:
                 count = self._failure_retry_counts.get(caused_by_failure_id, 0)
                 if count >= MAX_FAILURE_RETRIES:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "failure retry 预算已耗尽") + (None,)
-                if source_attempt.tool in ("recover", "rollback_checkpoint"):
+                if source_attempt.tool in ("begin_plan", "cancel_planning", "recover",
+                                           "rollback_checkpoint", "commit_plan",
+                                           "update_plan_progress", "request_replan"):
                     return self._reject_recovery(action, caused_by_failure_id, reason,
                                                  "internal/recover 工具不能作为恢复目标") + (None,)
                 requested_tool = source_attempt.tool
@@ -1032,7 +1535,9 @@ class AgentState:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 不接受 requested_attempt") + (None,)
                 if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
                     return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 需要目标工具和参数") + (None,)
-                if requested_tool in ("recover", "rollback_checkpoint"):
+                if requested_tool in ("begin_plan", "cancel_planning", "recover",
+                                      "rollback_checkpoint", "commit_plan",
+                                      "update_plan_progress", "request_replan"):
                     return self._reject_recovery(action, caused_by_failure_id, reason,
                                                  "internal/recover 工具不能作为恢复目标") + (None,)
             elif requested_attempt or requested_tool or requested_arguments is not None:
@@ -1178,8 +1683,13 @@ class AgentState:
 
     def record_execution_result(self, result: Any) -> ExecutionAttempt | None:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
-        if (getattr(result, "error_kind", None) in ("plan_rejected", "planning_phase_gate")
-                or getattr(result, "tool", None) in ("begin_plan", "cancel_planning")):
+        if (getattr(result, "error_kind", None) in (
+                "plan_rejected", "planning_phase_gate", "task_terminal",
+            )
+                or getattr(result, "tool", None) in (
+                    "begin_plan", "cancel_planning", "commit_plan",
+                    "update_plan_progress", "request_replan",
+                )):
             return None
         with self._lock:
             self._ensure_generation()
@@ -1358,7 +1868,8 @@ class AgentState:
 
     def record_tool(self, name: str, args: dict[str, Any], ok: bool, brief: str) -> None:
         """Compatibility API for older callback-based integrations."""
-        if name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress"): return
+        if name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
+                    "request_replan"): return
         args_copy = deepcopy(args)
         with self._lock:
             self.tool_history.append({"tool": name, "args": args_copy, "ok": ok, "brief": brief})
@@ -1397,6 +1908,7 @@ class AgentState:
             self.plan_revisions.clear(); self.plan_progress_history.clear()
             self.user_plan_decisions.clear(); self.replan_triggers.clear()
             self.planning_state = PlanningState(mode=mode, phase="exploring" if mode == "plan_only" else "direct")
+            self.stagnation_state = LoopStagnationState()
             self.verification_evidence.clear(); self.verification_history.clear()
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
@@ -1408,9 +1920,11 @@ class AgentState:
             self._next_plan_decision = 1; self._next_plan_trigger = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
+            self._revision_attempt_boundaries.clear()
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()
             self.generations.append(ExecutionGeneration(0, open_reason="task_start"))
+            self._stagnation_progress_marker = self._progress_marker_locked()
 
     def reset_task(self, task: str = "") -> None:
         """Reset all task-local state in place, preserving bound tool references."""
@@ -1467,10 +1981,16 @@ class AgentState:
                 self.planning_state.active_trigger_id,
             )
             if self._repair_phase == "diagnosis_required":
-                message = (
-                    "检测到失败。请在下一条回复中先进行只读调查、提交或推进计划，或独占调用 recover "
-                    "处理当前活动 failure；不要直接执行副作用或 verification。"
-                )
+                if self.planning_state.phase == "exploring":
+                    message = (
+                        "检测到失败。请继续只读调查，或独占调用 commit_plan 提交引用当前 trigger 的修订；"
+                        "不要直接执行副作用或 verification。"
+                    )
+                else:
+                    message = (
+                        "检测到失败。请先进行只读诊断，独占调用 recover 处理当前活动 failure，或独占调用 "
+                        "request_replan 引用该 failure；不要直接执行副作用或 verification。"
+                    )
             elif self._repair_phase == "verification_required":
                 message = "恢复动作已完成或存在待验证 generation。下一条回复只能独占调用 run_shell(purpose=verification)。"
             elif needs_plan:
@@ -1503,6 +2023,7 @@ class AgentState:
                 "task": self.task, "current_goal": projected_current_goal,
                 "tool_history": deepcopy(self.tool_history), "files_changed": deepcopy(self.files_changed),
                 "errors": deepcopy(self.errors), "status": self.status, "terminal_reason": self.terminal_reason,
+                "allowed_next_action": self._allowed_next_action_locked(),
                 "todos": self._plan_projection_locked(),
                 "plan_revisions": [
                     {
@@ -1525,6 +2046,7 @@ class AgentState:
                             for step in revision.steps
                         ],
                         "reason": revision.reason,
+                        "diff": self._plan_difference_view(revision.diff),
                     }
                     for revision in self.plan_revisions
                 ],
@@ -1541,6 +2063,10 @@ class AgentState:
                     for event in self.plan_progress_history
                 ],
                 "planning_state": asdict(self.planning_state),
+                "loop_stagnation": asdict(self.stagnation_state),
+                # Short alias kept for callers that render State sections by
+                # capability name rather than the concrete class name.
+                "stagnation": asdict(self.stagnation_state),
                 "user_plan_decisions": [asdict(x) for x in self.user_plan_decisions],
                 "replan_triggers": [asdict(x) for x in self.replan_triggers],
                 "active_plan": active_plan,
@@ -1556,7 +2082,10 @@ class AgentState:
                         0, MAX_REPAIR_CYCLES - self._repair_cycles - self._reserved_repair_cycles
                     ),
                     "required_next_action": (
-                        "diagnose_or_recover" if self._repair_phase == "diagnosis_required"
+                        "explore_or_commit_revision" if (
+                            self._repair_phase == "diagnosis_required"
+                            and self.planning_state.phase == "exploring"
+                        ) else "diagnose_recover_or_replan" if self._repair_phase == "diagnosis_required"
                         else "独立 verification" if self._repair_phase == "verification_required"
                         else "continue"
                     ),
@@ -1584,5 +2113,10 @@ class AgentState:
                             "repair_cycles_remaining": max(
                                 0, MAX_REPAIR_CYCLES - self._repair_cycles - self._reserved_repair_cycles
                             ),
-                            "repair_cycles_used": self._repair_cycles},
+                            "repair_cycles_used": self._repair_cycles,
+                            "replan_revisions_limit": MAX_REPLAN_REVISIONS,
+                            "replan_revisions_used": self.planning_state.replans_used,
+                            "replan_revisions_remaining": self.planning_state.replans_remaining,
+                            "no_progress_replans_limit": MAX_NO_PROGRESS_REPLANS,
+                            "stagnant_rounds_limit": MAX_STAGNANT_ROUNDS},
             }

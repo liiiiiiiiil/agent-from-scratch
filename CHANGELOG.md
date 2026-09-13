@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.24.0] - Evidence-backed replanning and bounded stagnation
+
+- Added source-backed `request_replan` triggers for failures and successful read-only observations, plus CLI-only user feedback and blocked-resume triggers.
+- Added task-wide replan revision budgets, per-trigger unchanged-submission budgets, runtime-computed revision differences, and Direct failure/resume first-plan exceptions.
+- Added `/resume <feedback>` for blocked tasks while keeping failed tasks and model-driven terminal recovery closed.
+- Added deterministic complete-tool-round stagnation detection with protected Runtime Notices, bounded hashes, and explicit blocked reasons.
+- Preserved Repair Loop failure, generation, repair-cycle, and verification boundaries across replanning; updated Structured State, compaction, prompt, manual, README navigation, and lesson 24.
+
 ## [v0.23.0] - Read-only planning and handoff
 
 - Added `begin_plan`, `cancel_planning`, and `--plan` for Runtime-enforced read-only exploration while retaining the Direct Path.

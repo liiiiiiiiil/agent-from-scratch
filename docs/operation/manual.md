@@ -1,6 +1,27 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.23**（只读规划与用户交接；含 v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.24**（证据驱动重规划与停滞收口；含 v0.23 只读规划与用户交接、v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+
+## v0.24 证据驱动重规划与停滞收口
+
+执行中的计划不能因为模型一句“需要调整”就被静默改写。模型只能独占调用 `request_replan(kind, source_id, reason)`：`failure` 必须精确引用当前 `active_failure_id`，`observation` 必须引用当前 active revision 提交之后成功且获准的只读 `ExecutionAttempt`。调用通过后进入 `exploring`，只允许只读调查或独占 `commit_plan`；后续修订必须引用当前 parent revision 和活动 trigger。
+
+Direct Path 因 failure 或 blocked 恢复进入 Explore 时可能还没有 parent。此时首次 `commit_plan` 必须带活动 trigger、不能提供 `parent_revision_id`；普通任务的初始计划仍然不带 trigger 和 parent。有效后续 revision 消耗总 replan 预算，计划差异由 Runtime 保存为 `retained`、`added`、`cancelled`、`replaced`，并标出保留步骤的依赖变化及目标、约束和成功标准的变化。无变化提交只增加当前 trigger 的无进展计数，第二次达到上限后阻塞。
+
+默认最多 3 次有效后续修订。第三次修订仍可以执行，请求第四次时进入 `blocked`。失败修订不会删除 FailureEvent、repair cycle、generation 或旧验证记录；提交新方案只表示诊断形成了新路径，实际修改与当前 generation 的独立 verification 仍必须发生。
+
+模型不能自行恢复 `blocked` 或 `failed`。用户可对 blocked 任务输入 `/resume <反馈>`；该命令记录 `resume_blocked` 决定和恢复前终态原因，再进入 `running / exploring`。如果 blocked 来自 `recover(ask/block)`，Runtime 会保留后继 generation 的独立 verification 要求，并先恢复为 `diagnosis_required`，所以新修订提交后仍必须验证；其他 blocked 来源沿用普通恢复路径。如果已有 active plan，修订必须引用它；没有 active plan 时走带 trigger、无 parent 的首次提交。预算耗尽、failed 或已有活动恢复 trigger 时请使用 `/new <任务>`。
+
+停滞检测在一个完整工具回合的所有调用执行或拒绝、State 按模型顺序更新、结果展示并回灌所有 `role=tool` 消息之后运行。默认 `MAX_STAGNANT_ROUNDS=3`：第二个连续无进展回合注入一次受保护 Runtime Notice，第三个记录 `repeated_action`、`no_new_observation`、`explore_without_commit` 或 `execute_without_progress` 并进入 blocked。它只保存动作、调查结果 hash 和短摘要，不复制完整工具输出；Planning gate 与 Repair gate 给出的合法下一动作优先于提醒文字。
+
+本版新增配置：
+
+| 配置项 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `MAX_ATTEMPT_FINGERPRINTS` | `4` | 同一工具及参数指纹的执行上限；必须不小于 `MAX_STAGNANT_ROUNDS + 1`。 |
+| `MAX_REPLAN_REVISIONS` | `3` | 单任务有效后续计划 revision 总数。 |
+| `MAX_NO_PROGRESS_REPLANS` | `2` | 同一活动 trigger 的无结构变化提交次数。 |
+| `MAX_STAGNANT_ROUNDS` | `3` | 连续无进展完整工具回合上限，必须大于 1。 |
 
 ## v0.23 只读规划与用户交接
 
@@ -17,13 +38,13 @@
 | `/continue <revision_id> <反馈>` | 保留当前 revision，带反馈继续只读调查。 |
 | `/review <revision_id>` | 继续调查后若方案未变，将原 revision 重新交付审批。 |
 
-驳回或继续调查后若提交修订，`commit_plan` 必须同时提供当前 `parent_revision_id` 和 `trigger_id`。用户决定、反馈触发记录和旧 revision 都保存在当前任务 State；`/reset` 或 `/new <任务>` 会清除它们。批准旧 revision、重复批准、无反馈驳回或驳回后直接 `/review` 都会拒绝。计划批准只改变规划阶段，不写入 PermissionGate 的 allow 规则；后续工具继续单独授权，修改后仍须独立 verification。通用失败/观察触发重规划、修订预算及停滞检测属于 v0.24。
+驳回或继续调查后若提交修订，`commit_plan` 必须同时提供当前 `parent_revision_id` 和 `trigger_id`。用户决定、反馈触发记录和旧 revision 都保存在当前任务 State；`/reset` 或 `/new <任务>` 会清除它们。批准旧 revision、重复批准、无反馈驳回或驳回后直接 `/review` 都会拒绝。计划批准只改变规划阶段，不写入 PermissionGate 的 allow 规则；后续工具继续单独授权，修改后仍须独立 verification。失败/观察触发重规划、修订预算及停滞检测见本手册开头的 v0.24。
 
 ## v0.22 Plan Contract
 
 复杂任务可以通过 `commit_plan` 提交结构化计划。计划包含 `goal`、`constraints`、任务级 `success_criteria` 和 1–50 个带稳定 `step_id` 的步骤；步骤可以声明 `depends_on`、步骤级 `success_criteria` 和 `replaces`。简单任务继续走 Direct Path，不需要创建计划。
 
-初次 `commit_plan` 不提供 `parent_revision_id`，成功后创建 revision 1；普通模式进入 `executing`，`--plan` 模式进入 `awaiting_approval`。结构发生变化时，必须提交带当前 active revision 作为 parent 的完整新计划；旧 revision 不会被覆盖。只改变步骤状态时使用 `update_plan_progress`，状态只能按 `pending → in_progress → completed` 推进，依赖未完成或已有其他进行中步骤时会被拒绝。
+普通任务的初次 `commit_plan` 不提供 `parent_revision_id` 或 trigger，成功后创建 revision 1；`--plan` 模式进入 `awaiting_approval`。结构发生变化时，必须先由用户反馈、失败或观察创建活动 trigger，再提交带当前 active revision 作为 parent 的完整新计划；Direct failure 或 blocked resume 没有 parent 时，首个修订计划只带 trigger。旧 revision 不会被覆盖。只改变步骤状态时使用 `update_plan_progress`，状态只能按 `pending → in_progress → completed` 推进，依赖未完成或已有其他进行中步骤时会被拒绝。
 
 计划校验和 revision 提交在同一把 State 锁内完成。无效参数或违反计划不变量的请求会收到 `plan_rejected`，不会创建 `FailureEvent`、进入 Repair Loop、推进 generation 或产生验证证据。两个计划工具默认 `ALLOW`、`effect_class=none`，也不能成为 `recover` 的 retry、adjust 或 rollback 目标。计划写入不代表环境已经正确，步骤完成仍不能替代独立 verification。
 
@@ -55,14 +76,14 @@ v0.21 的 Trace 对缺失的 `todo_revisions` 会安全降级为空；v0.22 不�
 | 阶段 | 允许的下一步 |
 |---|---|
 | `idle` | 正常调查、执行和计划推进 |
-| `diagnosis_required` | 只读调查、`commit_plan` / `update_plan_progress`，或独占调用 `recover` 处理当前 `active_failure_id` |
+| `diagnosis_required` | 只读调查、独占调用 `recover` 处理当前 `active_failure_id`，或独占调用 `request_replan` |
 | `verification_required` | 下一工具回合只能是单个 `run_shell(purpose="verification")` |
 
 agent loop 在回合级检查批量调用，ToolExecutor 在权限和 handler 前再次检查；不合规调用会收到协议错误且不会运行 handler、询问权限或推进 generation。恢复目标携带受 State 锁保护的 reservation，是 verification 阶段唯一的受控执行例外；恢复结果回灌后仍必须有独立 verification。
 
 `MAX_REPAIR_CYCLES` 默认是 3。初始失败、schema/参数拒绝、权限拒绝以及 `ask`/`block` 不消耗周期；`retry`、`adjust`、`rollback` 只有在目标授权并激活 successor generation 后才计入。验证失败会重新进入 `diagnosis_required`，而不是直接增加周期；需要第四次恢复时以明确的 `failed` 原因收口。恢复成功本身不代表任务完成，只有当前 generation 的验证通过且 active Plan Contract 的步骤完成，完成提醒才会消失；没有 active plan 时沿用 Direct Path 的验证条件。
 
-Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`、最近失败/恢复动作、generation 与预算。完成提醒会按阶段说明唯一合法的推进动作；相同 `progress_marker` 下再次只输出文本仍会进入既有 `blocked` 保护。
+Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`、最近失败/恢复动作、generation 与预算。完成提醒会按阶段说明唯一合法的推进动作；相同 `progress_marker` 下再次只输出文本仍会进入既有 `blocked` 保护。v0.24 另外保留活动 trigger 的来源与理由、replan 剩余预算、`LoopStagnationState` 的计数和 gate 允许的下一动作。
 
 ## v0.19 检查点与回滚（Checkpoint / Rollback）
 
@@ -178,7 +199,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.22，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.24，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -200,12 +221,14 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `todos` | active Plan Contract 的只读兼容投影 |
 | `plan_revisions` / `plan_progress_history` | 不可变计划结构历史与独立步骤进度事件；完整历史不直接注入 LLM 上下文 |
 | `planning_state` / `active_plan` | 当前计划阶段、active revision 和应用进度事件后的执行视图 |
+| `replan_triggers` / `user_plan_decisions` | 活动 trigger、四类来源、用户决定及恢复前终态原因 |
+| `loop_stagnation` | progress epoch、连续无进展回合数、短指纹、告警类型和最近原因 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 | `verification_history` | append-only 的任务内 verification 审计记录；跨 generation 回放使用，不参与完成判定或 LLM 上下文 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |
 | `repair_loop` | 当前修复阶段、活动 failure/recovery、已使用/剩余 repair cycle 和要求的下一动作 |
 | `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |
-| `budgets` / `recovery_notice` | 失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
+| `budgets` / `recovery_notice` | replan、无进展、失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 

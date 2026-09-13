@@ -110,6 +110,38 @@ def make_commit_plan_tool(state: AgentState) -> Tool:
     )
 
 
+def make_request_replan_tool(state: AgentState) -> Tool:
+    def request_replan(kind, source_id, reason):
+        trigger = state.request_replan(kind, source_id, reason)
+        return _result(
+            "replan_requested",
+            trigger_id=trigger.trigger_id,
+            kind=trigger.kind,
+            source_id=source_id,
+            phase=state.snapshot()["planning_state"]["phase"],
+            replans_remaining=state.snapshot()["planning_state"]["replans_remaining"],
+        )
+
+    return Tool(
+        name="request_replan",
+        description=(
+            "引用真实 failure 或成功只读观察，请求进入只读 Explore 并提交修订计划；"
+            "不能伪造用户反馈或 blocked 恢复来源。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["failure", "observation"]},
+                "source_id": {"type": "string", "minLength": 1, "maxLength": 120},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 600},
+            },
+            "required": ["kind", "source_id", "reason"],
+            "additionalProperties": False,
+        },
+        handler=request_replan,
+    )
+
+
 def make_update_plan_progress_tool(state: AgentState) -> Tool:
     def update_plan_progress(revision_id, step_id, status, reason):
         event = state.update_plan_progress(revision_id, step_id, status, reason)

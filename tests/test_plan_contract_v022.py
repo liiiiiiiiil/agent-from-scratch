@@ -12,6 +12,7 @@ from mini_agent.checkpoint import CheckpointStore
 from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
 from mini_agent.state import (
     AgentState,
+    FailureEvent,
     PlanProgressEvent,
     PlanRevision,
     PlanStep,
@@ -102,7 +103,8 @@ def test_initial_commit_progress_and_snapshot_projection():
     first = state.snapshot()
     assert first["planning_state"] == {
         "mode": "auto", "phase": "executing", "active_revision_id": 1,
-        "active_trigger_id": None, "replans_used": 0, "replans_remaining": None,
+        "active_trigger_id": None, "replans_used": 0, "replans_remaining": 3,
+        "trigger_no_progress_commits": 0,
     }
     assert first["active_plan"]["steps"][0]["status"] == "pending"
     assert first["current_generation_id"] == 0
@@ -129,6 +131,11 @@ def test_revision_inherits_status_and_preserves_old_revision():
     state.commit_plan(**_plan())
     state.update_plan_progress(1, "inspect", "in_progress", "start")
     state.update_plan_progress(1, "inspect", "completed", "done")
+    state.failures.append(FailureEvent(
+        "f-1", 0, "execute", "deterministic", False, "a-1",
+    ))
+    state._enter_diagnosis("f-1")
+    trigger = state.request_replan("failure", "f-1", "replace the edit step")
     state.commit_plan(
         goal="finish the revised task",
         constraints=[],
@@ -136,6 +143,7 @@ def test_revision_inherits_status_and_preserves_old_revision():
         steps=[_step("inspect"), _step("replace", depends_on=["inspect"], replaces=["edit"])],
         reason="replace edit step",
         parent_revision_id=1,
+        trigger_id=trigger.trigger_id,
     )
     snapshot = state.snapshot()
     assert len(snapshot["plan_revisions"]) == 2

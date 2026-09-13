@@ -127,6 +127,13 @@ def main():
                 state.begin_task(user_input, mode=mode)
             else:
                 state.task = user_input
+        if state.status in ("blocked", "failed"):
+            reason = _single_line_notice(getattr(state, "terminal_reason", ""))
+            cli_notice(
+                (f"任务已阻塞：{reason}" if state.status == "blocked" else f"任务已失败：{reason}")
+                + "；请使用 /new <任务>。"
+            )
+            return
         state.status = "running"
         context.history.append({"role": "user", "content": user_input})
         try:
@@ -173,6 +180,17 @@ def main():
         if not user_input or user_input.lower() in ("exit", "quit"):
             break
         cli_output.input_end()
+        if user_input == "/resume" or user_input.startswith("/resume "):
+            feedback = user_input[len("/resume"):].strip()
+            if not feedback:
+                cli_notice("用法: /resume <反馈>")
+                continue
+            try:
+                state.resume_blocked(feedback)
+                run_task(f"用户恢复 blocked 任务；反馈：{feedback}。请先在 Explore 中调查，并提交引用当前 trigger 的计划修订。")
+            except (ValueError, PlanRejected) as error:
+                cli_notice(f"任务恢复无效：{error}")
+            continue
         if user_input.split(maxsplit=1)[0] in ("/approve", "/reject", "/continue", "/review"):
             parts = user_input.split(maxsplit=2)
             command = parts[0]

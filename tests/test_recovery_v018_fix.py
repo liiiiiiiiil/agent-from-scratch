@@ -256,7 +256,9 @@ def test_terminal_batch_returns_results_without_entering_later_handlers():
     ]
     with patch("mini_agent.agent.call_llm", side_effect=responses):
         with redirect_stdout(StringIO()):
-            assert agent_loop(context, executor) == "blocked explanation"
+            result = agent_loop(context, executor)
+    assert result.startswith("任务已阻塞：")
+    assert "副作用范围未知" in result
     assert called == ["fail"]
     assert "task_terminal" in context.history[3]["content"]
     assert state.status == "blocked"

@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: code and tutorials reach `v0.23` (lesson 23: read-only exploration and user plan handoff). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: code and tutorials reach `v0.24` (lesson 24: evidence-backed replanning and bounded stagnation). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -57,7 +57,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><th colspan="3"><a id="stage-7"></a>Stage 7 · Structured Planning</th></tr>
     <tr><td><strong>v0.22</strong></td><td><a href="./docs/tutorials/22-plan-contract.md">Plan Contract</a></td><td>Keep immutable plan revisions, independent progress events, and a bounded execution view in context.</td></tr>
     <tr><td><strong>v0.23</strong></td><td><a href="./docs/tutorials/23-plan-mode-handoff.md">Read-only planning and handoff</a></td><td>Explore without effects, submit a plan for user approval, and keep tool permission separate.</td></tr>
-    <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding replay, memory, sandboxing, and related capabilities.</td></tr>
+    <tr><td><strong>v0.24</strong></td><td><a href="./docs/tutorials/24-replanning-policy.md">Evidence-backed replanning and bounded stagnation</a></td><td>Reference real failures or observations for plan revisions, then bound repeated tool rounds.</td></tr>
+    <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding plan replay, memory, sandboxing, and related capabilities.</td></tr>
   </tbody>
 </table>
 

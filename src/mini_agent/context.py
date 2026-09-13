@@ -435,7 +435,48 @@ class ContextManager:
                 f"feedback={bounded(latest.get('feedback') or '-', 600)}"
             )
         if planning_state.get("active_trigger_id") is not None:
-            base_lines.append(f"Active plan trigger: {planning_state['active_trigger_id']}")
+            active_trigger = next(
+                (item for item in snapshot.get("replan_triggers", [])
+                 if item.get("trigger_id") == planning_state["active_trigger_id"]),
+                None,
+            )
+            if active_trigger:
+                source = (
+                    active_trigger.get("caused_by_failure_id")
+                    or active_trigger.get("caused_by_attempt_id")
+                    or active_trigger.get("caused_by_decision_id")
+                    or "-"
+                )
+                base_lines.append(
+                    "Active plan trigger: "
+                    f"{planning_state['active_trigger_id']} "
+                    f"kind={active_trigger.get('kind', '?')}; source={source}; "
+                    f"reason={bounded(active_trigger.get('reason') or '-', 600)}"
+                )
+            else:
+                base_lines.append(f"Active plan trigger: {planning_state['active_trigger_id']}")
+        # Keep the established emergency view for very small windows so the
+        # State message does not consume all room reserved for protocol history.
+        if self.budget.window >= 512:
+            base_lines.append(
+                "Replan budget: "
+                f"used={planning_state.get('replans_used', 0)}; "
+                f"remaining={planning_state.get('replans_remaining', '?')}; "
+                f"trigger_no_progress={planning_state.get('trigger_no_progress_commits', 0)}"
+            )
+            stagnation = snapshot.get("loop_stagnation", snapshot.get("stagnation", {}))
+            base_lines.append(
+                "Stagnation: "
+                f"epoch={stagnation.get('progress_epoch', 0)}; "
+                f"consecutive_no_progress={stagnation.get('consecutive_no_progress_rounds', 0)}; "
+                f"warning={stagnation.get('warning_kind') or '-'}; "
+                f"last={str(stagnation.get('last_round_fingerprint') or '-')[:12]}; "
+                f"reason={bounded(stagnation.get('last_reason') or '-', 300)}"
+            )
+            base_lines.append(
+                "Allowed next action: "
+                + str(snapshot.get("allowed_next_action") or "按当前 Planning / Repair gate 执行")
+            )
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
@@ -543,6 +584,32 @@ class ContextManager:
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
             compact_lines.extend(bounded(line, 1500) for line in plan_lines)
+            active_trigger = next(
+                (item for item in snapshot.get("replan_triggers", [])
+                 if item.get("trigger_id") == planning_state.get("active_trigger_id")),
+                None,
+            )
+            if active_trigger is not None:
+                compact_lines.append(
+                    "Active plan trigger: "
+                    f"{planning_state.get('active_trigger_id')} "
+                    f"kind={active_trigger.get('kind')}; source="
+                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or '-'}; "
+                    f"reason={bounded(active_trigger.get('reason') or '-', 450)}"
+                )
+            compact_lines.append(
+                "Replan budget: "
+                f"used={planning_state.get('replans_used', 0)}; "
+                f"remaining={planning_state.get('replans_remaining', '?')}; "
+                f"trigger_no_progress={planning_state.get('trigger_no_progress_commits', 0)}"
+            )
+            compact_lines.append(
+                "Stagnation: " + bounded(str(snapshot.get("loop_stagnation", {})), 500)
+            )
+            compact_lines.append(
+                "Allowed next action: "
+                + bounded(str(snapshot.get("allowed_next_action") or "-"), 700)
+            )
             # Checkpoint metadata is part of the causal recovery state. Keep
             # it ahead of lower-priority history when the state is degraded.
             for line, limit in (
@@ -591,6 +658,20 @@ class ContextManager:
                 compact_lines.append(bounded(plan_lines[-1], 200))
             else:
                 compact_lines.extend(bounded(line, 300) for line in plan_lines)
+            if active_trigger is not None:
+                compact_lines.append(
+                    "Active plan trigger: "
+                    f"{planning_state.get('active_trigger_id')} "
+                    f"kind={active_trigger.get('kind')}; source="
+                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or '-'}; "
+                    f"reason={bounded(active_trigger.get('reason') or '-', 350)}"
+                )
+            compact_lines.append(
+                "Replan budget: " + bounded(str(planning_state), 500)
+            )
+            compact_lines.append(
+                "Stagnation: " + bounded(str(snapshot.get("loop_stagnation", {})), 500)
+            )
             if repair_loop and repair_loop.get("phase") != "idle":
                 compact_lines.append("Repair loop: " + bounded(str(repair_loop), 800))
             if checkpoint_state_line is not None:
