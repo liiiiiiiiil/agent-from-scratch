@@ -12,6 +12,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mini_agent.state import AgentState
 
 
+def _step(step_id, depends_on=None):
+    return {
+        "step_id": step_id,
+        "content": step_id,
+        "depends_on": depends_on or [],
+        "success_criteria": [f"{step_id} done"],
+        "replaces": [],
+    }
+
+
+def _commit(state, steps):
+    state.commit_plan(
+        goal="test plan", constraints=[], success_criteria=["checks pass"],
+        steps=steps, reason="test",
+    )
+
+
 def test_defaults_are_independent():
     first = AgentState()
     second = AgentState()
@@ -34,20 +51,15 @@ def test_defaults_are_independent():
 
 def test_todo_updates_are_atomic_and_derive_current_goal():
     state = AgentState()
-    state.update_todos([
-        {"content": "  inspect code  "},
-        {"content": "run tests", "status": "in_progress"},
-    ])
+    _commit(state, [_step("inspect-code"), _step("run-tests")])
+    state.update_plan_progress(1, "run-tests", "in_progress", "start")
     assert state.snapshot()["todos"] == [
-        {"content": "inspect code", "status": "pending"},
-        {"content": "run tests", "status": "in_progress"},
+        {"content": "inspect-code", "status": "pending"},
+        {"content": "run-tests", "status": "in_progress"},
     ]
     before = state.snapshot()
     try:
-        state.update_todos([
-            {"content": "new", "status": "in_progress"},
-            {"content": "also new", "status": "in_progress"},
-        ])
+        state.update_plan_progress(1, "inspect-code", "in_progress", "parallel")
         assert False, "重复 in_progress 应拒绝"
     except ValueError:
         pass
@@ -56,21 +68,29 @@ def test_todo_updates_are_atomic_and_derive_current_goal():
 
 def test_todo_does_not_enter_execution_state():
     state = AgentState()
-    state.record_tool("update_todo", {"todos": []}, True, "updated")
-    state.record_tool("update_todo", {"todos": []}, False, "failed")
+    state.record_tool("commit_plan", {}, True, "committed")
+    state.record_tool("update_plan_progress", {}, False, "rejected")
     assert state.snapshot()["tool_history"] == []
     assert state.snapshot()["errors"] == []
 
 def test_invalid_todo_shapes_leave_snapshot_unchanged():
     state = AgentState()
-    state.update_todos([{"content": "keep", "status": "in_progress"}])
+    _commit(state, [_step("keep")])
     before = state.snapshot()
-    invalid = [None, [{"content": ""}], [{"content": "x", "status": "bad"}],
-               [{"content": "x"}] * 51, [{"content": "x" * 241}],
-               [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "in_progress"}]]
+    invalid = [
+        None,
+        [_step("" )],
+        [_step("x", depends_on=["missing"])],
+        [_step("x")] * 51,
+        [{**_step("x"), "content": "x" * 241}],
+        [{**_step("x"), "success_criteria": []}],
+    ]
     for value in invalid:
         try:
-            state.update_todos(value)
+            state.commit_plan(
+                goal="test plan", constraints=[], success_criteria=["ok"],
+                steps=value, reason="bad", parent_revision_id=1,
+            )
         except (TypeError, ValueError):
             pass
         else:
@@ -119,12 +139,18 @@ def test_failed_verification_requires_retry():
 
 def test_completion_progress_marker_tracks_real_facts_and_ignores_duplicate_todo():
     state = AgentState(task="progress")
-    state.update_todos([{"content": "inspect", "status": "pending"}])
+    _commit(state, [_step("inspect")])
     first = state.completion_reminder()["progress_marker"]
-    state.update_todos([{"content": "inspect", "status": "pending"}])
+    try:
+        state.commit_plan(
+            goal="test plan", constraints=[], success_criteria=["checks pass"],
+            steps=[_step("inspect")], reason="duplicate", parent_revision_id=1,
+        )
+    except ValueError:
+        pass
     assert state.completion_reminder()["progress_marker"] == first
 
-    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    state.update_plan_progress(1, "inspect", "in_progress", "start")
     todo_progress = state.completion_reminder()["progress_marker"]
     assert todo_progress != first
 
@@ -138,13 +164,17 @@ def test_completion_progress_marker_tracks_real_facts_and_ignores_duplicate_todo
 
 def test_completed_todos_and_current_passed_verification_allow_finish():
     state = AgentState(task="finish")
-    state.update_todos([{"content": "inspect", "status": "completed"}])
+    _commit(state, [_step("inspect")])
+    state.update_plan_progress(1, "inspect", "in_progress", "start")
+    state.update_plan_progress(1, "inspect", "completed", "done")
     state.record_tool("run_shell", {"command": "check", "purpose": "verification"}, True, "[exit=0] ok")
     assert state.completion_reminder() is None
 
 def test_begin_task_resets_runtime_state_and_completion_reminder():
     state = AgentState(task="old")
-    state.update_todos([{"content": "done", "status": "completed"}])
+    _commit(state, [_step("done")])
+    state.update_plan_progress(1, "done", "in_progress", "start")
+    state.update_plan_progress(1, "done", "completed", "done")
     state.record_tool("write_file", {"path": "a"}, True, "written")
     assert state.completion_reminder() is not None
     state.begin_task("new")
@@ -157,7 +187,8 @@ def test_begin_task_resets_runtime_state_and_completion_reminder():
 def test_reset_task_clears_stage_six_state_in_place():
     state = AgentState()
     state.begin_task("old")
-    state.update_todos([{"content": "old todo", "status": "in_progress"}])
+    _commit(state, [_step("old-todo")])
+    state.update_plan_progress(1, "old-todo", "in_progress", "start")
     state.begin_task("new")
     snapshot = state.snapshot()
     assert snapshot["task"] == "new"
@@ -240,7 +271,7 @@ def test_recorded_args_are_independent_copies():
 
 
 def test_snapshot_is_consistent_and_independent():
-    state = AgentState(task="update app", current_goal="edit main.py")
+    state = AgentState(task="update app")
     state.record_tool("write_file", {"path": "main.py"}, True, "written")
 
     snapshot = state.snapshot()
@@ -250,7 +281,7 @@ def test_snapshot_is_consistent_and_independent():
     snapshot["errors"].append("fake error")
 
     assert snapshot["task"] == "update app"
-    assert snapshot["current_goal"] == "edit main.py"
+    assert snapshot["current_goal"] == ""
     assert snapshot["status"] == "running"
     assert state.tool_history[0]["args"]["path"] == "main.py"
     assert state.tool_history != snapshot["tool_history"]

@@ -27,7 +27,8 @@ ALLOW, DENY, ASK = "allow", "deny", "ask"
 # ============================================================
 
 PERMISSION_RULES = {
-    "update_todo": ALLOW,
+    "commit_plan": ALLOW,
+    "update_plan_progress": ALLOW,
     "read_file": ALLOW,
     "calculate": ALLOW,
     "list_dir": ALLOW,  # 只读，放行

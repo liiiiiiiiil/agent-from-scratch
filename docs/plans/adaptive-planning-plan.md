@@ -1,7 +1,7 @@
 # 阶段七：自适应规划与重规划（Adaptive Planning & Replanning）实施计划
 
-> 状态：规划中
-> 当前基线：`v0.21`（Reliable Execution / Trace & Replay）
+> 状态：`v0.22` Plan Contract 已实现；`v0.23`–`v0.25` 仍为后续规划
+> 当前基线：`v0.22`（Plan Contract；`v0.21` Trace & Replay 为前一版基线）
 > 前置阶段：阶段五项目感知与任务编排（`v0.14`–`v0.16`）与阶段六可靠执行（`v0.17`–`v0.21`）
 > 版本范围：`v0.22`–`v0.25`
 
@@ -407,7 +407,8 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 
 ### 7.3 阶段完成定义
 
-- [ ] `v0.22`–`v0.25` 各有独立教程、变更记录和可运行测试
+- [x] `v0.22` Plan Contract 已有独立教程、变更记录和可运行测试
+- [ ] `v0.23`–`v0.25` 各有独立教程、变更记录和可运行测试
 - [ ] 计划结构、步骤进度、执行事实和验证证据有单一且不同的写入来源
 - [ ] 简单任务保持短路径，复杂任务可以显式进入受 Runtime 约束的 Explore → Commit → Execute 流程
 - [ ] `--plan` 在用户批准前不产生副作用，批准也不会绕过 PermissionGate

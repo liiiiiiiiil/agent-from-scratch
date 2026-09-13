@@ -70,31 +70,47 @@ def test_stage5_plan_execute_replan_verify_e2e(monkeypatch, capsys):
             )
             registry = create_registry(state)
             policy = PermissionPolicy({name: ALLOW for name in (
-                "update_todo", "read_file", "edit_file", "run_shell", "recover",
+                "commit_plan", "update_plan_progress", "read_file", "edit_file", "run_shell", "recover",
             )})
             executor = ToolExecutor(
                 registry, gate=PermissionGate(policy), on_result=state.record_tool
             )
             responses = [
-                _tool_call("tc1", "update_todo", {"todos": [
-                    {"content": "调查 app.py", "status": "in_progress"},
-                    {"content": "修改 VALUE", "status": "pending"},
-                    {"content": "运行验证", "status": "pending"},
-                ]}),
-                _tool_call("tc2", "read_file", {"path": str(app)}),
-                _tool_call("tc3", "edit_file", {
+                _tool_call("tc1", "commit_plan", {
+                    "goal": "修复并验证 app.py",
+                    "constraints": ["遵守项目指令"],
+                    "success_criteria": ["VALUE 为 42", "verification 通过"],
+                    "steps": [
+                        {"step_id": "inspect", "content": "调查 app.py", "depends_on": [], "success_criteria": ["确认 VALUE"], "replaces": []},
+                        {"step_id": "edit", "content": "修正 VALUE 为 42", "depends_on": ["inspect"], "success_criteria": ["文件写入 42"], "replaces": []},
+                        {"step_id": "verify", "content": "运行验证", "depends_on": ["edit"], "success_criteria": ["命令退出码为 0"], "replaces": []},
+                    ],
+                    "reason": "建立调查、修改和验证顺序",
+                }),
+                _tool_call("tc2", "update_plan_progress", {"revision_id": 1, "step_id": "inspect", "status": "in_progress", "reason": "开始调查"}),
+                _tool_call("tc3", "read_file", {"path": str(app)}),
+                _tool_call("tc4", "update_plan_progress", {"revision_id": 1, "step_id": "inspect", "status": "completed", "reason": "已确认 VALUE"}),
+                _tool_call("tc5", "update_plan_progress", {"revision_id": 1, "step_id": "edit", "status": "in_progress", "reason": "开始修正"}),
+                _tool_call("tc6", "edit_file", {
                     "path": str(app), "old_string": "VALUE = 0", "new_string": "VALUE = 1",
                 }),
-                _tool_call("tc4", "run_shell", {
+                _tool_call("tc7", "run_shell", {
                     "command": 'python -c "import app; assert app.VALUE == 42"',
                     "purpose": "verification",
                 }),
-                _tool_call("tc5", "update_todo", {"todos": [
-                    {"content": "调查 app.py", "status": "completed"},
-                    {"content": "修正 VALUE 为 42", "status": "in_progress"},
-                    {"content": "运行验证", "status": "pending"},
-                ]}),
-                _tool_call("tc6", "recover", {
+                _tool_call("tc8", "commit_plan", {
+                    "goal": "修复并验证 app.py",
+                    "constraints": ["遵守项目指令", "VALUE 必须为 42"],
+                    "success_criteria": ["VALUE 为 42", "verification 通过"],
+                    "steps": [
+                        {"step_id": "inspect", "content": "调查 app.py", "depends_on": [], "success_criteria": ["确认 VALUE"], "replaces": []},
+                        {"step_id": "edit", "content": "修正 VALUE 为 42", "depends_on": ["inspect"], "success_criteria": ["文件写入 42"], "replaces": []},
+                        {"step_id": "verify", "content": "运行验证", "depends_on": ["edit"], "success_criteria": ["命令退出码为 0"], "replaces": []},
+                    ],
+                    "reason": "失败证据明确要求补充约束",
+                    "parent_revision_id": 1,
+                }),
+                _tool_call("tc9", "recover", {
                     "action": "adjust", "caused_by_failure_id": "f-1",
                     "reason": "verification shows VALUE must be 42",
                     "requested_tool": "edit_file",
@@ -102,15 +118,13 @@ def test_stage5_plan_execute_replan_verify_e2e(monkeypatch, capsys):
                         "path": str(app), "old_string": "VALUE = 1", "new_string": "VALUE = 42",
                     },
                 }),
-                _tool_call("tc7", "run_shell", {
+                _tool_call("tc10", "run_shell", {
                     "command": 'python -c "import app; assert app.VALUE == 42"',
                     "purpose": "verification",
                 }),
-                _tool_call("tc8", "update_todo", {"todos": [
-                    {"content": "调查 app.py", "status": "completed"},
-                    {"content": "修正 VALUE 为 42", "status": "completed"},
-                    {"content": "运行验证", "status": "completed"},
-                ]}),
+                _tool_call("tc11", "update_plan_progress", {"revision_id": 2, "step_id": "edit", "status": "completed", "reason": "修改已通过验证"}),
+                _tool_call("tc12", "update_plan_progress", {"revision_id": 2, "step_id": "verify", "status": "in_progress", "reason": "开始最终验证"}),
+                _tool_call("tc13", "update_plan_progress", {"revision_id": 2, "step_id": "verify", "status": "completed", "reason": "验证完成"}),
                 {"role": "assistant", "content": "已修复并通过验证。"},
             ]
             call_index = 0
@@ -144,8 +158,8 @@ def test_stage5_plan_execute_replan_verify_e2e(monkeypatch, capsys):
                 message["tool_call_id"]: message["content"]
                 for message in context.history if message.get("role") == "tool"
             }
-            assert "[exit=1]" in verification_results["tc4"]
-            assert "[exit=0]" in verification_results["tc7"]
+            assert "[exit=1]" in verification_results["tc7"]
+            assert "[exit=0]" in verification_results["tc10"]
             verification = [item for item in state.snapshot()["verification_evidence"]]
             assert verification[-1]["outcome"] == "passed"
             assert state.snapshot()["files_changed"] == [str(app)]

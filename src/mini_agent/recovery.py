@@ -48,8 +48,8 @@ class RecoveryRuntime:
                                 requested_attempt, requested_tool, requested_arguments,
                                 checkpoint_id)
         if action == "adjust":
-            if requested_tool == "recover":
-                return self._reject(action, caused_by_failure_id, reason, "recover 不能作为恢复目标",
+            if requested_tool in ("recover", "commit_plan", "update_plan_progress"):
+                return self._reject(action, caused_by_failure_id, reason, "control/plan 工具不能作为恢复目标",
                                     requested_attempt, requested_tool, requested_arguments)
             try:
                 tool = self.executor.registry.get(requested_tool)
@@ -71,9 +71,10 @@ class RecoveryRuntime:
                     source_tool = self.executor.registry.get(source_attempt.tool)
                 except (TypeError, ValueError):
                     source_tool = None
-                if source_tool is not None and source_tool.internal:
+                if (source_attempt.tool in ("commit_plan", "update_plan_progress") or
+                        (source_tool is not None and source_tool.internal)):
                     return self._reject(action, caused_by_failure_id, reason,
-                                        "internal 工具不能作为恢复目标",
+                                        "control/plan 工具不能作为恢复目标",
                                         requested_attempt, requested_tool, requested_arguments)
         target, detail = self.state.recovery_target(
             action, caused_by_failure_id, requested_attempt,

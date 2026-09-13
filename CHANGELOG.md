@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.22.0] - Plan Contract
+
+- Replaced the model-visible whole-list `update_todo` write protocol with `commit_plan` and `update_plan_progress`.
+- Added frozen `PlanStep`, `PlanRevision`, `PlanProgressEvent`, and `PlanningState` models with atomic validation, immutable revision history, dependency checks, status inheritance, and read-only Todo projections.
+- Added bounded active-plan rendering to Structured State and kept plan writes out of generation changes and verification evidence.
+- Rejected plan submissions return `plan_rejected` without creating a `FailureEvent`; plan tools remain default-allow, effect-free state tools and are excluded from recovery targets.
+- Added the Plan Contract tutorial and synchronized the v0.22 runbook, context architecture, README navigation, and stage-seven plan status.
+
 - Added bounded terminal output modes (`quiet`, `normal`, `debug`) with lazy streamed assistant output, grouped tool summaries, structured outcomes, and explicit CLI/permission notices.
 - Added the `call_llm` content observer callback while preserving complete tool protocol messages and standard-library-only execution.
 

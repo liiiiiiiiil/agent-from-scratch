@@ -1,6 +1,18 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.21**（任务轨迹回放；含 v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.22**（Plan Contract；含 v0.21 Trace & Replay、v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+
+## v0.22 Plan Contract
+
+复杂任务可以通过 `commit_plan` 提交结构化计划。计划包含 `goal`、`constraints`、任务级 `success_criteria` 和 1–50 个带稳定 `step_id` 的步骤；步骤可以声明 `depends_on`、步骤级 `success_criteria` 和 `replaces`。简单任务继续走 Direct Path，不需要创建计划。
+
+初次 `commit_plan` 不提供 `parent_revision_id`，成功后创建 revision 1 并进入 `executing`。结构发生变化时，必须提交带当前 active revision 作为 parent 的完整新计划；旧 revision 不会被覆盖。只改变步骤状态时使用 `update_plan_progress`，状态只能按 `pending → in_progress → completed` 推进，依赖未完成或已有其他进行中步骤时会被拒绝。
+
+计划校验和 revision 提交在同一把 State 锁内完成。无效参数或违反计划不变量的请求会收到 `plan_rejected`，不会创建 `FailureEvent`、进入 Repair Loop、推进 generation 或产生验证证据。两个计划工具默认 `ALLOW`、`effect_class=none`，也不能成为 `recover` 的 retry、adjust 或 rollback 目标。计划写入不代表环境已经正确，步骤完成仍不能替代独立 verification。
+
+`AgentState.snapshot()` 同时提供完整的 `plan_revisions`、append-only 的 `plan_progress_history`、当前推导出的 `active_plan` 和 `planning_state`。`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读兼容投影。Structured State 只显示有界的目标、当前步骤、最多五个 ready 步骤、最多十个阻塞步骤及数量摘要；压缩后仍从 State 重建，不从历史摘要恢复计划。
+
+v0.21 的 `/trace` 继续只读回放 generation、执行、失败、恢复和验证事实；本版不把完整 Plan 因果链加入 Trace。
 
 ## v0.21 任务轨迹回放（Trace & Replay，只读）
 
@@ -17,7 +29,7 @@ print(render_trace(report))
 
 `report["integrity"]` 为 `complete` 时，当前保存的引用可以完整验收；为 `incomplete` 时，`issues` 会说明断链、缺失的历史验证证据或跨 generation 证据，报告仍保留可确认的原始记录，不能据此推测缺失事实。失败诊断优先使用已有 `cause_hint`，否则显示关联恢复动作的 `reason`，两者都没有时显示“未记录诊断”。
 
-Todo 每次成功提交都会在 State 锁内追加一个不可变 `TodoRevision`，包含 revision ID、generation、完整列表和 current goal；校验失败不追加。它只进入回放快照，不注入 Structured State。`/reset` 和 `/new` 会清除任务内回放事实，完成任务后在清除前仍可查询。
+v0.21 的 Trace 对缺失的 `todo_revisions` 会安全降级为空；v0.22 不再把 Todo revision 作为计划写入来源，计划历史改由本节开头的 `plan_revisions` 和 `plan_progress_history` 保存。
 
 ## v0.20 Repair Loop（修复循环）
 
@@ -25,13 +37,13 @@ Todo 每次成功提交都会在 State 锁内追加一个不可变 `TodoRevision
 
 | 阶段 | 允许的下一步 |
 |---|---|
-| `idle` | 正常调查、执行和 Todo 推进 |
-| `diagnosis_required` | 只读调查、`update_todo`，或独占调用 `recover` 处理当前 `active_failure_id` |
+| `idle` | 正常调查、执行和计划推进 |
+| `diagnosis_required` | 只读调查、`commit_plan` / `update_plan_progress`，或独占调用 `recover` 处理当前 `active_failure_id` |
 | `verification_required` | 下一工具回合只能是单个 `run_shell(purpose="verification")` |
 
 agent loop 在回合级检查批量调用，ToolExecutor 在权限和 handler 前再次检查；不合规调用会收到协议错误且不会运行 handler、询问权限或推进 generation。恢复目标携带受 State 锁保护的 reservation，是 verification 阶段唯一的受控执行例外；恢复结果回灌后仍必须有独立 verification。
 
-`MAX_REPAIR_CYCLES` 默认是 3。初始失败、schema/参数拒绝、权限拒绝以及 `ask`/`block` 不消耗周期；`retry`、`adjust`、`rollback` 只有在目标授权并激活 successor generation 后才计入。验证失败会重新进入 `diagnosis_required`，而不是直接增加周期；需要第四次恢复时以明确的 `failed` 原因收口。恢复成功本身不代表任务完成，只有当前 generation 的验证通过且 Todo 完成，完成提醒才会消失。
+`MAX_REPAIR_CYCLES` 默认是 3。初始失败、schema/参数拒绝、权限拒绝以及 `ask`/`block` 不消耗周期；`retry`、`adjust`、`rollback` 只有在目标授权并激活 successor generation 后才计入。验证失败会重新进入 `diagnosis_required`，而不是直接增加周期；需要第四次恢复时以明确的 `failed` 原因收口。恢复成功本身不代表任务完成，只有当前 generation 的验证通过且 active Plan Contract 的步骤完成，完成提醒才会消失；没有 active plan 时沿用 Direct Path 的验证条件。
 
 Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`、最近失败/恢复动作、generation 与预算。完成提醒会按阶段说明唯一合法的推进动作；相同 `progress_marker` 下再次只输出文本仍会进入既有 `blocked` 保护。
 
@@ -68,6 +80,8 @@ Structured State 和上下文压缩后的 critical state 会保留 `repair_loop`
 v0.16.1 修复了完成提醒：当模型在 Todo 未完成或仍需验证时输出阶段性文本，运行时注入明确的 Runtime Notice，要求下一回复调用推进工具（更新 Todo、调查/操作或验证），而不是只口头描述下一步。提醒按进展状态最多一次：完整 Todo、非 Todo 工具结果、验证证据数量、generation 或 `verification_required` 发生变化后，可以再次提醒；相同标记下再次输出无工具文本才标记 `blocked`。没有 `progress_marker` 的旧式 State 保持一次提醒兼容行为。这种保守策略不依赖第三方库或命令解析。
 
 ## v0.15 任务清单与状态（Todo / Task State）
+
+以下是历史版本行为；从 v0.22 起 `update_todo` 不再注册为模型可见工具，当前计划写入请看本手册开头的 Plan Contract。
 
 模型可调用 `update_todo` 提交完整任务列表。状态为 `pending`、`in_progress` 或 `completed`，最多一个进行中项；更新失败时旧状态不变。Todo 属于 AgentState，Execution State（工具历史、文件、错误）仍由执行器维护；每轮请求通过 Structured State 注入，压缩后也会恢复。v0.15 不自动规划、持久化或阻断完成。
 
@@ -147,7 +161,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.21，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.22，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -166,8 +180,9 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `files_changed` | 成功写入或编辑过的文件路径 |
 | `errors` | 权限拒绝或工具失败记录 |
 | `status` | `running` / `done` / `blocked` / `failed` |
-| `todos` | 动态计划步骤及其 `pending` / `in_progress` / `completed` 状态 |
-| `todo_revisions` | 每次成功 Todo 提交的完整回放快照；不注入 LLM 上下文 |
+| `todos` | active Plan Contract 的只读兼容投影 |
+| `plan_revisions` / `plan_progress_history` | 不可变计划结构历史与独立步骤进度事件；完整历史不直接注入 LLM 上下文 |
+| `planning_state` / `active_plan` | 当前计划阶段、active revision 和应用进度事件后的执行视图 |
 | `verification_evidence` | 最近 verification 命令、退出码与结果；只有当前 generation 的 `[exit=0]` 才算通过 |
 | `verification_history` | append-only 的任务内 verification 审计记录；跨 generation 回放使用，不参与完成判定或 LLM 上下文 |
 | `failures` / `recovery_actions` | 最近失败的工具、failure/attempt/generation、分类与可重试性，以及恢复动作状态和因果引用 |

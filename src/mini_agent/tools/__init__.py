@@ -12,7 +12,7 @@ from mini_agent.tools.file import (
 from mini_agent.tools.shell import run_shell_tool
 from mini_agent.permission import PermissionGate
 from mini_agent.state import AgentState
-from mini_agent.tools.todo import make_update_todo_tool
+from mini_agent.tools.plan import make_commit_plan_tool, make_update_plan_progress_tool
 from mini_agent.recovery import RecoveryRuntime
 from mini_agent.checkpoint import CheckpointStore, make_rollback_checkpoint_tool
 
@@ -29,7 +29,8 @@ def create_registry(state: AgentState | None = None,
         if hasattr(state, "bind_checkpoint_store"):
             state.bind_checkpoint_store(checkpoint_store)
         result._checkpoint_store = checkpoint_store
-        result.register(make_update_todo_tool(state))
+        result.register(make_commit_plan_tool(state))
+        result.register(make_update_plan_progress_tool(state))
         # The outer task executor binds its own PermissionGate to this runtime.
         # Keeping only one runtime here prevents recovery from silently using a
         # second, default permission policy.

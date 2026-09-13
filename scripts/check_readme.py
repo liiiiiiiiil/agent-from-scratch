@@ -22,7 +22,7 @@ def _plain_text(fragment: str) -> str:
 def main() -> int:
     text = README.read_text(encoding="utf-8")
     errors: list[str] = []
-    for heading in ("阶段一 ·", "阶段二 ·", "阶段三 ·", "阶段四 ·", "阶段五 ·", "阶段六 ·"):
+    for heading in ("阶段一 ·", "阶段二 ·", "阶段三 ·", "阶段四 ·", "阶段五 ·", "阶段六 ·", "阶段七 ·"):
         if heading not in text:
             errors.append(f"缺少学习阶段标题：{heading}")
     for stale in ("阶段四 · Context Management", "阶段六 · Reliable Execution"):

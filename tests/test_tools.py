@@ -27,9 +27,12 @@ def test_registry():
 
 def test_state_registry_todo_isolation():
     first_state, second_state = AgentState(), AgentState()
-    first = ToolExecutor(create_registry(first_state), gate=PermissionGate(PermissionPolicy({"update_todo": ALLOW})))
-    second = ToolExecutor(create_registry(second_state), gate=PermissionGate(PermissionPolicy({"update_todo": ALLOW})))
-    first.execute("update_todo", {"todos": [{"content": "first"}]})
+    first = ToolExecutor(create_registry(first_state), gate=PermissionGate(PermissionPolicy({"commit_plan": ALLOW})))
+    second = ToolExecutor(create_registry(second_state), gate=PermissionGate(PermissionPolicy({"commit_plan": ALLOW})))
+    plan = {"goal": "first", "constraints": [], "success_criteria": ["done"],
+            "steps": [{"step_id": "first", "content": "first", "depends_on": [],
+                       "success_criteria": ["done"], "replaces": []}], "reason": "test"}
+    first.execute("commit_plan", plan)
     assert first_state.snapshot()["todos"] == [{"content": "first", "status": "pending"}]
     assert second_state.snapshot()["todos"] == []
     assert first_state.snapshot()["tool_history"] == []

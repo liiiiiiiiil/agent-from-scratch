@@ -13,7 +13,8 @@
 - **配置安全**：真实的 `BASE_URL`、`API_KEY`、`MODEL` 只放本地 `config_local.py`，不得提交到版本库。
 - **异常边界**：工具层/执行器负责把 handler 异常转换为错误结果并回灌模型；核心 agent loop 不对 LLM 或 CLI 顶层异常做兜底。
 - **协议完整**：工具调用必须为每个 call 回灌对应的 `role=tool` 结果；单轮工具结果全部回灌后再进入下一轮。
-- **完成与上限**：无 `tool_calls` 才能结束；Todo、修改后的验证等完成条件由当前实现决定；默认最多 50 轮，超限返回明确结果。
+- **Plan Contract**：复杂任务由模型通过 `commit_plan` 提交完整不可变 revision，通过 `update_plan_progress` 追加独立步骤进度事件；简单任务继续 Direct Path。计划校验失败只回灌 `plan_rejected`，不得创建 `FailureEvent`、推进 generation 或产生验证证据；计划写入不替代实际执行和独立 verification。
+- **完成与上限**：无 `tool_calls` 才能结束；有 active Plan Contract 时所有活动步骤必须完成，并满足修改后的验证条件；无计划的 Direct Path 沿用原有完成条件。默认最多 50 轮，超限返回明确结果。
 - **回放只读**：Trace & Replay 只能消费当前进程、当前任务的结构化 State 快照；不得调用 LLM、执行工具、经过权限授权、修改 history、状态、预算或 generation。当前 generation 的验证证据用于完成判定，append-only verification history 用于跨 generation 回放；断链和跨 generation 证据必须标记为不完整，不得推测补全。
 - **教程读者优先**：撰写或修改 `docs/tutorials/` 时，默认读者具备基础 Python 和命令行能力，但刚接触 Agent，也不了解本项目内部架构。必须先讲问题和直观含义，再讲模块、字段、协议与实现；术语、缩写和项目内部概念首次出现时必须就近解释，不得用代码、符号或文件清单代替教学说明。具体要求见[教程作者规范](docs/governance/tutorial-authoring.md)。
 - **主 README 编辑**：修改 `README.md` 的学习路径、阶段名或版本主题前，必须遵守[主 README 编写规范](docs/governance/readme-authoring.md)：主题默认使用通俗中文，只有协议字段、代码标识和公认技术名词可保留英文；修改后运行 `PYTHONPATH=src python scripts/check_readme.py`。
@@ -23,10 +24,10 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.21`（Trace & Replay）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.22`（Plan Contract）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
-完成提醒硬约束：当 Todo 未完成或仍需验证时，阶段性文本只触发当前
-`progress_marker` 一次 Runtime Notice；Todo 状态、非 Todo 工具事实、验证证据、
+完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
+`progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、
 generation 或 `verification_required` 发生变化后才允许再次提醒。标记不变而再次
 输出无 `tool_calls` 文本时必须将任务置为 `blocked`。Runtime Notice 要求下一回复
 调用推进工具；确实无法继续时才说明具体阻塞原因。没有 `progress_marker` 的旧式
@@ -36,7 +37,7 @@ State 保持一次提醒兼容行为。
 
 - `src/mini_agent/agent.py`：LLM 调用与 agent loop。
 - `context.py`：每轮上下文视图、预算裁剪、历史压缩和受保护指令注入。
-- `state.py`：独立于消息历史的任务、Todo、工具和验证状态。
+- `state.py`：独立于消息历史的任务、Plan Contract、工具和验证状态；`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读投影。
 - `permission.py`：按工具与参数模式匹配的 allow/deny/ask 权限闸门。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。

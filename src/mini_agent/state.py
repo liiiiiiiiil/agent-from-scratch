@@ -17,10 +17,27 @@ EffectClass = Literal["none", "possible"]
 AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid"]
 FailureCategory = Literal["protocol", "permission", "transient", "deterministic", "validation", "unknown"]
 RepairPhase = Literal["idle", "diagnosis_required", "verification_required"]
+PlanStepStatus = Literal["pending", "in_progress", "completed"]
+PlanningPhase = Literal["direct", "executing"]
+
+_STEP_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_PLAN_STEP_LIMIT = 50
+_PLAN_GOAL_MAX = 1200
+_PLAN_REASON_MAX = 600
+_PLAN_TEXT_MAX = 240
+_PLAN_CONSTRAINT_LIMIT = 20
+_PLAN_TASK_CRITERIA_LIMIT = 20
+_PLAN_STEP_CRITERIA_LIMIT = 10
+_PLAN_REFERENCE_LIMIT = 50
+_MISSING = object()
 
 
 class AttemptBudgetExceeded(ValueError):
     """A tool call reached the per-argument execution budget before its handler."""
+
+
+class PlanRejected(ValueError):
+    """A model plan request failed validation without becoming an execution failure."""
 
 
 def canonical_arguments_hash(arguments: dict[str, Any]) -> str:
@@ -46,19 +63,47 @@ def redacted_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class TodoItem:
+class PlanStep:
+    step_id: str
     content: str
-    status: Literal["pending", "in_progress", "completed"] = "pending"
+    status: PlanStepStatus = "pending"
+    depends_on: tuple[str, ...] = ()
+    success_criteria: tuple[str, ...] = ()
+    replaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class TodoRevision:
-    """One committed, task-local Todo snapshot for trace replay."""
-
+class PlanRevision:
     revision_id: int
     generation_id: int
-    todos: tuple[TodoItem, ...]
-    current_goal: str
+    parent_revision_id: int | None
+    trigger_id: None
+    goal: str
+    constraints: tuple[str, ...]
+    success_criteria: tuple[str, ...]
+    steps: tuple[PlanStep, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class PlanProgressEvent:
+    progress_id: int
+    revision_id: int
+    generation_id: int
+    step_id: str
+    from_status: str
+    to_status: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class PlanningState:
+    mode: Literal["auto"] = "auto"
+    phase: PlanningPhase = "direct"
+    active_revision_id: int | None = None
+    active_trigger_id: None = None
+    replans_used: int = 0
+    replans_remaining: None = None
 
 
 @dataclass(frozen=True)
@@ -157,8 +202,9 @@ class AgentState:
     errors: list[str] = field(default_factory=list)
     status: str = "running"
     terminal_reason: str = ""
-    todos: list[TodoItem] = field(default_factory=list)
-    todo_revisions: list[TodoRevision] = field(default_factory=list)
+    plan_revisions: list[PlanRevision] = field(default_factory=list)
+    plan_progress_history: list[PlanProgressEvent] = field(default_factory=list)
+    planning_state: PlanningState = field(default_factory=PlanningState)
     verification_evidence: list[VerificationEvidence] = field(default_factory=list)
     verification_history: list[VerificationEvidence] = field(default_factory=list)
     generations: list[ExecutionGeneration] = field(default_factory=list)
@@ -171,7 +217,8 @@ class AgentState:
     _verification_required: bool = field(default=False, init=False, repr=False)
     _next_attempt: int = field(default=1, init=False, repr=False)
     _next_failure: int = field(default=1, init=False, repr=False)
-    _next_todo_revision: int = field(default=1, init=False, repr=False)
+    _next_plan_revision: int = field(default=1, init=False, repr=False)
+    _next_plan_progress: int = field(default=1, init=False, repr=False)
     _fingerprint_counts: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     _repair_cycles: int = field(default=0, init=False, repr=False)
     _reserved_repair_cycles: int = field(default=0, init=False, repr=False)
@@ -183,6 +230,19 @@ class AgentState:
     _next_recovery: int = field(default=1, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
     _lock: Any = field(default_factory=Lock, init=False, repr=False, compare=False)
+    _projection_ready: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # ``current_goal`` remains accepted by the dataclass constructor for
+        # old callers, but the runtime projection is always derived from the
+        # active Plan Contract and never from that input value.
+        object.__setattr__(self, "current_goal", "")
+        object.__setattr__(self, "_projection_ready", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "current_goal" and getattr(self, "_projection_ready", False):
+            raise AttributeError("current_goal 是只读的 active plan 投影")
+        object.__setattr__(self, name, value)
 
     @property
     def current_generation_id(self) -> int:
@@ -217,12 +277,12 @@ class AgentState:
             if reservation is not None and reservation.recovery_id:
                 return None
             if self._repair_phase == "diagnosis_required":
-                if name == "recover" or name == "update_todo":
+                if name in ("recover", "commit_plan", "update_plan_progress"):
                     return None
                 if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
                     return "工具调用拒绝: diagnosis_required 阶段必须先处理当前 failure，不能直接 verification"
                 if effect_class == "possible":
-                    return "工具调用拒绝: diagnosis_required 阶段只允许只读调查、update_todo 或独占 recover"
+                    return "工具调用拒绝: diagnosis_required 阶段只允许只读调查、计划推进或独占 recover"
             elif self._repair_phase == "verification_required":
                 if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
                     return None
@@ -280,6 +340,333 @@ class AgentState:
         """Bind the task-local store shared by the registry, executor, and recovery runtime."""
         with self._lock:
             self._checkpoint_store = store
+
+    @staticmethod
+    def _plan_text(value: Any, field_name: str, maximum: int) -> str:
+        if not isinstance(value, str):
+            raise PlanRejected(f"{field_name} 必须是字符串")
+        value = value.strip()
+        if not value:
+            raise PlanRejected(f"{field_name} 不能为空")
+        if len(value) > maximum:
+            raise PlanRejected(f"{field_name} 不能超过 {maximum} 个字符")
+        return value
+
+    @classmethod
+    def _plan_texts(cls, value: Any, field_name: str, maximum_items: int,
+                    maximum_text: int) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            raise PlanRejected(f"{field_name} 必须是数组")
+        if len(value) > maximum_items:
+            raise PlanRejected(f"{field_name} 不能超过 {maximum_items} 项")
+        return tuple(cls._plan_text(item, f"{field_name}[{index}]", maximum_text)
+                     for index, item in enumerate(value))
+
+    @classmethod
+    def _plan_ids(cls, value: Any, field_name: str) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            raise PlanRejected(f"{field_name} 必须是数组")
+        if len(value) > _PLAN_REFERENCE_LIMIT:
+            raise PlanRejected(f"{field_name} 不能超过 {_PLAN_REFERENCE_LIMIT} 项")
+        result: list[str] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise PlanRejected(f"{field_name}[{index}] 必须是字符串")
+            item = item.strip()
+            if not _STEP_ID_PATTERN.fullmatch(item):
+                raise PlanRejected(f"{field_name}[{index}] 不是合法 step_id")
+            if item in result:
+                raise PlanRejected(f"{field_name} 不允许重复 ID: {item}")
+            result.append(item)
+        return tuple(result)
+
+    @classmethod
+    def _parse_plan_steps(cls, value: Any) -> tuple[PlanStep, ...]:
+        if not isinstance(value, list):
+            raise PlanRejected("steps 必须是数组")
+        if not 1 <= len(value) <= _PLAN_STEP_LIMIT:
+            raise PlanRejected(f"steps 数量必须在 1-{_PLAN_STEP_LIMIT} 项之间")
+        parsed: list[PlanStep] = []
+        seen: set[str] = set()
+        allowed = {"step_id", "content", "depends_on", "success_criteria", "replaces"}
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise PlanRejected(f"steps[{index}] 必须是对象")
+            unknown = sorted(set(item) - allowed)
+            if unknown:
+                raise PlanRejected(f"steps[{index}] 包含未知字段: {', '.join(unknown)}")
+            missing = sorted(allowed - set(item))
+            if missing:
+                raise PlanRejected(f"steps[{index}] 缺少字段: {', '.join(missing)}")
+            step_id = item["step_id"]
+            if not isinstance(step_id, str):
+                raise PlanRejected(f"steps[{index}].step_id 必须是字符串")
+            step_id = step_id.strip()
+            if not _STEP_ID_PATTERN.fullmatch(step_id):
+                raise PlanRejected(f"steps[{index}].step_id 不匹配 [A-Za-z][A-Za-z0-9_-]{{0,63}}")
+            if step_id in seen:
+                raise PlanRejected(f"step_id 重复: {step_id}")
+            seen.add(step_id)
+            step_success_criteria = cls._plan_texts(
+                item["success_criteria"], f"steps[{index}].success_criteria",
+                _PLAN_STEP_CRITERIA_LIMIT, _PLAN_TEXT_MAX,
+            )
+            if not step_success_criteria:
+                raise PlanRejected(f"steps[{index}].success_criteria 至少需要 1 项")
+            parsed.append(PlanStep(
+                step_id=step_id,
+                content=cls._plan_text(item["content"], f"steps[{index}].content", _PLAN_TEXT_MAX),
+                status="pending",
+                depends_on=cls._plan_ids(item["depends_on"], f"steps[{index}].depends_on"),
+                success_criteria=step_success_criteria,
+                replaces=cls._plan_ids(item["replaces"], f"steps[{index}].replaces"),
+            ))
+        ids = {step.step_id for step in parsed}
+        for step in parsed:
+            if step.step_id in step.depends_on:
+                raise PlanRejected(f"步骤 {step.step_id} 不能依赖自身")
+            unknown = [item for item in step.depends_on if item not in ids]
+            if unknown:
+                raise PlanRejected(f"步骤 {step.step_id} 依赖未知步骤: {', '.join(unknown)}")
+        graph = {step.step_id: step.depends_on for step in parsed}
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(step_id: str) -> None:
+            if step_id in visiting:
+                raise PlanRejected("steps.depends_on 不能形成环")
+            if step_id in visited:
+                return
+            visiting.add(step_id)
+            for dependency in graph[step_id]:
+                visit(dependency)
+            visiting.remove(step_id)
+            visited.add(step_id)
+
+        for step in parsed:
+            visit(step.step_id)
+        return tuple(parsed)
+
+    @staticmethod
+    def _plan_step_structure(step: PlanStep) -> tuple[Any, ...]:
+        return (step.step_id, step.content, step.depends_on,
+                step.success_criteria, step.replaces)
+
+    def _active_revision_locked(self) -> PlanRevision | None:
+        active_id = self.planning_state.active_revision_id
+        if active_id is None:
+            return None
+        return next((revision for revision in self.plan_revisions
+                      if revision.revision_id == active_id), None)
+
+    def _plan_view_locked(self, revision_id: int | None = None) -> dict[str, Any] | None:
+        revision = (
+            next((item for item in self.plan_revisions if item.revision_id == revision_id), None)
+            if revision_id is not None else self._active_revision_locked()
+        )
+        if revision is None:
+            return None
+        statuses = {step.step_id: step.status for step in revision.steps}
+        for event in self.plan_progress_history:
+            if event.revision_id == revision.revision_id and event.step_id in statuses:
+                statuses[event.step_id] = event.to_status
+        return {
+            "revision_id": revision.revision_id,
+            "generation_id": revision.generation_id,
+            "parent_revision_id": revision.parent_revision_id,
+            "trigger_id": revision.trigger_id,
+            "goal": revision.goal,
+            "constraints": list(revision.constraints),
+            "success_criteria": list(revision.success_criteria),
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "content": step.content,
+                    "status": statuses[step.step_id],
+                    "depends_on": list(step.depends_on),
+                    "success_criteria": list(step.success_criteria),
+                    "replaces": list(step.replaces),
+                }
+                for step in revision.steps
+            ],
+            "reason": revision.reason,
+        }
+
+    def _sync_current_goal_locked(self) -> None:
+        active = self._plan_view_locked()
+        object.__setattr__(self, "current_goal", next(
+            (step["content"] for step in (active or {}).get("steps", [])
+            if step["status"] == "in_progress"),
+            "",
+        ))
+
+    def _plan_projection_locked(self) -> list[dict[str, str]]:
+        active = self._plan_view_locked()
+        return [
+            {"content": step["content"], "status": step["status"]}
+            for step in (active or {}).get("steps", [])
+        ]
+
+    @property
+    def todos(self) -> list[dict[str, str]]:
+        """Read-only Todo-shaped projection of the active Plan Contract."""
+        with self._lock:
+            return deepcopy(self._plan_projection_locked())
+
+    def commit_plan(self, goal: Any, constraints: Any, success_criteria: Any,
+                    steps: Any, reason: Any,
+                    parent_revision_id: Any = _MISSING) -> PlanRevision:
+        """Validate and atomically append one immutable Plan Contract revision."""
+        with self._lock:
+            clean_goal = self._plan_text(goal, "goal", _PLAN_GOAL_MAX)
+            clean_constraints = self._plan_texts(
+                constraints, "constraints", _PLAN_CONSTRAINT_LIMIT, _PLAN_TEXT_MAX,
+            )
+            clean_success = self._plan_texts(
+                success_criteria, "success_criteria", _PLAN_TASK_CRITERIA_LIMIT, _PLAN_TEXT_MAX,
+            )
+            if not clean_success:
+                raise PlanRejected("success_criteria 至少需要 1 项")
+            clean_reason = self._plan_text(reason, "reason", _PLAN_REASON_MAX)
+            parsed_steps = self._parse_plan_steps(steps)
+            active = self._active_revision_locked()
+            parent_provided = parent_revision_id is not _MISSING
+            if active is None:
+                if parent_provided:
+                    raise PlanRejected("初次提交不得提供 parent_revision_id")
+                parent = None
+            else:
+                if not parent_provided:
+                    raise PlanRejected("后续提交必须提供当前 active_revision_id")
+                if isinstance(parent_revision_id, bool) or not isinstance(parent_revision_id, int):
+                    raise PlanRejected("parent_revision_id 必须是整数")
+                if parent_revision_id != active.revision_id:
+                    raise PlanRejected("parent_revision_id 不是当前 active revision，不能分叉或引用旧 revision")
+                parent = active
+
+            current_ids = {step.step_id for step in parsed_steps}
+            historical: dict[str, tuple[str, tuple[str, ...]]] = {}
+            for revision in self.plan_revisions:
+                for step in revision.steps:
+                    definition = (step.content, step.success_criteria)
+                    old = historical.get(step.step_id)
+                    if old is not None and old != definition:
+                        raise PlanRejected(f"step_id {step.step_id} 的 content 或 success_criteria 不能改变")
+                    historical[step.step_id] = definition
+            if parent is None:
+                if any(step.replaces for step in parsed_steps):
+                    raise PlanRejected("初始 revision 不允许使用 replaces")
+                inherited = {}
+            else:
+                parent_view = self._plan_view_locked(parent.revision_id) or {}
+                inherited = {
+                    step["step_id"]: step["status"]
+                    for step in parent_view.get("steps", [])
+                }
+                for step in parsed_steps:
+                    old_definition = historical.get(step.step_id)
+                    if old_definition is not None:
+                        if step.step_id not in inherited:
+                            raise PlanRejected(f"已经移除的 step_id 不得重新启用: {step.step_id}")
+                        if old_definition != (step.content, step.success_criteria):
+                            raise PlanRejected(f"step_id {step.step_id} 的 content 或 success_criteria 不能改变")
+                parent_ids = set(inherited)
+                replaced_ids: set[str] = set()
+                for step in parsed_steps:
+                    for replaced in step.replaces:
+                        if replaced not in parent_ids:
+                            raise PlanRejected(f"replaces 只能引用 parent revision 中存在的步骤: {replaced}")
+                        if replaced in current_ids:
+                            raise PlanRejected(f"replaces 的步骤必须从新 revision 移除: {replaced}")
+                        if replaced in replaced_ids:
+                            raise PlanRejected(f"replaces 不允许重复引用: {replaced}")
+                        replaced_ids.add(replaced)
+                inherited = {step_id: status for step_id, status in inherited.items()
+                             if step_id in current_ids}
+            if parent is not None:
+                old_structure = (
+                    parent.goal, parent.constraints, parent.success_criteria,
+                    tuple(self._plan_step_structure(step) for step in parent.steps),
+                )
+                new_structure = (
+                    clean_goal, clean_constraints, clean_success,
+                    tuple(self._plan_step_structure(step) for step in parsed_steps),
+                )
+                if old_structure == new_structure:
+                    raise PlanRejected("计划结构没有变化；纯状态变化请使用 update_plan_progress")
+
+            final_steps = tuple(
+                PlanStep(
+                    step.step_id, step.content, inherited.get(step.step_id, "pending"),
+                    step.depends_on, step.success_criteria, step.replaces,
+                )
+                for step in parsed_steps
+            )
+            final_status = {step.step_id: step.status for step in final_steps}
+            for step in final_steps:
+                if step.status in ("in_progress", "completed"):
+                    not_completed = [dependency for dependency in step.depends_on
+                                     if final_status.get(dependency) != "completed"]
+                    if not_completed:
+                        raise PlanRejected(
+                            f"已继承为 {step.status} 的步骤 {step.step_id} 依赖未完成: {', '.join(not_completed)}"
+                        )
+            revision = PlanRevision(
+                self._next_plan_revision, self._verification_generation,
+                parent.revision_id if parent is not None else None, None,
+                clean_goal, clean_constraints, clean_success, final_steps, clean_reason,
+            )
+            self.plan_revisions.append(revision)
+            self._next_plan_revision += 1
+            self.planning_state = PlanningState(
+                mode="auto", phase="executing", active_revision_id=revision.revision_id,
+                active_trigger_id=None, replans_used=0, replans_remaining=None,
+            )
+            self._sync_current_goal_locked()
+            return revision
+
+    def update_plan_progress(self, revision_id: Any, step_id: Any, status: Any,
+                             reason: Any) -> PlanProgressEvent:
+        """Append one legal status transition for the active revision."""
+        with self._lock:
+            if isinstance(revision_id, bool) or not isinstance(revision_id, int):
+                raise PlanRejected("revision_id 必须是整数")
+            if not isinstance(step_id, str) or not _STEP_ID_PATTERN.fullmatch(step_id.strip()):
+                raise PlanRejected("step_id 不是合法 ID")
+            step_id = step_id.strip()
+            if status not in ("pending", "in_progress", "completed") or not isinstance(status, str):
+                raise PlanRejected("status 必须是 pending、in_progress 或 completed")
+            clean_reason = self._plan_text(reason, "reason", _PLAN_REASON_MAX)
+            active = self._active_revision_locked()
+            if active is None or revision_id != active.revision_id:
+                raise PlanRejected("只能更新当前 active revision")
+            view = self._plan_view_locked(active.revision_id) or {}
+            steps = {step["step_id"]: step for step in view.get("steps", [])}
+            step = steps.get(step_id)
+            if step is None:
+                raise PlanRejected(f"active revision 中不存在步骤: {step_id}")
+            from_status = step["status"]
+            if from_status == "completed":
+                raise PlanRejected("completed 步骤不能再次更新")
+            if (from_status, status) not in (("pending", "in_progress"), ("in_progress", "completed")):
+                raise PlanRejected(f"不允许的状态转换: {from_status} -> {status}")
+            if from_status == "pending":
+                dependencies = [dependency for dependency in step["depends_on"]
+                                if steps[dependency]["status"] != "completed"]
+                if dependencies:
+                    raise PlanRejected(
+                        f"步骤 {step_id} 的依赖尚未完成: {', '.join(dependencies)}"
+                    )
+                if any(item["status"] == "in_progress" for item in steps.values()):
+                    raise PlanRejected("同一时间只能有一个 in_progress 步骤")
+            event = PlanProgressEvent(
+                self._next_plan_progress, active.revision_id, self._verification_generation,
+                step_id, from_status, status, clean_reason,
+            )
+            self.plan_progress_history.append(event)
+            self._next_plan_progress += 1
+            self._sync_current_goal_locked()
+            return event
 
     def _checkpoint_for_failure(self, checkpoint_id: Any,
                                failure: FailureEvent) -> tuple[Any, str | None]:
@@ -385,8 +772,10 @@ class AgentState:
                 if self._failure_retry_counts.get(caused_by_failure_id, 0) >= MAX_FAILURE_RETRIES:
                     self._terminal("blocked", "failure retry 预算已耗尽", caused_by_failure_id)
                     return None, "failure retry 预算已耗尽"
-                if source_attempt.tool in ("recover", "rollback_checkpoint"):
-                    return None, "internal/recover 工具不能作为恢复目标"
+                if source_attempt.tool in (
+                    "recover", "rollback_checkpoint", "commit_plan", "update_plan_progress",
+                ):
+                    return None, "control/plan 工具不能作为恢复目标"
                 target = (
                     source_attempt.tool,
                     deepcopy(self._original_attempt_arguments.get(source_attempt.attempt_id, {})),
@@ -396,8 +785,10 @@ class AgentState:
                     return None, "adjust 不接受 requested_attempt"
                 if not isinstance(requested_tool, str) or not isinstance(requested_arguments, dict):
                     return None, "adjust 需要目标工具和参数"
-                if requested_tool in ("recover", "rollback_checkpoint"):
-                    return None, "internal/recover 工具不能作为恢复目标"
+                if requested_tool in (
+                    "recover", "rollback_checkpoint", "commit_plan", "update_plan_progress",
+                ):
+                    return None, "control/plan 工具不能作为恢复目标"
                 target = (requested_tool, deepcopy(requested_arguments))
             else:
                 target = None
@@ -618,8 +1009,10 @@ class AgentState:
             self._terminal("blocked", "恢复动作预算已耗尽", failure_id)
         return rec, detail
 
-    def record_execution_result(self, result: Any) -> ExecutionAttempt:
+    def record_execution_result(self, result: Any) -> ExecutionAttempt | None:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
+        if getattr(result, "error_kind", None) == "plan_rejected":
+            return None
         with self._lock:
             self._ensure_generation()
             # A phase-gate rejection is a protocol fact, not a new business
@@ -700,7 +1093,7 @@ class AgentState:
                     if action.recovery_id == rid:
                         self.recovery_actions[i] = RecoveryAction(**{**asdict(action), "status": "executed", "result_attempt": attempt_id, "result_generation_id": generation_id})
                         break
-            if result.tool != "update_todo":
+            if result.tool not in ("commit_plan", "update_plan_progress"):
                 self.tool_history.append({"tool": result.tool, "arguments_hash": arguments_hash,
                                           "ok": result.outcome == "succeeded", "brief": result.output_excerpt})
             path = args.get("path")
@@ -797,7 +1190,7 @@ class AgentState:
 
     def record_tool(self, name: str, args: dict[str, Any], ok: bool, brief: str) -> None:
         """Compatibility API for older callback-based integrations."""
-        if name == "update_todo": return
+        if name in ("commit_plan", "update_plan_progress"): return
         args_copy = deepcopy(args)
         with self._lock:
             self.tool_history.append({"tool": name, "args": args_copy, "ok": ok, "brief": brief})
@@ -829,16 +1222,18 @@ class AgentState:
 
     def begin_task(self, task: str) -> None:
         with self._lock:
-            self.task = task; self.current_goal = ""; self.status = "running"; self.terminal_reason = ""
-            self.tool_history.clear(); self.files_changed.clear(); self.errors.clear(); self.todos.clear()
-            self.todo_revisions.clear()
+            self.task = task; object.__setattr__(self, "current_goal", ""); self.status = "running"; self.terminal_reason = ""
+            self.tool_history.clear(); self.files_changed.clear(); self.errors.clear()
+            self.plan_revisions.clear(); self.plan_progress_history.clear()
+            self.planning_state = PlanningState()
             self.verification_evidence.clear(); self.verification_history.clear()
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
             self._verification_generation = 0; self._last_verified_generation = -1
             self._verification_required = False; self._repair_phase = "idle"
             self._active_failure_id = None; self._active_recovery_id = None
-            self._next_attempt = 1; self._next_failure = 1; self._next_todo_revision = 1
+            self._next_attempt = 1; self._next_failure = 1
+            self._next_plan_revision = 1; self._next_plan_progress = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             if self._checkpoint_store is not None:
@@ -857,7 +1252,9 @@ class AgentState:
         self._last_verified_generation = -1; self._verification_required = True
 
     def unfinished_todos(self) -> list[dict[str, str]]:
-        with self._lock: return [{"content": t.content, "status": t.status} for t in self.todos if t.status != "completed"]
+        with self._lock:
+            return [item for item in self._plan_projection_locked()
+                    if item["status"] != "completed"]
 
     def has_verification_evidence(self) -> bool:
         with self._lock:
@@ -866,16 +1263,22 @@ class AgentState:
     def completion_reminder(self) -> dict[str, object] | None:
         with self._lock:
             if self.status in ("blocked", "failed"): return None
-            missing = [t.content for t in self.todos if t.status != "completed"]
+            active = self._plan_view_locked()
+            missing = [step["content"] for step in (active or {}).get("steps", [])
+                       if step["status"] != "completed"]
             needs_verify = self._verification_required
             needs_repair = self._repair_phase != "idle"
             if not missing and not needs_verify and not needs_repair:
                 return None
             # Describe observable completion facts instead of counting
-            # reminders. The marker changes when Todo state, tool
+            # reminders. The marker changes when plan state, tool
             # observations, verification evidence, or its generation changes.
             progress_marker = (
-                tuple((todo.content, todo.status) for todo in self.todos),
+                (
+                    (active or {}).get("revision_id"),
+                    tuple((step["step_id"], step["status"])
+                          for step in (active or {}).get("steps", [])),
+                ),
                 len(self.tool_history),
                 len(self.verification_evidence),
                 self._verification_generation,
@@ -889,7 +1292,7 @@ class AgentState:
             )
             if self._repair_phase == "diagnosis_required":
                 message = (
-                    "检测到失败。请在下一条回复中先进行只读调查、更新 Todo，或独占调用 recover "
+                    "检测到失败。请在下一条回复中先进行只读调查、提交或推进计划，或独占调用 recover "
                     "处理当前活动 failure；不要直接执行副作用或 verification。"
                 )
             elif self._repair_phase == "verification_required":
@@ -897,10 +1300,11 @@ class AgentState:
             else:
                 message = (
                     "任务尚未满足完成条件。请在下一条回复中调用能推进任务的工具 "
-                    "（更新 Todo、执行调查/操作或运行验证）；确实无法继续时才说明具体阻塞原因。"
+                    "（提交或推进计划、执行调查/操作或运行验证）；确实无法继续时才说明具体阻塞原因。"
                 )
             return {
                 "unfinished_todos": missing,
+                "unfinished_plan_steps": missing,
                 "verification_required": needs_verify,
                 "repair_phase": self._repair_phase,
                 "active_failure_id": self._active_failure_id,
@@ -909,47 +1313,57 @@ class AgentState:
                 "message": message,
             }
 
-    def update_todos(self, todos: list[dict[str, Any]]) -> None:
-        if not isinstance(todos, list): raise ValueError("todos 必须是数组")
-        if len(todos) > 50: raise ValueError("Todo 数量不能超过 50")
-        parsed, in_progress = [], 0
-        for item in todos:
-            if not isinstance(item, dict): raise ValueError("Todo 项必须是对象")
-            content = item.get("content")
-            if not isinstance(content, str) or not content.strip(): raise ValueError("Todo content 必须是非空字符串")
-            content = content.strip()
-            if len(content) > 240: raise ValueError("Todo content 不能超过 240 个字符")
-            status = item.get("status", "pending")
-            if status not in ("pending", "in_progress", "completed"): raise ValueError("Todo status 非法")
-            in_progress += status == "in_progress"; parsed.append(TodoItem(content, status))
-        if in_progress > 1: raise ValueError("最多只能有一个 in_progress Todo")
-        with self._lock:
-            self.todos = parsed
-            self.current_goal = next((t.content for t in parsed if t.status == "in_progress"), "")
-            self.todo_revisions.append(TodoRevision(
-                self._next_todo_revision,
-                self._verification_generation,
-                tuple(parsed),
-                self.current_goal,
-            ))
-            self._next_todo_revision += 1
-
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            active_plan = self._plan_view_locked()
+            projected_current_goal = next(
+                (step["content"] for step in (active_plan or {}).get("steps", [])
+                 if step["status"] == "in_progress"),
+                "",
+            )
             return {
-                "task": self.task, "current_goal": self.current_goal,
+                "task": self.task, "current_goal": projected_current_goal,
                 "tool_history": deepcopy(self.tool_history), "files_changed": deepcopy(self.files_changed),
                 "errors": deepcopy(self.errors), "status": self.status, "terminal_reason": self.terminal_reason,
-                "todos": [asdict(x) for x in self.todos],
-                "todo_revisions": [
+                "todos": self._plan_projection_locked(),
+                "plan_revisions": [
                     {
                         "revision_id": revision.revision_id,
                         "generation_id": revision.generation_id,
-                        "todos": [asdict(todo) for todo in revision.todos],
-                        "current_goal": revision.current_goal,
+                        "parent_revision_id": revision.parent_revision_id,
+                        "trigger_id": revision.trigger_id,
+                        "goal": revision.goal,
+                        "constraints": list(revision.constraints),
+                        "success_criteria": list(revision.success_criteria),
+                        "steps": [
+                            {
+                                "step_id": step.step_id,
+                                "content": step.content,
+                                "status": step.status,
+                                "depends_on": list(step.depends_on),
+                                "success_criteria": list(step.success_criteria),
+                                "replaces": list(step.replaces),
+                            }
+                            for step in revision.steps
+                        ],
+                        "reason": revision.reason,
                     }
-                    for revision in self.todo_revisions
+                    for revision in self.plan_revisions
                 ],
+                "plan_progress_history": [
+                    {
+                        "progress_id": event.progress_id,
+                        "revision_id": event.revision_id,
+                        "generation_id": event.generation_id,
+                        "step_id": event.step_id,
+                        "from_status": event.from_status,
+                        "to_status": event.to_status,
+                        "reason": event.reason,
+                    }
+                    for event in self.plan_progress_history
+                ],
+                "planning_state": asdict(self.planning_state),
+                "active_plan": active_plan,
                 "verification_evidence": [asdict(x) for x in self.verification_evidence],
                 "verification_history": [asdict(x) for x in self.verification_history],
                 "verification_required": self._verification_required,

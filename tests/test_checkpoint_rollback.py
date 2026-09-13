@@ -332,10 +332,15 @@ def test_checkpoint_metadata_is_visible_after_compaction_and_long_state_fallback
             "path": str(path), "content": "after",
         })
         state.task = "t" * 1200
-        state.current_goal = "g" * 800
         state.files_changed.extend(f"file-{index}.py" for index in range(20))
         state.errors.append("e" * 20000)
-        state.update_todos([{"content": f"todo-{index}"} for index in range(50)])
+        state.commit_plan(
+            goal="long plan", constraints=[], success_criteria=["check"],
+            steps=[{
+                "step_id": f"todo-{index}", "content": f"todo-{index}",
+                "depends_on": [], "success_criteria": ["done"], "replaces": [],
+            } for index in range(50)], reason="populate plan",
+        )
         history = [{"role": "user", "content": "task"}]
         for index in range(4):
             call_id = f"call-{index}"

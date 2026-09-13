@@ -355,9 +355,77 @@ class ContextManager:
         base_lines = ["[Structured State]"]
         if snapshot["task"]: base_lines.append(f"Task: {bounded(snapshot['task'], 1200)}")
         if snapshot["current_goal"]: base_lines.append(f"Current goal: {bounded(snapshot['current_goal'], 800)}")
-        if snapshot["todos"]:
-            base_lines.append("Todos: " + bounded("; ".join(
-                f"[{todo['status']}] {todo['content']}" for todo in snapshot["todos"]), 1000))
+        planning_state = snapshot.get("planning_state", {})
+        active_plan = snapshot.get("active_plan")
+        if active_plan:
+            plan_lines: list[str] = [
+                "Plan: "
+                f"mode={planning_state.get('mode', 'auto')}; "
+                f"phase={planning_state.get('phase', 'direct')}; "
+                f"active_revision={planning_state.get('active_revision_id') or '-'}"
+            ]
+        else:
+            # Keep Direct Path visible in normal windows without making the
+            # protected state disproportionately expensive for tiny test or
+            # emergency windows whose existing fallback must retain history.
+            plan_lines = [] if self.budget.window < 512 else [
+                f"Plan: {planning_state.get('mode', 'auto')}/"
+                f"{planning_state.get('phase', 'direct')}/-"
+            ]
+        if active_plan:
+            plan_lines.append("Plan goal: " + bounded(active_plan.get("goal", ""), 1200))
+            plan_lines.append(
+                "Plan success criteria: " + bounded(
+                    "; ".join(active_plan.get("success_criteria", [])), 900,
+                )
+            )
+            constraints = active_plan.get("constraints", [])
+            if constraints:
+                plan_lines.append("Plan constraints: " + bounded("; ".join(constraints), 700))
+            active_steps = active_plan.get("steps", [])
+            current_steps = [step for step in active_steps if step.get("status") == "in_progress"]
+            if current_steps:
+                step = current_steps[0]
+                plan_lines.append(
+                    "Current plan step: "
+                    + bounded(
+                        f"{step.get('step_id', '?')} | {step.get('content', '')}; "
+                        f"depends_on={step.get('depends_on', [])}; "
+                        f"success_criteria={step.get('success_criteria', [])}",
+                        1500,
+                    )
+                )
+            step_by_id = {step.get("step_id"): step for step in active_steps}
+            ready = [
+                step.get("step_id", "?") for step in active_steps
+                if step.get("status") == "pending"
+                and all(step_by_id.get(dependency, {}).get("status") == "completed"
+                        for dependency in step.get("depends_on", []))
+            ]
+            blocked = [
+                f"{step.get('step_id', '?')}<-" + ",".join(
+                    dependency for dependency in step.get("depends_on", [])
+                    if step_by_id.get(dependency, {}).get("status") != "completed"
+                )
+                for step in active_steps
+                if step.get("status") == "pending"
+                and any(step_by_id.get(dependency, {}).get("status") != "completed"
+                        for dependency in step.get("depends_on", []))
+            ]
+            completed_count = sum(step.get("status") == "completed" for step in active_steps)
+            pending_count = sum(step.get("status") == "pending" for step in active_steps)
+            in_progress_count = sum(step.get("status") == "in_progress" for step in active_steps)
+            omitted_count = max(0, len(active_steps) - len(ready[:5]) - len(blocked[:10])
+                                - completed_count - in_progress_count)
+            plan_lines.append("Plan ready steps (max 5): " + bounded(", ".join(ready[:5]) or "none", 500))
+            plan_lines.append(
+                "Plan blocked steps (max 10): " + bounded("; ".join(blocked[:10]) or "none", 900)
+            )
+            plan_lines.append(
+                f"Plan counts: completed={completed_count}; pending={pending_count}; "
+                f"in_progress={in_progress_count}; omitted={omitted_count}"
+            )
+        base_lines.extend(plan_lines)
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
@@ -464,6 +532,7 @@ class ContextManager:
                 "[Structured State]",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
+            compact_lines.extend(bounded(line, 1500) for line in plan_lines)
             # Checkpoint metadata is part of the causal recovery state. Keep
             # it ahead of lower-priority history when the state is degraded.
             for line, limit in (
@@ -495,6 +564,23 @@ class ContextManager:
                 "[Structured State]",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
+            if active_plan:
+                # Preserve the execution-critical plan shape even when the
+                # full critical-state block must degrade again: revision,
+                # goal, current step, ready/blocked queues, and counts.
+                compact_lines.append(bounded(plan_lines[0], 300))
+                compact_lines.append(bounded(plan_lines[1], 600))
+                compact_lines.append(bounded(plan_lines[2], 500))
+                current_plan_line = next(
+                    (line for line in plan_lines if line.startswith("Current plan step:")),
+                    None,
+                )
+                if current_plan_line is not None:
+                    compact_lines.append(bounded(current_plan_line, 700))
+                compact_lines.extend(bounded(line, 500) for line in plan_lines[-3:-1])
+                compact_lines.append(bounded(plan_lines[-1], 200))
+            else:
+                compact_lines.extend(bounded(line, 300) for line in plan_lines)
             if repair_loop and repair_loop.get("phase") != "idle":
                 compact_lines.append("Repair loop: " + bounded(str(repair_loop), 800))
             if checkpoint_state_line is not None:

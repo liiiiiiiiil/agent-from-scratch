@@ -54,16 +54,24 @@ def test_protected_messages_are_not_history_and_survive_compaction():
 
 def test_todos_re_render_after_update_and_compaction():
     state = AgentState(task="task")
-    state.update_todos([{"content": "first", "status": "in_progress"}])
+    state.commit_plan(
+        goal="task", constraints=[], success_criteria=["done"],
+        steps=[
+            {"step_id": "first", "content": "first", "depends_on": [], "success_criteria": ["done"], "replaces": []},
+            {"step_id": "second", "content": "second", "depends_on": ["first"], "success_criteria": ["done"], "replaces": []},
+        ], reason="initial",
+    )
+    state.update_plan_progress(1, "first", "in_progress", "start")
     history = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
     for n in range(5):
         history.extend(_tool_round(n))
     context = ContextManager(state, history, summarizer=lambda p: "summary", keep_rounds=1)
     assert "first" in context.prepare_messages()[1]["content"]
-    state.update_todos([{"content": "second", "status": "completed"}])
+    state.update_plan_progress(1, "first", "completed", "done")
+    state.update_plan_progress(1, "second", "in_progress", "start")
     context.compact()
     rendered = next(m["content"] for m in context.prepare_messages() if m.get("content", "").startswith("[Structured State]"))
-    assert "second" in rendered and "first" not in rendered
+    assert "second" in rendered and "Current plan step" in rendered
 
 def test_runtime_notice_is_one_shot_and_not_history():
     history = [{"role": "user", "content": "task"}]
@@ -143,7 +151,7 @@ def test_prepare_messages_preserves_order_and_content():
 
 
 def test_state_is_not_injected_or_changed():
-    state = AgentState(task="update the app", current_goal="edit main.py")
+    state = AgentState(task="update the app")
     state.record_tool("read_file", {"path": "main.py"}, True, "read")
     state_before = state.snapshot()
     history = [{"role": "user", "content": "update the app"}]

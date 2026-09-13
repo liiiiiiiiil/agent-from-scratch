@@ -25,6 +25,17 @@ from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
 from mini_agent.tools.base import Tool, ToolExecutor, ToolRegistry
 
 
+def _start_plan(state):
+    state.commit_plan(
+        goal="investigate", constraints=[], success_criteria=["check passes"],
+        steps=[{
+            "step_id": "inspect", "content": "inspect", "depends_on": [],
+            "success_criteria": ["observed"], "replaces": [],
+        }], reason="test plan",
+    )
+    state.update_plan_progress(1, "inspect", "in_progress", "start")
+
+
 def test_import():
     assert callable(call_llm), "call_llm 应可调用"
     assert callable(agent_loop), "agent_loop 应可调用"
@@ -113,7 +124,7 @@ def test_completion_reminder_retry_is_not_printed_as_new_round():
 def test_completion_reminder_blocks_when_no_progress_is_made():
     """A second text-only attempt with the same marker is terminal."""
     state = AgentState(task="investigate")
-    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    _start_plan(state)
     context = ContextManager(state, [{"role": "user", "content": "investigate"}])
     responses = iter([
         {"role": "assistant", "content": "调查汇报"},
@@ -137,18 +148,22 @@ def test_completion_reminder_blocks_when_no_progress_is_made():
 def test_completion_reminder_reopens_after_read_only_progress_and_can_finish():
     """A read-only observation changes the marker and permits another reminder."""
     state = AgentState(task="investigate")
-    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    _start_plan(state)
     registry = ToolRegistry()
     registry.register(Tool(
         "inspect", "read-only investigation", {"type": "object", "properties": {}},
         lambda: "observed",
     ))
     registry.register(Tool(
-        "update_todo", "update plan", {"type": "object", "properties": {"todos": {"type": "array"}}},
-        lambda todos: state.update_todos(todos) or "updated",
+        "update_plan_progress", "update plan", {"type": "object", "properties": {
+            "revision_id": {"type": "integer"}, "step_id": {"type": "string"},
+            "status": {"type": "string"}, "reason": {"type": "string"},
+        }, "required": ["revision_id", "step_id", "status", "reason"]},
+        lambda revision_id, step_id, status, reason:
+            state.update_plan_progress(revision_id, step_id, status, reason) or "updated",
     ))
     executor = ToolExecutor(registry, PermissionGate(PermissionPolicy({
-        "inspect": ALLOW, "update_todo": ALLOW,
+        "inspect": ALLOW, "update_plan_progress": ALLOW,
     })), on_result=state.record_tool)
     context = ContextManager(state, [{"role": "user", "content": "investigate"}])
     responses = iter([
@@ -159,8 +174,8 @@ def test_completion_reminder_reopens_after_read_only_progress_and_can_finish():
         }]},
         {"role": "assistant", "content": "再次汇报"},
         {"role": "assistant", "content": None, "tool_calls": [{
-            "id": "todo-1", "type": "function",
-            "function": {"name": "update_todo", "arguments": '{"todos":[{"content":"inspect","status":"completed"}]}'},
+            "id": "progress-1", "type": "function",
+            "function": {"name": "update_plan_progress", "arguments": '{"revision_id":1,"step_id":"inspect","status":"completed","reason":"done"}'},
         }]},
         {"role": "assistant", "content": "完成"},
     ])
@@ -183,7 +198,7 @@ def test_completion_reminder_reopens_after_read_only_progress_and_can_finish():
 def test_failed_tool_is_progress_then_repeated_text_blocks():
     """A failed observation still advances facts, but cannot refresh forever."""
     state = AgentState(task="investigate")
-    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    _start_plan(state)
     registry = ToolRegistry()
     registry.register(Tool(
         "inspect", "failing investigation", {"type": "object", "properties": {}},

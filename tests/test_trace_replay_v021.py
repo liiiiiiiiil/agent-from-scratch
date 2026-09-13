@@ -29,45 +29,60 @@ def _record(executor, state, name, arguments):
     return result
 
 
+def _commit_plan(state, step_id="inspect", status=None):
+    state.commit_plan(
+        goal="trace task", constraints=[], success_criteria=["check passes"],
+        steps=[{
+            "step_id": step_id, "content": step_id, "depends_on": [],
+            "success_criteria": ["done"], "replaces": [],
+        }], reason="trace plan",
+    )
+    if status in ("in_progress", "completed"):
+        state.update_plan_progress(1, step_id, "in_progress", "start")
+    if status == "completed":
+        state.update_plan_progress(1, step_id, "completed", "done")
+
+
 def test_todo_revision_is_atomic_generation_bound_and_resettable():
     state = AgentState()
     state.begin_task("todo audit")
-    state.update_todos([{"content": "inspect", "status": "in_progress"}])
+    _commit_plan(state, status="in_progress")
     before_invalid = state.snapshot()
     with pytest.raises(ValueError):
-        state.update_todos([
-            {"content": "one", "status": "in_progress"},
-            {"content": "two", "status": "in_progress"},
-        ])
+        state.update_plan_progress(1, "inspect", "in_progress", "no-op")
     assert state.snapshot() == before_invalid
 
-    state.update_todos([{"content": "inspect", "status": "completed"}])
+    state.update_plan_progress(1, "inspect", "completed", "done")
     reservation = state.reserve_attempt("possible", "mutate", {})
     assert reservation.generation_id == 1
-    state.update_todos([{"content": "verify", "status": "in_progress"}])
-
-    revisions = state.snapshot()["todo_revisions"]
-    assert [item["revision_id"] for item in revisions] == [1, 2, 3]
-    assert [item["generation_id"] for item in revisions] == [0, 0, 1]
-    assert revisions[0]["todos"] == [{"content": "inspect", "status": "in_progress"}]
-    assert revisions[2]["current_goal"] == "verify"
+    state.commit_plan(
+        goal="trace task revised", constraints=[], success_criteria=["check passes"],
+        steps=[{"step_id": "inspect", "content": "inspect", "depends_on": [],
+                "success_criteria": ["done"], "replaces": []}],
+        reason="revised", parent_revision_id=1,
+    )
+    revisions = state.snapshot()["plan_revisions"]
+    assert [item["revision_id"] for item in revisions] == [1, 2]
+    assert [item["generation_id"] for item in revisions] == [0, 1]
+    assert revisions[0]["steps"][0]["status"] == "pending"
+    assert state.snapshot()["active_plan"]["steps"][0]["status"] == "completed"
 
     state.reset_task()
-    assert state.snapshot()["todo_revisions"] == []
+    assert state.snapshot()["plan_revisions"] == []
     state.begin_task("new task")
-    state.update_todos([{"content": "fresh"}])
-    assert state.snapshot()["todo_revisions"][0]["revision_id"] == 1
+    _commit_plan(state, "fresh")
+    assert state.snapshot()["plan_revisions"][0]["revision_id"] == 1
 
 
 def test_successful_trace_preserves_todos_and_done_conclusion():
     state = AgentState()
     state.begin_task("finish")
-    state.update_todos([{"content": "finish", "status": "completed"}])
+    _commit_plan(state, "finish", "completed")
     state.status = "done"
 
     report = build_trace(state.snapshot())
     assert report["integrity"] == {"status": "complete", "issues": []}
-    assert report["generations"][0]["todo_revisions"][0]["revision_id"] == 1
+    assert report["generations"][0]["todo_revisions"] == []
     assert report["conclusion"]["status"] == "done"
     assert "finish" in render_trace(report)
 
@@ -75,7 +90,7 @@ def test_successful_trace_preserves_todos_and_done_conclusion():
 def test_real_registry_failure_retry_and_verification_trace_is_complete():
     state = AgentState()
     state.begin_task("retry a check")
-    state.update_todos([{"content": "check", "status": "completed"}])
+    _commit_plan(state, "check", "completed")
     registry = create_registry(state)
     shell = registry.get("run_shell")
     original = shell.handler
@@ -225,7 +240,7 @@ def test_checkpoint_rollback_and_new_verification_form_a_complete_chain():
 def test_generation_filter_and_snapshot_are_read_only():
     state = AgentState()
     state.begin_task("filter")
-    state.update_todos([{"content": "todo"}])
+    _commit_plan(state, "todo")
     snapshot = state.snapshot()
     original = deepcopy(snapshot)
     report = build_trace(snapshot, 0)
@@ -240,7 +255,7 @@ def test_generation_filter_and_snapshot_are_read_only():
 def test_damaged_snapshot_marks_unresolved_edges_without_guessing():
     state = AgentState()
     state.begin_task("damage")
-    state.update_todos([{"content": "done", "status": "completed"}])
+    _commit_plan(state, "done", "completed")
     snapshot = state.snapshot()
     snapshot["attempts"] = [{
         "attempt_id": "a-1", "pre_generation_id": 0, "generation_id": 0,

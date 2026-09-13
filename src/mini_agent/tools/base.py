@@ -9,7 +9,7 @@ from time import monotonic
 from typing import Any, Callable, Literal
 
 from mini_agent.permission import PermissionGate
-from mini_agent.state import AttemptBudgetExceeded, AttemptReservation, EffectClass
+from mini_agent.state import AttemptBudgetExceeded, AttemptReservation, EffectClass, PlanRejected
 from mini_agent.tools.file_errors import EditMultipleMatchesError, EditNoMatchError
 
 RESULT_BRIEF_MAX_LENGTH = 200
@@ -247,6 +247,19 @@ class ToolExecutor:
         started = monotonic()
         if state is not None and getattr(state, "is_terminal", lambda: False)():
             return self._terminal_result(name, arguments, state)
+        is_plan_tool = name in ("commit_plan", "update_plan_progress")
+
+        def plan_rejected(detail: object) -> ExecutionResult:
+            text = json.dumps({
+                "status": "plan_rejected",
+                "message": str(detail)[:RESULT_BRIEF_MAX_LENGTH],
+            }, ensure_ascii=False)
+            return ExecutionResult(
+                str(name), deepcopy(arguments) if isinstance(arguments, dict) else {},
+                "not_checked", False, "invalid", int((monotonic() - started) * 1000),
+                "none", text, _brief(text), error_kind="plan_rejected",
+            )
+
         try:
             tool = self.registry.get(name)
         except (TypeError, ValueError) as error:
@@ -264,6 +277,8 @@ class ToolExecutor:
         try:
             normalized = validate_arguments(tool.parameters, arguments)
         except (TypeError, ValueError) as error:
+            if is_plan_tool:
+                return plan_rejected(error)
             text = f"工具调用失败: {type(error).__name__}: {error}"
             if str(name) == "recover" and state is not None:
                 rejection = self._record_recovery_rejection(state, arguments, text)
@@ -291,6 +306,8 @@ class ToolExecutor:
                         rejection or phase_error, _brief(rejection or phase_error),
                         error_kind="recovery_rejected",
                     )
+                if is_plan_tool:
+                    return plan_rejected(phase_error)
                 return ExecutionResult(
                     name, normalized, "not_checked", False, "invalid", 0,
                     effect_class, phase_error, _brief(phase_error),
@@ -309,6 +326,31 @@ class ToolExecutor:
             result = ExecutionResult(name, normalized, "denied", False, "denied",
                                      int((monotonic() - started) * 1000), effect_class,
                                      denied, _brief(denied), error_kind="permission_denied")
+            if notify: self._notify_result(result)
+            return result
+        # Plan tools mutate only the plan state itself.  Run their atomic
+        # state-bound handler before reserving an execution attempt so a
+        # rejected submission cannot consume a fingerprint, attempt number,
+        # generation, or any other execution fact.
+        if is_plan_tool:
+            try:
+                output = tool.handler(**normalized)
+            except PlanRejected as error:
+                return plan_rejected(error)
+            except Exception as error:
+                text = f"Tool 执行失败: {error}"
+                result = ExecutionResult(
+                    name, normalized, "allowed", True, "failed",
+                    int((monotonic() - started) * 1000), effect_class,
+                    text, _brief(text), error_kind="handler_exception",
+                )
+                if notify: self._notify_result(result)
+                return result
+            result = ExecutionResult(
+                name, normalized, "allowed", True, "succeeded",
+                int((monotonic() - started) * 1000), effect_class,
+                output, _brief(output),
+            )
             if notify: self._notify_result(result)
             return result
         try:

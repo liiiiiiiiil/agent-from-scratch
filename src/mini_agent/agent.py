@@ -416,6 +416,9 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 effect = "none"
             effects.append(effect)
         has_possible = "possible" in effects or any(name == "recover" for name, _ in parsed_calls)
+        has_serial_plan_write = any(
+            name in ("commit_plan", "update_plan_progress") for name, _ in parsed_calls
+        )
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
             if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -466,6 +469,16 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             name, args = parsed_calls[index]
             if index in repair_batch_errors:
                 text = repair_batch_errors[index]
+                if parsed_calls[index][0] in ("commit_plan", "update_plan_progress"):
+                    text = json.dumps({
+                        "status": "plan_rejected",
+                        "message": text,
+                    }, ensure_ascii=False)
+                    invalid = ExecutionResult(
+                        parsed_calls[index][0], parsed_calls[index][1], "not_checked", False,
+                        "invalid", 0, "none", text, text[:200], error_kind="plan_rejected",
+                    ) if structured else None
+                    return tool_call_id, text, None, invalid
                 if structured and state is not None and name == "recover":
                     content = _recovery_rejection_content(state, args, text)
                     invalid = ExecutionResult(
@@ -517,6 +530,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                         else:
                             content = execution.tool_content()
                         return tool_call_id, content, None, execution
+                    if execution.error_kind == "plan_rejected":
+                        return tool_call_id, execution.tool_content(), None, execution
                     if execution.error_kind == "task_terminal":
                         return tool_call_id, execution.tool_content(), None, execution
                     return tool_call_id, execution.tool_content(), execution, execution
@@ -532,7 +547,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         indexed_calls = list(enumerate(tool_calls))
         output.tools_start(tool_calls)
-        if has_possible:
+        if has_possible or has_serial_plan_write:
             results = []
             for item in indexed_calls:
                 result = _run(item)

@@ -4,7 +4,7 @@
 
 ## 0. 心智模型：一句话版本
 
-**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入：模型看到的不是“最近一次文字说了什么”，而是当前是否必须诊断、恢复或独立验证。v0.21 新增的 `todo_revisions` 和 `verification_history` 只供 Trace & Replay 消费，不进入这条 LLM 上下文生产线。
+**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入，v0.22 又把 active Plan Contract 的有界执行视图放入同一条语义轨道：模型看到的不是“最近一次文字说了什么”，而是当前计划、步骤依赖以及是否必须诊断、恢复或独立验证。完整 `plan_revisions` 和 `plan_progress_history` 保存在 State，不直接复制进 LLM 上下文；v0.21 的 Trace 对缺失 `todo_revisions` 继续安全降级为空。
 
 ```text
 view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
@@ -45,7 +45,7 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 │  ② call_llm(view)              流式发送，收 assistant 回复
 │  │
 │  ③ 分流
-│  ├─ 无 tool_calls：查完成条件（Todo 全清 + 最近修改后验证通过）
+│  ├─ 无 tool_calls：查完成条件（active plan 全部完成 + 最近修改后验证通过；无计划时走 Direct Path）
 │  │     ├─ 满足 → 结束返回
 │  │     └─ 不满足且未提醒过 → set_runtime_notice → 回 ①
 │  │           （仅提醒一次；仍不满足则 status=blocked 后返回）
@@ -58,13 +58,13 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 │        │     LLM 下一轮直接读；受预算约束，可能被截断/折叠
 │        │
 │        └─ 语义事实：结构化 ExecutionResult → state.record_execution_result（兼容回调仍可写入 record_tool）
-│              files_changed / errors / todos / 验证证据
+│              files_changed / errors / active plan / 验证证据
 │              免疫裁剪，下一轮渲染进 [Structured State] 锚定事实
 │
 └──► 两条轨道在下一轮的 ① 重新汇合 —— 循环，直到纯文本收尾或轮次上限
 ```
 
-Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、Todo 或独占 `recover`；`verification_required` 要求下一回合只有一个独立 verification。上下文压缩只处理协议历史，不能删除 `repair_loop`、活动 failure/recovery、generation 或预算。
+Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、提交或推进计划，或独占 `recover`；`verification_required` 要求下一回合只有一个独立 verification。上下文压缩只处理协议历史，不能删除计划执行视图、`repair_loop`、活动 failure/recovery、generation 或预算。
 
 ## 2. 关键机制一：双轨记录（本架构的核心取舍）
 
@@ -80,7 +80,7 @@ Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要�
 
 两个特例，同样服务于这个设计：
 
-- `update_todo`：计划意图不是执行事实，`record_tool` 显式跳过（state.py:58），由 `make_update_todo_tool(state)` 直接写 todos——模型的心智路线只进语义轨道。
+- `commit_plan` / `update_plan_progress`：计划意图不是环境执行事实，两个 state-bound 工具直接写入不可变 revision/event；它们不推进 generation，也不产生验证证据。Structured State 只显示从 State 推导的 active plan 执行视图。
 - `run_shell(purpose="execution"/"verification")`：execution 视为改动环境 → 作废全部验证证据；verification 通过 → 记录证据并解除"需要验证"标记。证据失真比缺证据更危险，所以宁可作废重来。
 
 ## 3. 关键机制二：视图随轮次演化
@@ -97,9 +97,9 @@ Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要�
 
 第 N 轮（历史生长，事实累积）
   System Prompt
-  [Structured State]        Tools: 12 | Files: auth.py | Errors: 1 | Todo: 2/3
+  [Structured State]        Plan revision=1 | step=inspect | Files: auth.py | Errors: 1
   user: 修复登录 bug
-  assistant(tool_calls: read_file, update_todo)
+  assistant(tool_calls: read_file, update_plan_progress)
   tool: <文件内容>          ┐
   tool: ok                 ├─ 轮次 = assistant + 其全部 tool result
   assistant(edit_file)     │  原子成组，绝不产生孤儿 tool result
