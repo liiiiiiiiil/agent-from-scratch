@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.23.0] - Read-only planning and handoff
+
+- Added `begin_plan`, `cancel_planning`, and `--plan` for Runtime-enforced read-only exploration while retaining the Direct Path.
+- Enforced planning admission at tool-round and executor boundaries; rejected calls retain tool results without reaching permission, handlers, generations, or verification.
+- Added current-revision approval, rejection, continued investigation, and unchanged-plan review through CLI commands. User feedback remains task-local; plan approval never grants tool permission.
+- Added lesson 23 and synchronized the runbook, navigation, and stage-seven plan.
+
 ## [v0.22.0] - Plan Contract
 
 - Replaced the model-visible whole-list `update_todo` write protocol with `commit_plan` and `update_plan_progress`.

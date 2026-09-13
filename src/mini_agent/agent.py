@@ -271,6 +271,11 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         output.close()
         return value
 
+    initial_state = getattr(context_manager, "state", None)
+    if (initial_state is not None and
+            getattr(getattr(initial_state, "planning_state", None), "phase", None) == "awaiting_approval"):
+        return _finish("计划等待用户决定")
+
     for i in range(MAX_ITERATIONS):
         prepared_messages = context_manager.prepare_messages()
         if not internal_retry:
@@ -368,6 +373,15 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
             state = getattr(context_manager, "state", None)
+            if (state is not None and
+                    getattr(getattr(state, "planning_state", None), "phase", None) == "exploring" and
+                    getattr(state, "repair_phase", "idle") == "idle" and
+                    getattr(state, "user_plan_decisions", None) and
+                    state.user_plan_decisions[-1].decision == "continue_exploring" and
+                    state.user_plan_decisions[-1].revision_id == state.planning_state.active_revision_id):
+                # The user may review the unchanged revision after more
+                # investigation; this text pauses at the CLI handoff.
+                return _finish(msg.get("content", ""))
             reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
             if reminder:
                 if "progress_marker" not in reminder:
@@ -417,8 +431,18 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             effects.append(effect)
         has_possible = "possible" in effects or any(name == "recover" for name, _ in parsed_calls)
         has_serial_plan_write = any(
-            name in ("commit_plan", "update_plan_progress") for name, _ in parsed_calls
+            name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
+            for name, _ in parsed_calls
         )
+        planning_batch_errors = {}
+        planning_phase = getattr(getattr(state, "planning_state", None), "phase", "direct")
+        plan_controls = {"begin_plan", "cancel_planning"}
+        if (len(parsed_calls) != 1 and
+                (any(name in plan_controls for name, _ in parsed_calls) or
+                 (planning_phase == "exploring" and
+                  any(name == "commit_plan" for name, _ in parsed_calls)))):
+            detail = "工具调用拒绝: 规划阶段切换或 exploring 中的 commit_plan 必须独占一个工具回合"
+            planning_batch_errors = {index: detail for index in range(len(parsed_calls))}
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
             if has_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -467,9 +491,20 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 return tool_call_id, text, invalid, invalid
 
             name, args = parsed_calls[index]
+            if index in planning_batch_errors:
+                text = planning_batch_errors[index]
+                is_plan = name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
+                if is_plan:
+                    text = json.dumps({"status": "plan_rejected", "message": text}, ensure_ascii=False)
+                invalid = ExecutionResult(
+                    name, args, "not_checked", False, "invalid", 0, effects[index],
+                    text, text[:200],
+                    error_kind="plan_rejected" if is_plan else "planning_phase_gate",
+                ) if structured else None
+                return tool_call_id, text, None, invalid
             if index in repair_batch_errors:
                 text = repair_batch_errors[index]
-                if parsed_calls[index][0] in ("commit_plan", "update_plan_progress"):
+                if parsed_calls[index][0] in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress"):
                     text = json.dumps({
                         "status": "plan_rejected",
                         "message": text,
@@ -579,6 +614,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "tool_call_id": tool_call_id,
                 "content": content,
             })
+        if state is not None and getattr(state.planning_state, "phase", None) == "awaiting_approval":
+            return _finish("计划等待用户决定")
 
     state = getattr(context_manager, "state", None)
     if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):

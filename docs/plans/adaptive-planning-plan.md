@@ -1,7 +1,7 @@
 # 阶段七：自适应规划与重规划（Adaptive Planning & Replanning）实施计划
 
-> 状态：`v0.22` Plan Contract 已实现；`v0.23`–`v0.25` 仍为后续规划
-> 当前基线：`v0.22`（Plan Contract；`v0.21` Trace & Replay 为前一版基线）
+> 状态：`v0.22` Plan Contract 与 `v0.23` Plan Mode & Handoff 已实现；`v0.24`–`v0.25` 仍为后续规划
+> 当前基线：`v0.23`（Plan Mode & Handoff；`v0.22` Plan Contract 为前一版基线）
 > 前置阶段：阶段五项目感知与任务编排（`v0.14`–`v0.16`）与阶段六可靠执行（`v0.17`–`v0.21`）
 > 版本范围：`v0.22`–`v0.25`
 
@@ -125,6 +125,7 @@ Runtime 根据相邻 revision 计算 `retained`、`added`、`cancelled` 和 `rep
 
 - 用户通过 CLI 明确批准指定 revision，才进入 `executing`
 - 驳回必须带反馈并产生新的用户反馈型 `ReplanTrigger`，随后回到 `exploring`
+- 继续调查也必须带反馈；保留当前 revision，创建用户反馈型 trigger 并回到 `exploring`。调查后可引用 trigger 提交新 revision，或由用户用 `/review <revision_id>` 将未改变的当前 revision 重新交付审批
 - 批准过期 revision、重复批准或批准后被新 revision 替代的请求必须拒绝
 - 批准只表示“可以按该方案继续”，不向 `PermissionGate` 写入 allow 规则
 - 之后每个写文件、execution shell 或恢复动作仍按原有权限策略询问或拒绝
@@ -137,7 +138,7 @@ Runtime 根据相邻 revision 计算 `retained`、`added`、`cancelled` 和 `rep
 
 - 当前活动 `FailureEvent`
 - 已记录的只读 `ExecutionAttempt`，其输出带来了改变方案的新事实
-- `--plan` 模式中的用户驳回记录，或用户对 blocked 任务的明确恢复决定
+- `--plan` 模式中的用户驳回或继续调查记录，或用户对 blocked 任务的明确恢复决定
 
 除首次计划外，每个 `commit_plan` 必须引用当前活动 trigger。提交成功后 trigger 才变为 `resolved`；schema 错误、引用错误或预算拒绝不能消费 trigger。
 
@@ -238,7 +239,7 @@ ReplanTrigger
 UserPlanDecision
 - decision_id
 - revision_id: optional
-- decision: approved | rejected | resume_blocked
+- decision: approved | rejected | continue_exploring | resume_blocked
 - feedback: optional
 - generation_id
 - caused_by_failure_id: optional
@@ -311,6 +312,7 @@ LoopStagnationState
 2. 实现双层 Explore gate，按 D5 拒绝副作用、verification 和非法混合调用。
 3. plan-only 任务提交 revision 后进入 `awaiting_approval`，agent loop 不继续执行计划。
 4. 增加用户侧批准、驳回和继续调查入口；批准必须精确引用当前 revision。
+   继续调查保留当前 revision；可提交引用用户反馈 trigger 的新 revision，或将未改变的 revision 重新交付审批。
 5. 驳回反馈进入受保护的当前任务上下文，并创建可供下一 revision 引用的 trigger。
 6. 明确展示“计划批准”和“工具授权”是两个不同事件。
 
@@ -408,7 +410,8 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 ### 7.3 阶段完成定义
 
 - [x] `v0.22` Plan Contract 已有独立教程、变更记录和可运行测试
-- [ ] `v0.23`–`v0.25` 各有独立教程、变更记录和可运行测试
+- [x] `v0.23` 已有独立教程、变更记录和可运行测试（tag 事实检查待用户手动创建 tag）
+- [ ] `v0.24`–`v0.25` 各有独立教程、变更记录和可运行测试
 - [ ] 计划结构、步骤进度、执行事实和验证证据有单一且不同的写入来源
 - [ ] 简单任务保持短路径，复杂任务可以显式进入受 Runtime 约束的 Explore → Commit → Execute 流程
 - [ ] `--plan` 在用户批准前不产生副作用，批准也不会绕过 PermissionGate

@@ -34,6 +34,7 @@ EXPECTED = {
     "20-repair-loop.md": ("v0.20", "v0.19..v0.20"),
     "21-trace-replay.md": ("v0.21", "v0.20..v0.21"),
     "22-plan-contract.md": ("v0.22", "v0.21..v0.22"),
+    "23-plan-mode-handoff.md": ("v0.23", "v0.22..v0.23"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

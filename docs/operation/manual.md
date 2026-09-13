@@ -1,12 +1,29 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.22**（Plan Contract；含 v0.21 Trace & Replay、v0.20 Repair Loop、v0.19 检查点与回滚和 v0.18.1 Recovery Policy 修复）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.23**（只读规划与用户交接；含 v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+
+## v0.23 只读规划与用户交接
+
+普通任务仍从 `direct` 开始。模型认为任务需要先规划时，独占调用 `begin_plan` 进入 `exploring`；尚未提交计划时可用 `cancel_planning` 回到 Direct Path。命令行使用 `PYTHONPATH=src python -m mini_agent --plan "<任务>"` 时，首条任务从 `plan_only / exploring` 开始，不能取消强制规划。该命令处理首条任务后仍进入交互循环。
+
+`exploring` 只允许无副作用调查、独占调用 `commit_plan`，以及普通模式尚无计划时的 `cancel_planning`。执行 shell、文件写入、verification、恢复和进度更新会在 PermissionGate 之前被拒绝；同回合混合 `commit_plan` 与其他调用会整体拒绝。每个被拒绝的调用仍有对应工具结果，但不运行 handler、不推进 generation、不生成验证证据。
+
+普通模式提交计划后进入 `executing`。`--plan` 模式提交后停在 `awaiting_approval`，CLI 从 State 中的 `active_plan` 打印完整待批计划及当前 revision ID，再等待用户决定；即使 `OUTPUT_MODE=quiet` 也会显示，模型不会重新复述计划或继续执行。继续调查后使用 `/review`，CLI 会再次打印同一份计划和决定命令。交接命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/approve <revision_id>` | 批准当前待批 revision，继续执行。 |
+| `/reject <revision_id> <反馈>` | 驳回当前 revision，保存反馈并返回只读调查。 |
+| `/continue <revision_id> <反馈>` | 保留当前 revision，带反馈继续只读调查。 |
+| `/review <revision_id>` | 继续调查后若方案未变，将原 revision 重新交付审批。 |
+
+驳回或继续调查后若提交修订，`commit_plan` 必须同时提供当前 `parent_revision_id` 和 `trigger_id`。用户决定、反馈触发记录和旧 revision 都保存在当前任务 State；`/reset` 或 `/new <任务>` 会清除它们。批准旧 revision、重复批准、无反馈驳回或驳回后直接 `/review` 都会拒绝。计划批准只改变规划阶段，不写入 PermissionGate 的 allow 规则；后续工具继续单独授权，修改后仍须独立 verification。通用失败/观察触发重规划、修订预算及停滞检测属于 v0.24。
 
 ## v0.22 Plan Contract
 
 复杂任务可以通过 `commit_plan` 提交结构化计划。计划包含 `goal`、`constraints`、任务级 `success_criteria` 和 1–50 个带稳定 `step_id` 的步骤；步骤可以声明 `depends_on`、步骤级 `success_criteria` 和 `replaces`。简单任务继续走 Direct Path，不需要创建计划。
 
-初次 `commit_plan` 不提供 `parent_revision_id`，成功后创建 revision 1 并进入 `executing`。结构发生变化时，必须提交带当前 active revision 作为 parent 的完整新计划；旧 revision 不会被覆盖。只改变步骤状态时使用 `update_plan_progress`，状态只能按 `pending → in_progress → completed` 推进，依赖未完成或已有其他进行中步骤时会被拒绝。
+初次 `commit_plan` 不提供 `parent_revision_id`，成功后创建 revision 1；普通模式进入 `executing`，`--plan` 模式进入 `awaiting_approval`。结构发生变化时，必须提交带当前 active revision 作为 parent 的完整新计划；旧 revision 不会被覆盖。只改变步骤状态时使用 `update_plan_progress`，状态只能按 `pending → in_progress → completed` 推进，依赖未完成或已有其他进行中步骤时会被拒绝。
 
 计划校验和 revision 提交在同一把 State 锁内完成。无效参数或违反计划不变量的请求会收到 `plan_rejected`，不会创建 `FailureEvent`、进入 Repair Loop、推进 generation 或产生验证证据。两个计划工具默认 `ALLOW`、`effect_class=none`，也不能成为 `recover` 的 retry、adjust 或 rollback 目标。计划写入不代表环境已经正确，步骤完成仍不能替代独立 verification。
 

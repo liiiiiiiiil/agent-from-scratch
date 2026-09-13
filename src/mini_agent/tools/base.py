@@ -247,7 +247,7 @@ class ToolExecutor:
         started = monotonic()
         if state is not None and getattr(state, "is_terminal", lambda: False)():
             return self._terminal_result(name, arguments, state)
-        is_plan_tool = name in ("commit_plan", "update_plan_progress")
+        is_plan_tool = name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress")
 
         def plan_rejected(detail: object) -> ExecutionResult:
             text = json.dumps({
@@ -274,6 +274,19 @@ class ToolExecutor:
                 "not_checked", False, "invalid", 0, "none", text, text,
                 error_kind="internal_tool",
             )
+        if state is not None and hasattr(state, "planning_gate"):
+            raw_arguments = arguments if isinstance(arguments, dict) else {}
+            phase_error = state.planning_gate(
+                name, raw_arguments, tool.effect_for(raw_arguments),
+            )
+            if phase_error:
+                if is_plan_tool:
+                    return plan_rejected(phase_error)
+                return ExecutionResult(
+                    name, deepcopy(raw_arguments), "not_checked", False, "invalid", 0,
+                    tool.effect_for(raw_arguments), phase_error, _brief(phase_error),
+                    error_kind="planning_phase_gate",
+                )
         try:
             normalized = validate_arguments(tool.parameters, arguments)
         except (TypeError, ValueError) as error:
@@ -293,6 +306,16 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
+        if state is not None and hasattr(state, "planning_gate"):
+            phase_error = state.planning_gate(name, normalized, effect_class)
+            if phase_error:
+                if is_plan_tool:
+                    return plan_rejected(phase_error)
+                return ExecutionResult(
+                    name, normalized, "not_checked", False, "invalid", 0,
+                    effect_class, phase_error, _brief(phase_error),
+                    error_kind="planning_phase_gate",
+                )
         if state is not None and hasattr(state, "repair_gate"):
             phase_error = state.repair_gate(
                 name, normalized, effect_class, reservation=reservation,

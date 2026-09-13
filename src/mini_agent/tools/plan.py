@@ -11,6 +11,32 @@ def _result(status: str, **fields: object) -> str:
     return json.dumps({"status": status, **fields}, ensure_ascii=False)
 
 
+def make_begin_plan_tool(state: AgentState) -> Tool:
+    def begin_plan():
+        planning = state.begin_plan()
+        return _result("exploring", phase=planning.phase)
+
+    return Tool(
+        name="begin_plan",
+        description="普通任务需要先调查时，进入 Runtime 强制的只读规划阶段。",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=begin_plan,
+    )
+
+
+def make_cancel_planning_tool(state: AgentState) -> Tool:
+    def cancel_planning():
+        planning = state.cancel_planning()
+        return _result("planning_cancelled", phase=planning.phase)
+
+    return Tool(
+        name="cancel_planning",
+        description="普通任务尚未提交计划时，退出只读规划并回到 Direct Path。",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=cancel_planning,
+    )
+
+
 def make_commit_plan_tool(state: AgentState) -> Tool:
     def commit_plan(goal, constraints, success_criteria, steps, reason, **optional):
         revision = state.commit_plan(
@@ -21,6 +47,7 @@ def make_commit_plan_tool(state: AgentState) -> Tool:
             revision_id=revision.revision_id,
             generation_id=revision.generation_id,
             parent_revision_id=revision.parent_revision_id,
+            trigger_id=revision.trigger_id,
             phase=state.snapshot()["planning_state"]["phase"],
         )
 
@@ -74,6 +101,7 @@ def make_commit_plan_tool(state: AgentState) -> Tool:
                 },
                 "reason": {"type": "string", "minLength": 1, "maxLength": 600},
                 "parent_revision_id": {"type": "integer", "minimum": 1},
+                "trigger_id": {"type": "integer", "minimum": 1},
             },
             "required": ["goal", "constraints", "success_criteria", "steps", "reason"],
             "additionalProperties": False,

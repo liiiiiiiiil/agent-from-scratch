@@ -368,7 +368,7 @@ class ContextManager:
             # Keep Direct Path visible in normal windows without making the
             # protected state disproportionately expensive for tiny test or
             # emergency windows whose existing fallback must retain history.
-            plan_lines = [] if self.budget.window < 512 else [
+            plan_lines = [] if self.budget.window < 512 and planning_state.get("phase") == "direct" else [
                 f"Plan: {planning_state.get('mode', 'auto')}/"
                 f"{planning_state.get('phase', 'direct')}/-"
             ]
@@ -426,6 +426,16 @@ class ContextManager:
                 f"in_progress={in_progress_count}; omitted={omitted_count}"
             )
         base_lines.extend(plan_lines)
+        decisions = snapshot.get("user_plan_decisions", [])
+        if decisions:
+            latest = decisions[-1]
+            base_lines.append(
+                "User plan decision: "
+                f"{latest.get('decision')} revision={latest.get('revision_id')}; "
+                f"feedback={bounded(latest.get('feedback') or '-', 600)}"
+            )
+        if planning_state.get("active_trigger_id") is not None:
+            base_lines.append(f"Active plan trigger: {planning_state['active_trigger_id']}")
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")

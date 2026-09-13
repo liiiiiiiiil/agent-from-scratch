@@ -14,6 +14,7 @@
 - **异常边界**：工具层/执行器负责把 handler 异常转换为错误结果并回灌模型；核心 agent loop 不对 LLM 或 CLI 顶层异常做兜底。
 - **协议完整**：工具调用必须为每个 call 回灌对应的 `role=tool` 结果；单轮工具结果全部回灌后再进入下一轮。
 - **Plan Contract**：复杂任务由模型通过 `commit_plan` 提交完整不可变 revision，通过 `update_plan_progress` 追加独立步骤进度事件；简单任务继续 Direct Path。计划校验失败只回灌 `plan_rejected`，不得创建 `FailureEvent`、推进 generation 或产生验证证据；计划写入不替代实际执行和独立 verification。
+- **只读规划与交接**：普通任务可经 `begin_plan` 进入只读调查；`--plan` 任务必须先调查，提交后等待用户批准当前 revision。`exploring` 的副作用、verification 和混合提交在整轮与执行器两层拒绝；批准计划不得绕过 PermissionGate。用户驳回或继续调查的反馈由 CLI 记录，不能由模型伪造。
 - **完成与上限**：无 `tool_calls` 才能结束；有 active Plan Contract 时所有活动步骤必须完成，并满足修改后的验证条件；无计划的 Direct Path 沿用原有完成条件。默认最多 50 轮，超限返回明确结果。
 - **回放只读**：Trace & Replay 只能消费当前进程、当前任务的结构化 State 快照；不得调用 LLM、执行工具、经过权限授权、修改 history、状态、预算或 generation。当前 generation 的验证证据用于完成判定，append-only verification history 用于跨 generation 回放；断链和跨 generation 证据必须标记为不完整，不得推测补全。
 - **教程读者优先**：撰写或修改 `docs/tutorials/` 时，默认读者具备基础 Python 和命令行能力，但刚接触 Agent，也不了解本项目内部架构。必须先讲问题和直观含义，再讲模块、字段、协议与实现；术语、缩写和项目内部概念首次出现时必须就近解释，不得用代码、符号或文件清单代替教学说明。具体要求见[教程作者规范](docs/governance/tutorial-authoring.md)。
@@ -24,7 +25,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.22`（Plan Contract）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.23`（只读规划与用户交接）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
 `progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、

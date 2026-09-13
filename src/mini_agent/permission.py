@@ -27,6 +27,8 @@ ALLOW, DENY, ASK = "allow", "deny", "ask"
 # ============================================================
 
 PERMISSION_RULES = {
+    "begin_plan": ALLOW,
+    "cancel_planning": ALLOW,
     "commit_plan": ALLOW,
     "update_plan_progress": ALLOW,
     "read_file": ALLOW,

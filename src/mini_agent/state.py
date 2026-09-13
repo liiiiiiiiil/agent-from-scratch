@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import re
@@ -18,7 +18,7 @@ AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid"]
 FailureCategory = Literal["protocol", "permission", "transient", "deterministic", "validation", "unknown"]
 RepairPhase = Literal["idle", "diagnosis_required", "verification_required"]
 PlanStepStatus = Literal["pending", "in_progress", "completed"]
-PlanningPhase = Literal["direct", "executing"]
+PlanningPhase = Literal["direct", "exploring", "awaiting_approval", "executing"]
 
 _STEP_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PLAN_STEP_LIMIT = 50
@@ -77,7 +77,7 @@ class PlanRevision:
     revision_id: int
     generation_id: int
     parent_revision_id: int | None
-    trigger_id: None
+    trigger_id: int | None
     goal: str
     constraints: tuple[str, ...]
     success_criteria: tuple[str, ...]
@@ -98,12 +98,32 @@ class PlanProgressEvent:
 
 @dataclass(frozen=True)
 class PlanningState:
-    mode: Literal["auto"] = "auto"
+    mode: Literal["auto", "plan_only"] = "auto"
     phase: PlanningPhase = "direct"
     active_revision_id: int | None = None
-    active_trigger_id: None = None
+    active_trigger_id: int | None = None
     replans_used: int = 0
     replans_remaining: None = None
+
+
+@dataclass(frozen=True)
+class UserPlanDecision:
+    decision_id: int
+    revision_id: int
+    decision: Literal["approved", "rejected", "continue_exploring"]
+    feedback: str | None
+    generation_id: int
+
+
+@dataclass(frozen=True)
+class ReplanTrigger:
+    trigger_id: int
+    generation_id: int
+    kind: Literal["user_feedback"]
+    reason: str
+    caused_by_decision_id: int
+    status: Literal["active", "resolved", "rejected"] = "active"
+    result_revision_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +224,8 @@ class AgentState:
     terminal_reason: str = ""
     plan_revisions: list[PlanRevision] = field(default_factory=list)
     plan_progress_history: list[PlanProgressEvent] = field(default_factory=list)
+    user_plan_decisions: list[UserPlanDecision] = field(default_factory=list)
+    replan_triggers: list[ReplanTrigger] = field(default_factory=list)
     planning_state: PlanningState = field(default_factory=PlanningState)
     verification_evidence: list[VerificationEvidence] = field(default_factory=list)
     verification_history: list[VerificationEvidence] = field(default_factory=list)
@@ -219,6 +241,8 @@ class AgentState:
     _next_failure: int = field(default=1, init=False, repr=False)
     _next_plan_revision: int = field(default=1, init=False, repr=False)
     _next_plan_progress: int = field(default=1, init=False, repr=False)
+    _next_plan_decision: int = field(default=1, init=False, repr=False)
+    _next_plan_trigger: int = field(default=1, init=False, repr=False)
     _fingerprint_counts: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     _repair_cycles: int = field(default=0, init=False, repr=False)
     _reserved_repair_cycles: int = field(default=0, init=False, repr=False)
@@ -513,11 +537,132 @@ class AgentState:
         with self._lock:
             return deepcopy(self._plan_projection_locked())
 
+    def begin_plan(self) -> PlanningState:
+        with self._lock:
+            if (self.status != "running" or self.planning_state.phase != "direct"
+                    or self.planning_state.active_revision_id is not None
+                    or self._repair_phase != "idle"):
+                raise PlanRejected("只有尚未提交计划的普通任务可以开始规划")
+            self.planning_state = replace(self.planning_state, phase="exploring")
+            return self.planning_state
+
+    def cancel_planning(self) -> PlanningState:
+        with self._lock:
+            if (self.planning_state.mode != "auto" or
+                    self.status != "running" or
+                    self.planning_state.phase != "exploring" or
+                    self.planning_state.active_revision_id is not None or
+                    self.planning_state.active_trigger_id is not None or
+                    self._repair_phase != "idle"):
+                raise PlanRejected("当前规划不能取消")
+            self.planning_state = replace(self.planning_state, phase="direct")
+            return self.planning_state
+
+    def planning_gate(self, name: str, arguments: dict[str, Any],
+                      effect_class: EffectClass) -> str | None:
+        """Check the planning boundary before permission and handler admission."""
+        with self._lock:
+            phase = self.planning_state.phase
+            if phase == "awaiting_approval":
+                return "工具调用拒绝: 当前计划等待用户决定"
+            if phase == "exploring":
+                if name == "commit_plan":
+                    return None
+                if name == "cancel_planning" and self.planning_state.mode == "auto" and self.planning_state.active_revision_id is None and self.planning_state.active_trigger_id is None:
+                    return None
+                if name in ("begin_plan", "update_plan_progress", "cancel_planning", "recover"):
+                    return "工具调用拒绝: exploring 阶段不能推进计划状态"
+                if name == "run_shell" and arguments.get("purpose", "execution") == "verification":
+                    return "工具调用拒绝: exploring 阶段不能进行 verification"
+                if effect_class != "none":
+                    return "工具调用拒绝: exploring 阶段只允许只读调查"
+            elif name in ("begin_plan", "cancel_planning"):
+                if name == "begin_plan" and phase == "direct":
+                    return None
+                return "工具调用拒绝: 当前阶段不能切换规划状态"
+            return None
+
+    def decide_plan(self, decision: str, revision_id: int,
+                    feedback: str | None = None) -> UserPlanDecision:
+        """Accept a CLI-only decision about the current plan revision."""
+        with self._lock:
+            if self.status != "running":
+                raise PlanRejected("终态任务不能接受计划决定")
+            if self.planning_state.mode != "plan_only":
+                raise PlanRejected("只有 --plan 任务需要用户计划决定")
+            if (isinstance(revision_id, bool) or not isinstance(revision_id, int)
+                    or revision_id != self.planning_state.active_revision_id):
+                raise PlanRejected("只能决定当前 revision")
+            if decision not in ("approved", "rejected", "continue_exploring"):
+                raise PlanRejected("未知计划决定")
+            if self.planning_state.phase != "awaiting_approval":
+                raise PlanRejected("当前没有待批准的计划")
+            clean_feedback = None
+            if decision != "approved":
+                clean_feedback = self._plan_text(feedback, "feedback", _PLAN_REASON_MAX)
+            elif feedback is not None:
+                raise PlanRejected("批准计划不接受反馈参数")
+            record = UserPlanDecision(
+                self._next_plan_decision, revision_id, decision,
+                clean_feedback, self._verification_generation,
+            )
+            self.user_plan_decisions.append(record)
+            self._next_plan_decision += 1
+            if decision == "approved":
+                self.planning_state = replace(self.planning_state, phase="executing")
+            else:
+                trigger = ReplanTrigger(
+                    self._next_plan_trigger, self._verification_generation,
+                    "user_feedback", clean_feedback, record.decision_id,
+                )
+                self.replan_triggers.append(trigger)
+                self._next_plan_trigger += 1
+                self.planning_state = replace(
+                    self.planning_state, phase="exploring",
+                    active_trigger_id=trigger.trigger_id,
+                )
+            return record
+
+    def review_current_plan(self, revision_id: int) -> PlanningState:
+        """Return an unchanged plan to review after continue_exploring."""
+        with self._lock:
+            if (self.planning_state.mode != "plan_only" or
+                    self.status != "running" or self._repair_phase != "idle" or
+                    self.planning_state.phase != "exploring" or
+                    isinstance(revision_id, bool) or
+                    revision_id != self.planning_state.active_revision_id or
+                    not self.user_plan_decisions or
+                    self.user_plan_decisions[-1].decision != "continue_exploring" or
+                    self.user_plan_decisions[-1].revision_id != revision_id):
+                raise PlanRejected("只有继续调查的当前 revision 可以重新交付审批")
+            trigger_id = self.planning_state.active_trigger_id
+            for index, trigger in enumerate(self.replan_triggers):
+                if trigger.trigger_id == trigger_id and trigger.status == "active":
+                    self.replan_triggers[index] = replace(trigger, status="rejected")
+                    break
+            else:
+                raise PlanRejected("当前继续调查的触发记录无效")
+            self.planning_state = replace(
+                self.planning_state, phase="awaiting_approval", active_trigger_id=None,
+            )
+            return self.planning_state
+
     def commit_plan(self, goal: Any, constraints: Any, success_criteria: Any,
                     steps: Any, reason: Any,
-                    parent_revision_id: Any = _MISSING) -> PlanRevision:
+                    parent_revision_id: Any = _MISSING,
+                    trigger_id: Any = _MISSING) -> PlanRevision:
         """Validate and atomically append one immutable Plan Contract revision."""
         with self._lock:
+            if self.status != "running":
+                raise PlanRejected("终态任务不能提交计划")
+            if self.planning_state.phase == "awaiting_approval":
+                raise PlanRejected("计划等待用户决定，不能再次提交")
+            if self._repair_phase == "verification_required":
+                raise PlanRejected("当前必须先完成独立 verification")
+            if (self.planning_state.mode == "plan_only" and
+                    self.planning_state.phase == "executing" and
+                    self.planning_state.active_revision_id is not None):
+                raise PlanRejected("plan_only 执行阶段不能直接改写已批准计划")
             clean_goal = self._plan_text(goal, "goal", _PLAN_GOAL_MAX)
             clean_constraints = self._plan_texts(
                 constraints, "constraints", _PLAN_CONSTRAINT_LIMIT, _PLAN_TEXT_MAX,
@@ -530,6 +675,19 @@ class AgentState:
             clean_reason = self._plan_text(reason, "reason", _PLAN_REASON_MAX)
             parsed_steps = self._parse_plan_steps(steps)
             active = self._active_revision_locked()
+            active_trigger = self.planning_state.active_trigger_id
+            if active_trigger is None:
+                if trigger_id is not _MISSING:
+                    raise PlanRejected("当前没有需要引用的用户反馈 trigger")
+                resolved_trigger = None
+            else:
+                if (isinstance(trigger_id, bool) or not isinstance(trigger_id, int)
+                        or trigger_id != active_trigger):
+                    raise PlanRejected("新计划必须引用当前活动 trigger_id")
+                resolved_trigger = next((item for item in self.replan_triggers
+                                         if item.trigger_id == trigger_id and item.status == "active"), None)
+                if resolved_trigger is None:
+                    raise PlanRejected("当前 trigger 已失效")
             parent_provided = parent_revision_id is not _MISSING
             if active is None:
                 if parent_provided:
@@ -613,13 +771,20 @@ class AgentState:
                         )
             revision = PlanRevision(
                 self._next_plan_revision, self._verification_generation,
-                parent.revision_id if parent is not None else None, None,
+                parent.revision_id if parent is not None else None, active_trigger,
                 clean_goal, clean_constraints, clean_success, final_steps, clean_reason,
             )
             self.plan_revisions.append(revision)
             self._next_plan_revision += 1
+            if resolved_trigger is not None:
+                index = self.replan_triggers.index(resolved_trigger)
+                self.replan_triggers[index] = replace(
+                    resolved_trigger, status="resolved", result_revision_id=revision.revision_id,
+                )
             self.planning_state = PlanningState(
-                mode="auto", phase="executing", active_revision_id=revision.revision_id,
+                mode=self.planning_state.mode,
+                phase="awaiting_approval" if self.planning_state.mode == "plan_only" else "executing",
+                active_revision_id=revision.revision_id,
                 active_trigger_id=None, replans_used=0, replans_remaining=None,
             )
             self._sync_current_goal_locked()
@@ -629,6 +794,8 @@ class AgentState:
                              reason: Any) -> PlanProgressEvent:
         """Append one legal status transition for the active revision."""
         with self._lock:
+            if self.planning_state.phase != "executing":
+                raise PlanRejected("只有 executing 阶段可以推进计划步骤")
             if isinstance(revision_id, bool) or not isinstance(revision_id, int):
                 raise PlanRejected("revision_id 必须是整数")
             if not isinstance(step_id, str) or not _STEP_ID_PATTERN.fullmatch(step_id.strip()):
@@ -1011,7 +1178,8 @@ class AgentState:
 
     def record_execution_result(self, result: Any) -> ExecutionAttempt | None:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
-        if getattr(result, "error_kind", None) == "plan_rejected":
+        if (getattr(result, "error_kind", None) in ("plan_rejected", "planning_phase_gate")
+                or getattr(result, "tool", None) in ("begin_plan", "cancel_planning")):
             return None
         with self._lock:
             self._ensure_generation()
@@ -1190,7 +1358,7 @@ class AgentState:
 
     def record_tool(self, name: str, args: dict[str, Any], ok: bool, brief: str) -> None:
         """Compatibility API for older callback-based integrations."""
-        if name in ("commit_plan", "update_plan_progress"): return
+        if name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress"): return
         args_copy = deepcopy(args)
         with self._lock:
             self.tool_history.append({"tool": name, "args": args_copy, "ok": ok, "brief": brief})
@@ -1220,12 +1388,15 @@ class AgentState:
                     self._verification_required = True
             if not ok: self.errors.append(f"{name}: {brief}")
 
-    def begin_task(self, task: str) -> None:
+    def begin_task(self, task: str, mode: Literal["auto", "plan_only"] = "auto") -> None:
+        if mode not in ("auto", "plan_only"):
+            raise ValueError("未知规划模式")
         with self._lock:
             self.task = task; object.__setattr__(self, "current_goal", ""); self.status = "running"; self.terminal_reason = ""
             self.tool_history.clear(); self.files_changed.clear(); self.errors.clear()
             self.plan_revisions.clear(); self.plan_progress_history.clear()
-            self.planning_state = PlanningState()
+            self.user_plan_decisions.clear(); self.replan_triggers.clear()
+            self.planning_state = PlanningState(mode=mode, phase="exploring" if mode == "plan_only" else "direct")
             self.verification_evidence.clear(); self.verification_history.clear()
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
@@ -1234,6 +1405,7 @@ class AgentState:
             self._active_failure_id = None; self._active_recovery_id = None
             self._next_attempt = 1; self._next_failure = 1
             self._next_plan_revision = 1; self._next_plan_progress = 1
+            self._next_plan_decision = 1; self._next_plan_trigger = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             if self._checkpoint_store is not None:
@@ -1263,12 +1435,14 @@ class AgentState:
     def completion_reminder(self) -> dict[str, object] | None:
         with self._lock:
             if self.status in ("blocked", "failed"): return None
+            if self.planning_state.phase == "awaiting_approval": return None
             active = self._plan_view_locked()
             missing = [step["content"] for step in (active or {}).get("steps", [])
                        if step["status"] != "completed"]
             needs_verify = self._verification_required
             needs_repair = self._repair_phase != "idle"
-            if not missing and not needs_verify and not needs_repair:
+            needs_plan = self.planning_state.phase == "exploring"
+            if not missing and not needs_verify and not needs_repair and not needs_plan:
                 return None
             # Describe observable completion facts instead of counting
             # reminders. The marker changes when plan state, tool
@@ -1289,6 +1463,8 @@ class AgentState:
                 self._repair_cycles,
                 len(self.failures),
                 len(self.recovery_actions),
+                self.planning_state.phase,
+                self.planning_state.active_trigger_id,
             )
             if self._repair_phase == "diagnosis_required":
                 message = (
@@ -1297,6 +1473,8 @@ class AgentState:
                 )
             elif self._repair_phase == "verification_required":
                 message = "恢复动作已完成或存在待验证 generation。下一条回复只能独占调用 run_shell(purpose=verification)。"
+            elif needs_plan:
+                message = "当前处于只读调查阶段。请继续调查并独占调用 commit_plan；普通模式未提交计划时也可调用 cancel_planning。"
             else:
                 message = (
                     "任务尚未满足完成条件。请在下一条回复中调用能推进任务的工具 "
@@ -1363,6 +1541,8 @@ class AgentState:
                     for event in self.plan_progress_history
                 ],
                 "planning_state": asdict(self.planning_state),
+                "user_plan_decisions": [asdict(x) for x in self.user_plan_decisions],
+                "replan_triggers": [asdict(x) for x in self.replan_triggers],
                 "active_plan": active_plan,
                 "verification_evidence": [asdict(x) for x in self.verification_evidence],
                 "verification_history": [asdict(x) for x in self.verification_history],

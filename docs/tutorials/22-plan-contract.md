@@ -1,6 +1,6 @@
 # 第 22 课：Plan Contract——把 Todo 变成不可变的执行合同（v0.22）
 
-上一课：[任务轨迹回放](21-trace-replay.md) · [教程总览](README.md) · 下一课：按需追加
+上一课：[任务轨迹回放](21-trace-replay.md) · [教程总览](README.md) · 下一课：[先调查，再交付计划](23-plan-mode-handoff.md)
 
 > 代码快照：`v0.22` · 相邻差异：`v0.21..v0.22` · 命令环境：Bash/zsh
 

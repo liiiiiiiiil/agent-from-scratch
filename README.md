@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程到 `v0.22`（第 22 课的 Plan Contract：不可变计划修订与独立步骤进度）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程到 `v0.23`（第 23 课：先只读调查，再交付计划等待用户决定）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -56,6 +56,7 @@
     <tr><td><strong>v0.21</strong></td><td><a href="./docs/tutorials/21-trace-replay.md">任务轨迹回放</a></td><td>按 generation 只读回放 Todo、执行、失败、恢复、验证和终态的因果链。</td></tr>
     <tr><th colspan="3"><a id="stage-7"></a>阶段七 · 结构化计划</th></tr>
     <tr><td><strong>v0.22</strong></td><td><a href="./docs/tutorials/22-plan-contract.md">结构化计划合同</a></td><td>用不可变 revision 保存计划结构，用独立 progress event 推进步骤状态，并把计划执行视图注入上下文。</td></tr>
+    <tr><td><strong>v0.23</strong></td><td><a href="./docs/tutorials/23-plan-mode-handoff.md">只读规划与用户交接</a></td><td>复杂任务先只读调查；计划模式提交后等待用户决定，批准仍不绕过工具授权。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展回放、记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>
