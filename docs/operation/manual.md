@@ -1,6 +1,32 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.24**（证据驱动重规划与停滞收口；含 v0.23 只读规划与用户交接、v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.25**（计划轨迹回放与验收；含 v0.24 证据驱动重规划、v0.23 只读规划与用户交接、v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+
+## v0.25 计划轨迹回放与验收
+
+`AgentState.snapshot()` 的 `trace_events` 是任务内连续的只读轨迹索引。每条事件保存 `sequence_id`、发生时的 `generation_id` / `revision_id`、已有记录的类型和 ID；verification 使用 `verification_history` 的索引。事件不复制工具原始输出，不推进 generation，不改变预算，也不参与完成判定。
+
+这三个字段承担不同职责：`generation` 表示环境副作用或恢复后的验证代次，`revision` 表示计划结构版本，`sequence_id` 连接跨列表的发生顺序。同一 generation 内提交多个 revision 后，调查、执行和验证的 revision 归属以事件为准，不能只按 generation 或数组位置推断。
+
+Trace API 保留原调用方式，并增加 revision 查询：
+
+```python
+from mini_agent.trace import build_trace, render_trace
+
+report = build_trace(state.snapshot())
+revision_report = build_trace(state.snapshot(), revision_id=2)
+print(render_trace(revision_report))
+```
+
+`generation_id` 与 `revision_id` 不能同时指定；非法 ID 抛 `TraceQueryError`。完整报告新增 `plan_revisions` 和有序 `plan_timeline`。每个 revision 视图包含 parent、trigger 前因、模型提交的 `reason`、Runtime 重算的结构差异、步骤及 progress、plan-only 用户决定，以及生效期间的调查、执行、failure、recovery、verification 和 generation。`causal_edges` 新增 parent、trigger、revision 相关边，并以 `resolved` / `UNRESOLVED` 标记完整性。
+
+```text
+/trace
+/trace <generation_id>
+/trace revision <revision_id>
+```
+
+revision 查询会把所选 revision 的 trigger 来源保留为前因；generation 查询展示该代提交或生效的 revision，并用 `generation_role` 区分两者。历史 generation 的结论依据按该代末的计划与进度事件重建，不借用后续 revision；没有顺序终态记录时，历史终态摘要标为 `not_recorded`。旧 snapshot 没有计划数据时沿用 v0.21 结果；有计划记录却没有 `trace_events` 时保留可直接验证的结构事实，并将跨记录先后和执行归属标记为不完整。Trace 不重新执行任务，也不把后续 generation 的通过证据倒推成旧方案正确。
 
 ## v0.24 证据驱动重规划与停滞收口
 
@@ -54,7 +80,7 @@ v0.21 的 `/trace` 继续只读回放 generation、执行、失败、恢复和�
 
 ## v0.21 任务轨迹回放（Trace & Replay，只读）
 
-`/trace` 回放当前进程、当前任务已经保存的结构化事实：Todo revision、generation、执行尝试、失败、恢复动作、验证证据和终态。`/trace 3` 只显示 generation 3。命令在 `run_task()` 之前拦截，不追加 user history，不调用 LLM、工具 handler 或 PermissionGate，也不修改 State、预算或 generation。
+`/trace` 回放当前进程、当前任务已经保存的结构化事实：Todo revision、generation、执行尝试、失败、恢复动作、验证证据和终态。`/trace 3` 只显示 generation 3；计划链和 revision 查询见上面的 v0.25 说明。命令在 `run_task()` 之前拦截，不追加 user history，不调用 LLM、工具 handler 或 PermissionGate，也不修改 State、预算或 generation。
 
 回放也可通过标准库 Python API 使用：
 
@@ -199,7 +225,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.24，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.25，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

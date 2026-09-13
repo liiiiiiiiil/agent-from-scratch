@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.25.0] - Plan trace and evaluation
+
+- Added append-only task-local `TraceEvent` ordering for plan, trigger, decision, execution, recovery, verification, and stagnation facts.
+- Extended read-only Trace with revision queries, ordered plan timelines, revision fact ownership, plan causal edges, integrity checks, and evidence-backed conclusions.
+- Added `/trace revision <revision_id>` while preserving generation queries and v0.21 snapshots.
+- Added lesson 25 and synchronized the runbook, navigation, version metadata, and adaptive-planning completion state.
+
 ## [v0.24.0] - Evidence-backed replanning and bounded stagnation
 
 - Added source-backed `request_replan` triggers for failures and successful read-only observations, plus CLI-only user feedback and blocked-resume triggers.

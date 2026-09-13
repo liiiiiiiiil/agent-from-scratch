@@ -229,18 +229,28 @@ def main():
                 cli_notice("当前没有活动任务，无法回放。")
                 continue
             parts = user_input.split()
-            if len(parts) > 2:
-                cli_notice("用法: /trace [generation_id]")
-                continue
             requested_generation = None
-            if len(parts) == 2:
+            requested_revision = None
+            if len(parts) == 3 and parts[1] == "revision":
+                try:
+                    requested_revision = int(parts[2])
+                except ValueError:
+                    cli_notice("用法: /trace revision <revision_id>，revision_id 必须是正整数。")
+                    continue
+            elif len(parts) > 2:
+                cli_notice("用法: /trace [generation_id] 或 /trace revision <revision_id>")
+                continue
+            elif len(parts) == 2:
                 try:
                     requested_generation = int(parts[1])
                 except ValueError:
                     cli_notice("用法: /trace [generation_id]，generation_id 必须是非负整数。")
                     continue
             try:
-                report = build_trace(state.snapshot(), requested_generation)
+                report = build_trace(
+                    state.snapshot(), requested_generation,
+                    revision_id=requested_revision,
+                )
             except TraceQueryError as error:
                 cli_notice(f"Trace 查询失败：{error}")
                 continue

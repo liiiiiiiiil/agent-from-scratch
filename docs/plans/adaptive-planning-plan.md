@@ -1,7 +1,7 @@
 # 阶段七：自适应规划与重规划（Adaptive Planning & Replanning）实施计划
 
-> 状态：`v0.22` Plan Contract、`v0.23` Plan Mode & Handoff 与 `v0.24` Replanning Policy 已实现；`v0.25` 仍为后续规划
-> 当前基线：`v0.24`（Replanning Policy；`v0.23` Plan Mode & Handoff 为前一版基线）
+> 状态：`v0.22` Plan Contract、`v0.23` Plan Mode & Handoff、`v0.24` Replanning Policy 与 `v0.25` Plan Trace & Evaluation 已实现
+> 当前基线：`v0.25`（Plan Trace & Evaluation；`v0.24` Replanning Policy 为前一版基线）
 > 前置阶段：阶段五项目感知与任务编排（`v0.14`–`v0.16`）与阶段六可靠执行（`v0.17`–`v0.21`）
 > 版本范围：`v0.22`–`v0.25`
 
@@ -336,7 +336,7 @@ LoopStagnationState
 
 验收重点：retry、adjust 与 replan 的入口和计数相互独立；每次 replan 都能定位触发事实；无变化重规划、重复工具回合、无新事实的调查或执行不推进都能在各自预算内明确收口，不形成隐藏循环。
 
-### 5.4 `v0.25` Plan Trace & Evaluation（后续规划）
+### 5.4 `v0.25` Plan Trace & Evaluation（已实现）
 
 目标：只读回放一次任务的规划链：调查 → 初始计划 → 批准 → 执行 → 触发事实 → 新 revision → 验证 → 终态。
 
@@ -414,15 +414,15 @@ Planning State 与 Repair Loop 是正交状态，不能合并成一个不断扩�
 - [x] `v0.22` Plan Contract 已有独立教程、变更记录和可运行测试
 - [x] `v0.23` 已有独立教程、变更记录和可运行测试（tag 事实检查待用户手动创建 tag）
 - [x] `v0.24` 已有独立教程、变更记录和可运行测试（tag 事实检查待用户手动创建 tag）
-- [ ] `v0.25` 有独立教程、变更记录和可运行测试
-- [ ] 计划结构、步骤进度、执行事实和验证证据有单一且不同的写入来源
+- [x] `v0.25` 有独立教程、变更记录和可运行测试
+- [x] 计划结构、步骤进度、执行事实和验证证据有单一且不同的写入来源
 - [ ] 简单任务保持短路径，复杂任务可以显式进入受 Runtime 约束的 Explore → Commit → Execute 流程
 - [ ] `--plan` 在用户批准前不产生副作用，批准也不会绕过 PermissionGate
 - [ ] 所有 replan 都引用真实触发事实，并保留 parent revision 和结构差异
 - [ ] 失败触发重规划时，阶段六的 failure、generation、repair budget 和验证隔离仍然成立
 - [ ] 重规划次数和无进展提交有硬上限，超限后不会隐藏循环
 - [ ] Direct、Explore、Execute 与 Replan 共用确定性停滞护栏；重复动作、无新事实调查和无状态推进执行会先收到一次告警，再以明确 blocked 原因收口
-- [ ] Plan Trace 能回放至少一个失败—重规划—执行—验证案例，并明确标记损坏引用
+- [x] Plan Trace 能回放至少一个失败—重规划—执行—验证案例，并明确标记损坏引用
 - [ ] 默认测试套件、教程检查和阶段级 E2E 全部通过，核心运行时仍只有标准库
 - [ ] 各版本 tag 由用户手动创建后，教程事实检查通过并完成发布验收
 

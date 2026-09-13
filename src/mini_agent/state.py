@@ -249,6 +249,25 @@ class RecoveryAction:
     checkpoint_id: str | None = None
 
 
+@dataclass(frozen=True)
+class TraceEvent:
+    """One task-local ordered pointer into a saved execution fact."""
+
+    sequence_id: int
+    kind: str
+    generation_id: int
+    revision_id: int | None = None
+    record_type: str | None = None
+    record_id: int | str | None = None
+    planning_phase_before: PlanningPhase | None = None
+    planning_phase_after: PlanningPhase | None = None
+    repair_phase_before: RepairPhase | None = None
+    repair_phase_after: RepairPhase | None = None
+    stagnation_kind: str | None = None
+    stagnation_count: int | None = None
+    stagnation_fingerprint: str | None = None
+
+
 @dataclass
 class AgentState:
     task: str = ""
@@ -270,6 +289,7 @@ class AgentState:
     attempts: list[ExecutionAttempt] = field(default_factory=list)
     failures: list[FailureEvent] = field(default_factory=list)
     recovery_actions: list[RecoveryAction] = field(default_factory=list)
+    trace_events: list[TraceEvent] = field(default_factory=list)
     recovery_notice: str = ""
     _verification_generation: int = field(default=0, init=False, repr=False)
     _last_verified_generation: int = field(default=-1, init=False, repr=False)
@@ -289,6 +309,7 @@ class AgentState:
     _failure_retry_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _next_recovery: int = field(default=1, init=False, repr=False)
+    _next_trace_sequence: int = field(default=1, init=False, repr=False)
     _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _stagnation_progress_marker: str | None = field(default=None, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
@@ -425,6 +446,60 @@ class AgentState:
     def _short_hash(value: str | None) -> str:
         return (value or "")[:12] or "-"
 
+    def _append_trace_event_locked(
+        self,
+        kind: str,
+        *,
+        generation_id: int | None = None,
+        revision_id: int | None = None,
+        record_type: str | None = None,
+        record_id: int | str | None = None,
+        planning_phase_before: Any = _MISSING,
+        planning_phase_after: Any = _MISSING,
+        repair_phase_before: Any = _MISSING,
+        repair_phase_after: Any = _MISSING,
+        stagnation_kind: str | None = None,
+        stagnation_count: int | None = None,
+        stagnation_fingerprint: str | None = None,
+    ) -> TraceEvent:
+        """Append a bounded pointer event while the State lock is held."""
+        current_planning = self.planning_state.phase
+        current_repair = self._repair_phase
+
+        def phase_change(before: Any, after: Any, current: Any) -> tuple[Any, Any]:
+            if before is _MISSING and after is _MISSING:
+                return None, None
+            before_value = None if before is _MISSING else before
+            after_value = current if after is _MISSING else after
+            if before_value == after_value:
+                return None, None
+            return before_value, after_value
+
+        planning_before, planning_after = phase_change(
+            planning_phase_before, planning_phase_after, current_planning,
+        )
+        repair_before, repair_after = phase_change(
+            repair_phase_before, repair_phase_after, current_repair,
+        )
+        event = TraceEvent(
+            self._next_trace_sequence,
+            str(kind),
+            self._verification_generation if generation_id is None else generation_id,
+            revision_id,
+            record_type,
+            record_id,
+            planning_before,
+            planning_after,
+            repair_before,
+            repair_after,
+            stagnation_kind,
+            stagnation_count,
+            self._short_hash(stagnation_fingerprint) if stagnation_fingerprint is not None else None,
+        )
+        self.trace_events.append(event)
+        self._next_trace_sequence += 1
+        return event
+
     def _stagnation_kind_locked(self, repeated_round: bool,
                                 tool_names: tuple[str, ...],
                                 has_observation: bool = False) -> str:
@@ -517,6 +592,22 @@ class AgentState:
                 warning_kind=kind if warning else current.warning_kind,
                 last_reason=reason,
             )
+            if warning:
+                self._append_trace_event_locked(
+                    "stagnation_warning",
+                    revision_id=self.planning_state.active_revision_id,
+                    stagnation_kind=kind,
+                    stagnation_count=count,
+                    stagnation_fingerprint=current_fingerprint,
+                )
+            if count >= MAX_STAGNANT_ROUNDS:
+                self._append_trace_event_locked(
+                    "stagnation_blocked",
+                    revision_id=self.planning_state.active_revision_id,
+                    stagnation_kind=kind,
+                    stagnation_count=count,
+                    stagnation_fingerprint=current_fingerprint,
+                )
             return {
                 "blocked": count >= MAX_STAGNANT_ROUNDS,
                 "warning": (
@@ -805,7 +896,12 @@ class AgentState:
                     or self.planning_state.active_revision_id is not None
                     or self._repair_phase != "idle"):
                 raise PlanRejected("只有尚未提交计划的普通任务可以开始规划")
+            previous_phase = self.planning_state.phase
             self.planning_state = replace(self.planning_state, phase="exploring")
+            self._append_trace_event_locked(
+                "begin_plan",
+                planning_phase_before=previous_phase,
+            )
             return self.planning_state
 
     def cancel_planning(self) -> PlanningState:
@@ -817,7 +913,12 @@ class AgentState:
                     self.planning_state.active_trigger_id is not None or
                     self._repair_phase != "idle"):
                 raise PlanRejected("当前规划不能取消")
+            previous_phase = self.planning_state.phase
             self.planning_state = replace(self.planning_state, phase="direct")
+            self._append_trace_event_locked(
+                "cancel_planning",
+                planning_phase_before=previous_phase,
+            )
             return self.planning_state
 
     def request_replan(self, kind: Any, source_id: Any, reason: Any) -> ReplanTrigger:
@@ -899,10 +1000,19 @@ class AgentState:
             )
             self.replan_triggers.append(trigger)
             self._next_plan_trigger += 1
+            previous_phase = self.planning_state.phase
+            previous_revision_id = self.planning_state.active_revision_id
             self.planning_state = replace(
                 self.planning_state, phase="exploring",
                 active_trigger_id=trigger.trigger_id,
                 trigger_no_progress_commits=0,
+            )
+            self._append_trace_event_locked(
+                "trigger_created",
+                revision_id=previous_revision_id,
+                record_type="replan_trigger",
+                record_id=trigger.trigger_id,
+                planning_phase_before=previous_phase,
             )
             return trigger
 
@@ -923,6 +1033,8 @@ class AgentState:
             previous_reason = self.terminal_reason or None
             active_failure = self._active_failure_id
             revision_id = self.planning_state.active_revision_id
+            previous_planning_phase = self.planning_state.phase
+            previous_repair_phase = self._repair_phase
             decision = UserPlanDecision(
                 decision_id=self._next_plan_decision,
                 revision_id=revision_id,
@@ -970,6 +1082,20 @@ class AgentState:
                 current.progress_epoch + 1, 0, None, (), (), None, None,
             )
             self._stagnation_progress_marker = self._progress_marker_locked()
+            self._append_trace_event_locked(
+                "plan_decision",
+                revision_id=revision_id,
+                record_type="user_plan_decision",
+                record_id=decision.decision_id,
+                planning_phase_before=previous_planning_phase,
+                repair_phase_before=previous_repair_phase,
+            )
+            self._append_trace_event_locked(
+                "trigger_created",
+                revision_id=revision_id,
+                record_type="replan_trigger",
+                record_id=trigger.trigger_id,
+            )
             return decision
 
     def planning_gate(self, name: str, arguments: dict[str, Any],
@@ -1031,8 +1157,16 @@ class AgentState:
             )
             self.user_plan_decisions.append(record)
             self._next_plan_decision += 1
+            previous_phase = self.planning_state.phase
             if decision == "approved":
                 self.planning_state = replace(self.planning_state, phase="executing")
+                self._append_trace_event_locked(
+                    "plan_decision",
+                    revision_id=revision_id,
+                    record_type="user_plan_decision",
+                    record_id=record.decision_id,
+                    planning_phase_before=previous_phase,
+                )
             else:
                 trigger = ReplanTrigger(
                     trigger_id=self._next_plan_trigger,
@@ -1048,6 +1182,19 @@ class AgentState:
                     active_trigger_id=trigger.trigger_id,
                     trigger_no_progress_commits=0,
                 )
+                self._append_trace_event_locked(
+                    "plan_decision",
+                    revision_id=revision_id,
+                    record_type="user_plan_decision",
+                    record_id=record.decision_id,
+                    planning_phase_before=previous_phase,
+                )
+                self._append_trace_event_locked(
+                    "trigger_created",
+                    revision_id=revision_id,
+                    record_type="replan_trigger",
+                    record_id=trigger.trigger_id,
+                )
             return record
 
     def review_current_plan(self, revision_id: int) -> PlanningState:
@@ -1062,6 +1209,7 @@ class AgentState:
                     self.user_plan_decisions[-1].decision != "continue_exploring" or
                     self.user_plan_decisions[-1].revision_id != revision_id):
                 raise PlanRejected("只有继续调查的当前 revision 可以重新交付审批")
+            previous_phase = self.planning_state.phase
             trigger_id = self.planning_state.active_trigger_id
             for index, trigger in enumerate(self.replan_triggers):
                 if trigger.trigger_id == trigger_id and trigger.status == "active":
@@ -1072,6 +1220,17 @@ class AgentState:
             self.planning_state = replace(
                 self.planning_state, phase="awaiting_approval", active_trigger_id=None,
             )
+            self._append_trace_event_locked(
+                "trigger_resolved",
+                revision_id=revision_id,
+                record_type="replan_trigger",
+                record_id=trigger_id,
+            )
+            self._append_trace_event_locked(
+                "plan_review",
+                revision_id=revision_id,
+                planning_phase_before=previous_phase,
+            )
             return self.planning_state
 
     def commit_plan(self, goal: Any, constraints: Any, success_criteria: Any,
@@ -1080,6 +1239,8 @@ class AgentState:
                     trigger_id: Any = _MISSING) -> PlanRevision:
         """Validate and atomically append one immutable Plan Contract revision."""
         with self._lock:
+            previous_planning_phase = self.planning_state.phase
+            previous_repair_phase = self._repair_phase
             if self.status != "running":
                 raise PlanRejected("终态任务不能提交计划")
             if self.planning_state.phase == "awaiting_approval":
@@ -1262,10 +1423,31 @@ class AgentState:
             self.plan_revisions.append(revision)
             self._next_plan_revision += 1
             self._revision_attempt_boundaries[revision.revision_id] = len(self.attempts)
+            self._append_trace_event_locked(
+                "plan_committed",
+                generation_id=revision.generation_id,
+                revision_id=revision.revision_id,
+                record_type="plan_revision",
+                record_id=revision.revision_id,
+                planning_phase_before=previous_planning_phase,
+                planning_phase_after=(
+                    "awaiting_approval"
+                    if self.planning_state.mode == "plan_only" else "executing"
+                ),
+                repair_phase_before=previous_repair_phase,
+                repair_phase_after="idle" if resolved_trigger is not None else previous_repair_phase,
+            )
             if resolved_trigger is not None:
                 index = self.replan_triggers.index(resolved_trigger)
                 self.replan_triggers[index] = replace(
                     resolved_trigger, status="resolved", result_revision_id=revision.revision_id,
+                )
+                self._append_trace_event_locked(
+                    "trigger_resolved",
+                    generation_id=revision.generation_id,
+                    revision_id=revision.revision_id,
+                    record_type="replan_trigger",
+                    record_id=resolved_trigger.trigger_id,
                 )
             replans_used = self.planning_state.replans_used + (1 if resolved_trigger is not None else 0)
             self.planning_state = PlanningState(
@@ -1329,6 +1511,13 @@ class AgentState:
             )
             self.plan_progress_history.append(event)
             self._next_plan_progress += 1
+            self._append_trace_event_locked(
+                "plan_progress",
+                generation_id=event.generation_id,
+                revision_id=event.revision_id,
+                record_type="plan_progress",
+                record_id=event.progress_id,
+            )
             self._sync_current_goal_locked()
             return event
 
@@ -1569,6 +1758,13 @@ class AgentState:
                 redacted_arguments(requested_arguments) if isinstance(requested_arguments, dict) else None,
                 None, None, checkpoint_id)
             self.recovery_actions.append(action_record)
+            self._append_trace_event_locked(
+                "recovery_proposed",
+                generation_id=action_record.generation_id,
+                revision_id=self.planning_state.active_revision_id,
+                record_type="recovery_action",
+                record_id=action_record.recovery_id,
+            )
             if defer_generation:
                 return action_record, None, requested_arguments
             return self._activate_recovery(action_record, requested_arguments)
@@ -1607,6 +1803,13 @@ class AgentState:
             self._reserved_repair_cycles -= 1
         rejected = RecoveryAction(**{**asdict(current), "status": "rejected"})
         self.recovery_actions[index] = rejected
+        self._append_trace_event_locked(
+            "recovery_rejected",
+            generation_id=rejected.generation_id,
+            revision_id=self.planning_state.active_revision_id,
+            record_type="recovery_action",
+            record_id=rejected.recovery_id,
+        )
         self.recovery_notice = f"Recovery {current.recovery_id} rejected: {detail}."
         if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
             self._terminal("blocked", "恢复动作预算已耗尽", current.caused_by_failure_id)
@@ -1616,6 +1819,7 @@ class AgentState:
         rid = action_record.recovery_id
         action = action_record.action
         caused_by_failure_id = action_record.caused_by_failure_id
+        previous_repair_phase = self._repair_phase
         failure = next(f for f in self.failures if f.failure_id == caused_by_failure_id)
         if action in ("retry", "adjust", "rollback"):
             self._reserved_repair_cycles -= 1
@@ -1632,6 +1836,15 @@ class AgentState:
         ))
         self._active_failure_id = caused_by_failure_id
         self._enter_verification(rid)
+        self._append_trace_event_locked(
+            "recovery_activated",
+            generation_id=gid,
+            revision_id=self.planning_state.active_revision_id,
+            record_type="recovery_action",
+            record_id=rid,
+            repair_phase_before=previous_repair_phase,
+            repair_phase_after=self._repair_phase,
+        )
         self.recovery_notice = f"Recovery {rid} reserved: {action}; verify generation {gid} independently."
         if action in ("ask", "block"):
             self.status = "blocked"
@@ -1676,6 +1889,12 @@ class AgentState:
             None, None, checkpoint_id,
         )
         self.recovery_actions.append(rec)
+        self._append_trace_event_locked(
+            "recovery_rejected",
+            record_type="recovery_action",
+            record_id=rid,
+            revision_id=self.planning_state.active_revision_id,
+        )
         self.recovery_notice = f"Recovery {rid} rejected: {str(detail)[:500]}."
         if len(self.recovery_actions) >= MAX_RECOVERY_ACTIONS:
             self._terminal("blocked", "恢复动作预算已耗尽", failure_id)
@@ -1711,6 +1930,13 @@ class AgentState:
                 )
                 self.attempts.append(attempt)
                 self._original_attempt_arguments[attempt_id] = deepcopy(args)
+                self._append_trace_event_locked(
+                    "execution_result",
+                    generation_id=generation_id,
+                    revision_id=self.planning_state.active_revision_id,
+                    record_type="attempt",
+                    record_id=attempt_id,
+                )
                 return attempt
             was_terminal = self.status in ("blocked", "failed")
             reservation = result.reservation
@@ -1765,11 +1991,26 @@ class AgentState:
                 checkpoint_id=getattr(result, "checkpoint_id", None))
             self.attempts.append(attempt)
             self._original_attempt_arguments[attempt_id] = deepcopy(args)
+            attempt_revision_id = self.planning_state.active_revision_id
+            self._append_trace_event_locked(
+                "execution_result",
+                generation_id=generation_id,
+                revision_id=attempt_revision_id,
+                record_type="attempt",
+                record_id=attempt_id,
+            )
             if getattr(reservation, "recovery_id", None):
                 rid = reservation.recovery_id
                 for i, action in enumerate(self.recovery_actions):
                     if action.recovery_id == rid:
                         self.recovery_actions[i] = RecoveryAction(**{**asdict(action), "status": "executed", "result_attempt": attempt_id, "result_generation_id": generation_id})
+                        self._append_trace_event_locked(
+                            "recovery_result",
+                            generation_id=generation_id,
+                            revision_id=attempt_revision_id,
+                            record_type="recovery_action",
+                            record_id=rid,
+                        )
                         break
             if result.tool not in ("commit_plan", "update_plan_progress"):
                 self.tool_history.append({"tool": result.tool, "arguments_hash": arguments_hash,
@@ -1797,14 +2038,37 @@ class AgentState:
                     result.exit_code, result.output_excerpt, generation_id, attempt_id)
                 self.verification_evidence.append(evidence)
                 self.verification_history.append(evidence)
+                verification_history_index = len(self.verification_history) - 1
+                verification_repair_phase = self._repair_phase
                 self._last_verified_generation = generation_id if passed else -1
                 self._verification_required = not passed
+            else:
+                verification_history_index = None
+                verification_repair_phase = None
             if failure_id and category:
                 affected = (path,) if isinstance(path, str) and result.effect_class == "possible" else ()
                 self.failures.append(FailureEvent(failure_id, generation_id, phase, category,
                                                   retryable, attempt_id, affected))
-                self.errors.append(f"{result.tool}: {result.output_excerpt}")
+                if verification_history_index is not None:
+                    self._append_trace_event_locked(
+                        "verification_recorded",
+                        generation_id=generation_id,
+                        revision_id=attempt_revision_id,
+                        record_type="verification_history",
+                        record_id=verification_history_index,
+                    )
+                previous_repair_phase = self._repair_phase
                 self._enter_diagnosis(failure_id)
+                self._append_trace_event_locked(
+                    "failure_recorded",
+                    generation_id=generation_id,
+                    revision_id=attempt_revision_id,
+                    record_type="failure",
+                    record_id=failure_id,
+                    repair_phase_before=previous_repair_phase,
+                    repair_phase_after=self._repair_phase,
+                )
+                self.errors.append(f"{result.tool}: {result.output_excerpt}")
                 if not was_terminal:
                     self.recovery_notice = (f"Failure {failure_id} ({category}) requires diagnosis; "
                                             f"caused by {attempt_id} in generation {generation_id}.")
@@ -1858,6 +2122,15 @@ class AgentState:
                 passed = result.outcome == "succeeded" and result.exit_code == 0
                 if passed:
                     self._clear_repair()
+                    self._append_trace_event_locked(
+                        "verification_recorded",
+                        generation_id=generation_id,
+                        revision_id=attempt_revision_id,
+                        record_type="verification_history",
+                        record_id=verification_history_index,
+                        repair_phase_before=verification_repair_phase,
+                        repair_phase_after=self._repair_phase,
+                    )
             return attempt
 
     def _terminal(self, status: str, reason: str, failure_id: str) -> None:
@@ -1873,6 +2146,12 @@ class AgentState:
         args_copy = deepcopy(args)
         with self._lock:
             self.tool_history.append({"tool": name, "args": args_copy, "ok": ok, "brief": brief})
+            self._append_trace_event_locked(
+                "execution_result",
+                revision_id=self.planning_state.active_revision_id,
+                record_type="tool_history",
+                record_id=len(self.tool_history) - 1,
+            )
             if ok and name in ("write_file", "edit_file"):
                 path = args_copy.get("path")
                 if isinstance(path, str) and path not in self.files_changed: self.files_changed.append(path)
@@ -1889,10 +2168,26 @@ class AgentState:
                     code, str(brief), self._verification_generation)
                 self.verification_evidence.append(evidence)
                 self.verification_history.append(evidence)
+                verification_history_index = len(self.verification_history) - 1
+                previous_repair_phase = self._repair_phase
                 self._last_verified_generation = self._verification_generation if passed else -1
                 if passed:
                     self._clear_repair()
+                    self._append_trace_event_locked(
+                        "verification_recorded",
+                        revision_id=self.planning_state.active_revision_id,
+                        record_type="verification_history",
+                        record_id=verification_history_index,
+                        repair_phase_before=previous_repair_phase,
+                        repair_phase_after=self._repair_phase,
+                    )
                 else:
+                    self._append_trace_event_locked(
+                        "verification_recorded",
+                        revision_id=self.planning_state.active_revision_id,
+                        record_type="verification_history",
+                        record_id=verification_history_index,
+                    )
                     # Legacy callback integrations do not create FailureEvent
                     # records, so they cannot participate in the structured
                     # Repair Loop. Retain the historical completion signal.
@@ -1912,6 +2207,7 @@ class AgentState:
             self.verification_evidence.clear(); self.verification_history.clear()
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
+            self.trace_events.clear()
             self._verification_generation = 0; self._last_verified_generation = -1
             self._verification_required = False; self._repair_phase = "idle"
             self._active_failure_id = None; self._active_recovery_id = None
@@ -1920,10 +2216,17 @@ class AgentState:
             self._next_plan_decision = 1; self._next_plan_trigger = 1
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
+            self._next_trace_sequence = 1
             self._revision_attempt_boundaries.clear()
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()
             self.generations.append(ExecutionGeneration(0, open_reason="task_start"))
+            self._append_trace_event_locked(
+                "task_started",
+                generation_id=0,
+                planning_phase_after=self.planning_state.phase,
+                repair_phase_after=self._repair_phase,
+            )
             self._stagnation_progress_marker = self._progress_marker_locked()
 
     def reset_task(self, task: str = "") -> None:
@@ -2095,6 +2398,7 @@ class AgentState:
                 "attempts": [asdict(x) for x in self.attempts],
                 "failures": [asdict(x) for x in self.failures],
                 "recovery_actions": [asdict(x) for x in self.recovery_actions],
+                "trace_events": [asdict(x) for x in self.trace_events],
                 "checkpoints": self._checkpoint_store.snapshot() if self._checkpoint_store is not None else [],
                 "rollback_checkpoints": (
                     [checkpoint.snapshot() for checkpoint in self._checkpoint_store.available()]
