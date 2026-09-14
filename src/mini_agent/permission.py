@@ -58,6 +58,8 @@ PERMISSION_RULES = {
     "read_process": ALLOW,
     "list_processes": ALLOW,
     "wait_process": ALLOW,
+    "terminate_process": ASK,
+    "kill_process": ASK,
 }
 
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.28.0] - Background process control and task closure
+
+- Added task-owned `terminate_process` and `kill_process` with separate default-ask permissions, pre-permission ownership checks, bounded exit confirmation, and explicit still-running/already-exited results.
+- Linked confirmed control exits to unique terminal process events, control attempts, successor generations, and read-only Trace integrity checks. Old verification remains invalid after exit.
+- Added lesson 28 and synchronized the manual, navigation, and package version.
+
 ## [v0.27.0] - Process observation and bounded waiting
 
 - Added task-scoped `get_process`, `read_process`, `list_processes`, and `wait_process` tools. Reads use separate byte cursors for stdout and stderr, report buffer gaps, preserve UTF-8 boundaries, and return bounded JSON.

@@ -125,3 +125,19 @@ def make_wait_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
                     "timeout_ms": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_MS,
                                    "default": DEFAULT_WAIT_MS},
                 }, "required": ["process_id"], "additionalProperties": False}, wait_process)
+
+
+def make_control_process_tool(state: AgentState, manager: ProcessManager, *, kill: bool) -> Tool:
+    name = "kill_process" if kill else "terminate_process"
+
+    def control_process(process_id: str):
+        # The executor checks ownership before permission; repeat it here in
+        # case the task changes between admission and the handler.
+        if manager.get_owned(state.task_id, process_id) is None:
+            return _error(process_id)
+        return json.dumps(manager.control(state.task_id, process_id, kill=kill), ensure_ascii=False)
+
+    return Tool(name, ("强制结束" if kill else "请求正常终止") + "当前任务登记的后台进程并有界确认退出。",
+                {"type": "object", "properties": {"process_id": _process_id_schema()},
+                 "required": ["process_id"], "additionalProperties": False},
+                control_process, effect_class="possible")

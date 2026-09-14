@@ -1,6 +1,14 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.27**（后台进程观察与有界等待；含 v0.26 后台启动与任务边界及此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.28**（后台进程控制与任务收口；含此前可靠执行能力）。
+
+## v0.28 后台进程控制与任务收口
+
+`terminate_process(process_id)` 向当前任务登记的进程请求正常终止；`kill_process(process_id)` 强制结束。两个工具独立授权，默认均为 `ask`，且只接受任务专属 ID，不接受系统 PID。未知、过期或跨任务 ID 在权限询问前返回 `unknown_process_id`，不预留执行 attempt 或 generation。有效调用获准后按可能有副作用的工具预留 generation；计划只读阶段、待批准计划和修复阶段的限制仍然适用。
+
+正常终止和强制结束各最多等待 2 秒。`terminated` 或 `killed` 表示直接子进程、受管进程组及输出管道均已确认退出；`still_running` 表示本次未确认退出，进程仍阻止任务完成，可继续观察或尝试 `kill_process`。`already_exited` 表示调用时已自然退出。控制失败返回 `control_failed`，不会产生最终进程事件。Windows 只能确认直接子进程及管道，结果会注明无法确认任意 shell 派生进程树。
+
+前台同步点为确认的主动退出提交一条 `terminated` 或 `killed` 事件，引用启动 attempt 和控制 attempt，并开启退出后的 generation。旧验证随之失效。只有进程稳定退出、计划步骤完成、修复义务解决，并在新 generation 独立执行 `run_shell(purpose="verification")` 后，任务才能完成。进程控制不能替代诊断阶段的合法 `recover` 或 `request_replan`。
 
 ## v0.27 后台进程观察与有界等待
 
@@ -253,7 +261,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.27，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.28，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -402,7 +410,7 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
 
-`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型可用 v0.27 的观察工具查询状态和新增日志；重复空结果不算新事实。模型在仍有活动进程时只回复文本，或 `wait_process` 超时，都会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.27 不提供模型可调用的 terminate/kill 工具；任务边界清理仍由 Runtime 执行。
+`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型可用 v0.27 的观察工具查询状态和新增日志；重复空结果不算新事实。模型在仍有活动进程时只回复文本，或 `wait_process` 超时，都会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.28 提供模型可调用的 terminate_process/kill_process；任务边界清理仍由 Runtime 执行。
 
 如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
@@ -478,4 +486,4 @@ agent loop 不对 LLM 或 CLI 顶层异常做兜底；这是为了保持核心�
 `__main__.py` 已对 win32 设 `sys.stdout.reconfigure(encoding="utf-8")`。若仍乱码，PowerShell 执行 `chcp 65001` 切到 UTF-8。
 
 ### Q6：后台进程显示 awaiting_process
-这是非终态交接，表示模型已经暂停回复或 `wait_process` 超时，但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。可用 `read_process` 读取日志；v0.27 尚无模型可调用的主动终止工具，`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。
+这是非终态交接，表示模型已经暂停回复或 `wait_process` 超时，但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。可用 `read_process` 读取日志；可用 terminate_process 或 kill_process 控制当前任务的进程；`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。

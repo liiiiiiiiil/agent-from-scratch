@@ -164,6 +164,7 @@ class _ManagedProcess:
         self.stderr_ring = _ByteRing(max_stream_bytes)
         self.lock = Lock()
         self.read_lock = Lock()
+        self.control_lock = Lock()
         self.output_changed = Condition()
         self.stdout_cursor = 0
         self.stderr_cursor = 0
@@ -465,6 +466,36 @@ class ProcessManager:
         with self._lock:
             managed = self._processes.get(process_id)
         return managed if managed is not None and managed.task_id == task_id else None
+
+    def control(self, task_id: str, process_id: str, *, kill: bool) -> dict[str, Any]:
+        """Signal only a task-owned process and confirm the stable exit boundary."""
+        managed = self.get_owned(task_id, process_id)
+        if managed is None:
+            raise ValueError("未知、过期或跨任务 process_id")
+        with managed.control_lock:
+            fact = managed.refresh()
+            if fact.status != "running":
+                return {"process_id": process_id, "status": "already_exited",
+                        "exit_code": fact.exit_code}
+            sent, reason = managed._signal_group(
+                getattr(signal, "SIGKILL", signal.SIGTERM) if kill else signal.SIGTERM
+            )
+            if not sent:
+                return {"process_id": process_id, "status": "error",
+                        "error_kind": "control_failed", "message": reason}
+            deadline = time.monotonic() + self.grace_seconds
+            while True:
+                fact = managed.refresh()
+                if fact.status != "running":
+                    return {"process_id": process_id,
+                            "status": "killed" if kill else "terminated",
+                            "exit_code": fact.exit_code,
+                            "reason": reason + ("; 无法确认任意 shell 派生进程树"
+                                               if os.name == "nt" else "")}
+                if time.monotonic() >= deadline:
+                    return {"process_id": process_id, "status": "still_running",
+                            "reason": reason}
+                time.sleep(min(0.01, deadline - time.monotonic()))
 
     @staticmethod
     def _stream_fragment(ring: _ByteRing, cursor: int, char_limit: int,

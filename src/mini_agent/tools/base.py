@@ -323,6 +323,15 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
+        if name in {"terminate_process", "kill_process"} and state is not None:
+            manager = getattr(state, "_process_manager", None)
+            if manager is None or manager.get_owned(state.task_id, normalized["process_id"]) is None:
+                output = json.dumps({"status": "error", "process_id": normalized["process_id"],
+                                     "error_kind": "unknown_process_id",
+                                     "message": "未知、过期或跨任务 process_id"}, ensure_ascii=False)
+                return ExecutionResult(name, normalized, "not_checked", False, "invalid", 0,
+                                       effect_class, output, _brief(output),
+                                       error_kind="unknown_process_id")
         if state is not None and hasattr(state, "planning_gate"):
             phase_error = state.planning_gate(name, normalized, effect_class)
             if phase_error:
@@ -475,13 +484,15 @@ class ToolExecutor:
         error_kind = None
         if isinstance(output, str) and output.startswith("[timeout]"):
             outcome, error_kind = "timeout", "timeout"
-        elif name in {"get_process", "read_process", "list_processes", "wait_process"}:
+        elif name in {"get_process", "read_process", "list_processes", "wait_process",
+                      "terminate_process", "kill_process"}:
             try:
                 process_result = json.loads(output) if isinstance(output, str) else {}
             except ValueError:
                 process_result = {}
             if isinstance(process_result, dict) and process_result.get("status") == "error":
-                outcome, error_kind = "invalid", str(process_result.get("error_kind", "process_error"))
+                outcome, error_kind = ("failed" if name in {"terminate_process", "kill_process"}
+                                       and process_result.get("error_kind") == "control_failed" else "invalid"), str(process_result.get("error_kind", "process_error"))
         elif name == "run_shell" and isinstance(output, str):
             match = re.match(r"\[exit=(-?\d+)\]", output)
             if match:

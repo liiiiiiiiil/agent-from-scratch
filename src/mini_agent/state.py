@@ -366,6 +366,7 @@ class AgentState:
     _next_trace_sequence: int = field(default=1, init=False, repr=False)
     _next_task_id: int = field(default=1, init=False, repr=False)
     _next_process_event: int = field(default=1, init=False, repr=False)
+    _pending_process_controls: dict[str, tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
     _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _stagnation_progress_marker: str | None = field(default=None, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
@@ -1719,16 +1720,21 @@ class AgentState:
                     continue
                 event_id = f"pe-{self._next_process_event}"
                 self._next_process_event += 1
-                event_kind: ProcessEventKind = "exited" if status == "exited" else "failed"
+                control = self._pending_process_controls.pop(process_id, None)
+                event_kind: ProcessEventKind = (control[0] if control is not None else
+                                                "exited" if status == "exited" else "failed")
                 generation_id = self._verification_generation
                 event = ProcessEvent(
                     event_id, process_id, self.task_id, event_kind, generation_id,
                     record.start_attempt_id, stdout_offset, stderr_offset,
-                    getattr(fact, "exit_code", None), reason="natural_exit",
+                    getattr(fact, "exit_code", None),
+                    caused_by_control_attempt_id=control[1] if control else None,
+                    reason="controlled_exit" if control else "natural_exit",
                 )
                 self.process_events.append(event)
                 self.process_records[index] = replace(
-                    record, status=status, ended_at=getattr(fact, "ended_at", None),
+                    record, status="terminated" if control else status,
+                    ended_at=getattr(fact, "ended_at", None),
                     exit_code=getattr(fact, "exit_code", None),
                     stdout_offset=stdout_offset, stderr_offset=stderr_offset,
                     terminal_event_id=event_id,
@@ -2346,6 +2352,17 @@ class AgentState:
             )
             if result.tool == "start_process" and result.outcome == "succeeded":
                 self._register_process_start_locked(result, attempt)
+            if result.tool in ("terminate_process", "kill_process") and result.outcome == "succeeded":
+                try:
+                    control_output = json.loads(result.output)
+                except (TypeError, ValueError):
+                    control_output = {}
+                expected = "killed" if result.tool == "kill_process" else "terminated"
+                process_id = args.get("process_id")
+                if (control_output.get("status") == expected and isinstance(process_id, str)
+                        and any(item.process_id == process_id and item.task_id == self.task_id
+                                and item.terminal_event_id is None for item in self.process_records)):
+                    self._pending_process_controls[process_id] = (expected, attempt_id)
             if getattr(reservation, "recovery_id", None):
                 rid = reservation.recovery_id
                 for i, action in enumerate(self.recovery_actions):
@@ -2568,6 +2585,7 @@ class AgentState:
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             self._next_trace_sequence = 1
             self._next_process_event = 1
+            self._pending_process_controls.clear()
             self._revision_attempt_boundaries.clear()
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()

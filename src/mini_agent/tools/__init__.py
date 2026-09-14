@@ -12,7 +12,7 @@ from mini_agent.tools.file import (
 from mini_agent.tools.shell import run_shell_tool
 from mini_agent.tools.process import (make_start_process_tool, make_get_process_tool,
                                       make_list_processes_tool, make_read_process_tool,
-                                      make_wait_process_tool)
+                                      make_wait_process_tool, make_control_process_tool)
 from mini_agent.processes import ProcessManager
 from mini_agent.permission import PermissionGate
 from mini_agent.state import AgentState
@@ -45,6 +45,8 @@ def create_registry(state: AgentState | None = None,
         result.register(make_read_process_tool(state, process_manager))
         result.register(make_list_processes_tool(state, process_manager))
         result.register(make_wait_process_tool(state, process_manager))
+        result.register(make_control_process_tool(state, process_manager, kill=False))
+        result.register(make_control_process_tool(state, process_manager, kill=True))
         result.register(make_begin_plan_tool(state))
         result.register(make_cancel_planning_tool(state))
         result.register(make_commit_plan_tool(state))

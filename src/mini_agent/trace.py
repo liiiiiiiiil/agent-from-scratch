@@ -514,6 +514,29 @@ def _build_edges(
     trace_events = trace_events or []
     process_events = process_events or {}
 
+    for event_id, event in process_events.items():
+        start_id = event.get("start_attempt_id")
+        start = _mapping_get(attempts, start_id)
+        edges.append(_edge(
+            "process_start", _node("attempt", start_id), _node("process_event", event_id),
+            event.get("generation_id"),
+            start is not None and start.get("tool") == "start_process",
+            None if start is not None and start.get("tool") == "start_process"
+            else "启动 attempt 不可确认",
+        ))
+        control_id = event.get("caused_by_control_attempt_id")
+        if event.get("kind") in {"terminated", "killed"}:
+            control = _mapping_get(attempts, control_id)
+            expected = "terminate_process" if event.get("kind") == "terminated" else "kill_process"
+            resolved = (control is not None and control.get("tool") == expected
+                        and control.get("outcome") == "succeeded"
+                        and control.get("generation_id") == event.get("generation_id"))
+            edges.append(_edge(
+                "process_control", _node("attempt", control_id),
+                _node("process_event", event_id), event.get("generation_id"), resolved,
+                None if resolved else "控制 attempt 不可确认",
+            ))
+
     for gid, generation in generation_records.items():
         opener_fields = [
             ("attempt", "opened_by_attempt_id"),
@@ -574,7 +597,7 @@ def _build_edges(
                     resolved = False
                     detail = "open_reason 与 opener 类型不一致"
                 elif (target.get("generation_id") != gid - 1
-                      or target.get("kind") not in {"exited", "failed"}):
+                      or target.get("kind") not in {"exited", "failed", "terminated", "killed"}):
                     _add_issue(issues, f"generation {gid} 的进程退出事件未打开该 generation")
                     resolved = False
                     detail = "进程退出事件的 generation 不一致"
@@ -1216,6 +1239,18 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         if not _valid_generation(value) or value not in generation_map:
             _add_issue(issues, f"{owner}.generation_id 引用不存在或非法: {value}")
         _ref_issue(issues, owner, "start_attempt_id", event.get("start_attempt_id"), attempt_map)
+        control_id = event.get("caused_by_control_attempt_id")
+        if event.get("kind") in {"terminated", "killed"}:
+            control = attempt_map.get(control_id)
+            expected_tool = ("terminate_process" if event.get("kind") == "terminated"
+                             else "kill_process")
+            if (control is None or control.get("tool") != expected_tool
+                    or control.get("outcome") != "succeeded"
+                    or control.get("generation_id") != event.get("generation_id")
+                    or control.get("redacted_arguments", {}).get("process_id") != event.get("process_id")):
+                _add_issue(issues, f"{owner}.caused_by_control_attempt_id 引用不一致")
+        elif control_id is not None:
+            _add_issue(issues, f"{owner} 非控制事件不能引用控制 attempt")
         if event.get("kind") == "started":
             process_id = event.get("process_id")
             started_events[process_id] = started_events.get(process_id, 0) + 1

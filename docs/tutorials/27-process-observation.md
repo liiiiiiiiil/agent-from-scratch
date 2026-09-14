@@ -1,6 +1,6 @@
 # 第 27 课：观察后台进程
 
-上一课：[后台进程启动与任务边界](26-background-process-boundaries.md) · [教程总览](README.md) · 下一课：进程控制（规划中）
+上一课：[后台进程启动与任务边界](26-background-process-boundaries.md) · [教程总览](README.md) · 下一课：[控制后台进程](28-process-control.md)
 
 代码快照：`v0.27` · 相邻差异：`v0.26..v0.27` · 示例命令环境：Bash/zsh
 
