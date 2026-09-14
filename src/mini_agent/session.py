@@ -1,8 +1,8 @@
-"""Private, atomic v0.30 session storage.
+"""Private, atomic session storage.
 
-This module only validates and stores a safe-point representation.  It does
-not restore an AgentState, rebuild a ContextManager, call an LLM, or execute
-tools; those are deliberately deferred to v0.31.
+The v0.31 format adds a bounded workspace manifest.  Loading remains a
+side-effect-free validation operation; runtime construction and resume
+admission live in :mod:`mini_agent.resume`.
 """
 from __future__ import annotations
 
@@ -23,9 +23,14 @@ from mini_agent.config import MAX_SESSION_FILE_BYTES
 from mini_agent.state import AgentState, SessionExportError
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 _INTEGRITY_ALGORITHM = "sha256"
+_MANIFEST_FORMAT = "mini_agent.workspace_manifest"
+_MANIFEST_FORMAT_VERSION = 1
+_MAX_MANIFEST_ENTRIES = 4096
+_MAX_MANIFEST_DIRECTORY_ENTRIES = 2048
 
 
 class SessionError(RuntimeError):
@@ -75,6 +80,231 @@ def _new_session_id() -> str:
     # URL-safe random bytes avoid predictable task-local counters and are
     # directly safe to use as a filename component.
     return secrets.token_urlsafe(24)
+
+
+def _relative_workspace_path(root: str, value: Any) -> tuple[str | None, str | None]:
+    """Keep the task's path spelling and reject links below the workspace."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None, "路径必须是非空字符串且不含空字符"
+    try:
+        candidate = os.path.abspath(value if os.path.isabs(value) else os.path.join(root, value))
+        if os.path.commonpath((root, candidate)) != root:
+            return None, "路径位于工作区之外"
+        relative = os.path.relpath(candidate, root)
+        current = root
+        for part in [] if relative == os.curdir else relative.split(os.sep):
+            current = os.path.join(current, part)
+            try:
+                if stat.S_ISLNK(os.lstat(current).st_mode):
+                    return None, "路径包含符号链接，不能建立恢复基线"
+            except FileNotFoundError:
+                break
+        return "." if relative == os.curdir else relative, None
+    except (OSError, TypeError, ValueError) as error:
+        return None, f"路径无法规范化: {type(error).__name__}"
+
+
+def _manifest_kind(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "special"
+
+
+def _hash_file(path: str) -> tuple[str | None, str | None]:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest(), None
+    except (OSError, ValueError) as error:
+        return None, f"文件内容无法检查: {type(error).__name__}"
+
+
+def _inspect_path(root: str, relative: str, *, include_children: bool = True) -> dict[str, Any]:
+    absolute = os.path.join(root, relative) if relative != "." else root
+    entry: dict[str, Any] = {"path": relative}
+    try:
+        info = os.lstat(absolute)
+    except FileNotFoundError:
+        entry.update({"kind": "absent", "available": True})
+        return entry
+    except OSError as error:
+        entry.update({"kind": "unavailable", "available": False,
+                      "reason": f"路径无法检查: {type(error).__name__}"})
+        return entry
+
+    kind = _manifest_kind(info.st_mode)
+    entry.update({"kind": kind, "available": True})
+    if kind == "file":
+        digest, reason = _hash_file(absolute)
+        if reason:
+            entry.update({"available": False, "reason": reason})
+        else:
+            entry["sha256"] = digest
+        return entry
+    if kind == "symlink":
+        entry.update({"available": False, "reason": "符号链接不作为恢复基线"})
+        return entry
+    if kind != "directory" or not include_children:
+        if kind == "special":
+            entry.update({"available": False, "reason": "特殊文件类型不作为恢复基线"})
+        return entry
+
+    try:
+        with os.scandir(absolute) as iterator:
+            children = sorted(iterator, key=lambda item: item.name)
+    except OSError as error:
+        entry.update({"available": False, "reason": f"目录条目无法检查: {type(error).__name__}"})
+        return entry
+    if len(children) > _MAX_MANIFEST_DIRECTORY_ENTRIES:
+        entry.update({"available": False,
+                      "reason": f"目录条目超过 {_MAX_MANIFEST_DIRECTORY_ENTRIES} 项上限"})
+        return entry
+    child_records: list[dict[str, Any]] = []
+    for child in children:
+        child_record: dict[str, Any] = {"name": child.name}
+        try:
+            child_info = child.stat(follow_symlinks=False)
+            child_kind = _manifest_kind(child_info.st_mode)
+            child_record["kind"] = child_kind
+            child_record["available"] = True
+            if child_kind == "file":
+                child_digest, reason = _hash_file(child.path)
+                if reason:
+                    entry.update({"available": False, "reason": reason})
+                    child_record["available"] = False
+                    child_record["reason"] = reason
+                else:
+                    child_record["sha256"] = child_digest
+            elif child_kind == "symlink":
+                child_record["available"] = False
+                child_record["reason"] = "符号链接不作为恢复基线"
+                entry["available"] = False
+                entry.setdefault("reason", "目录包含不可检查的符号链接")
+            else:
+                child_record["available"] = True
+        except OSError as error:
+            child_record.update({"kind": "unavailable", "available": False,
+                                 "reason": f"目录条目无法检查: {type(error).__name__}"})
+            entry.update({"available": False, "reason": child_record["reason"]})
+        child_records.append(child_record)
+    entry["entries"] = child_records
+    return entry
+
+
+def _collect_manifest_paths(state: dict[str, Any]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Return (path, source) candidates from structured task facts.
+
+    Shell command text is intentionally never inspected.  A grep search
+    directory is expanded at save time, including files with no matches.
+    """
+    candidates: list[tuple[str, str]] = []
+    issues: list[str] = []
+
+    def add(value: Any, source: str) -> None:
+        if isinstance(value, str) and value:
+            if value == "<unavailable>":
+                issues.append(f"{source} 路径不可用")
+                return
+            candidates.append((value, source))
+        elif value is not None:
+            issues.append(f"{source} 路径无法建立清单")
+
+    private = state.get("private", {})
+    originals = private.get("original_attempt_arguments", []) if isinstance(private, dict) else []
+    for item in originals:
+        if not isinstance(item, dict) or not isinstance(item.get("arguments"), dict):
+            continue
+        arguments = item["arguments"]
+        tool = next((attempt.get("tool") for attempt in state.get("attempts", [])
+                     if isinstance(attempt, dict) and attempt.get("attempt_id") == item.get("attempt_id")), "")
+        if tool in {"read_file", "write_file", "edit_file", "list_dir"}:
+            add(arguments.get("path", ".") if tool == "list_dir" else arguments.get("path"), tool)
+        elif tool == "grep":
+            add(arguments.get("path", "."), "grep directory")
+        elif tool == "rollback_checkpoint":
+            checkpoint_id = arguments.get("checkpoint_id")
+            for checkpoint in state.get("checkpoint_metadata", []):
+                if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_id") == checkpoint_id:
+                    add(checkpoint.get("path"), "checkpoint")
+
+    for path in state.get("files_changed", []):
+        add(path, "files_changed")
+    for failure in state.get("failures", []):
+        if isinstance(failure, dict):
+            for path in failure.get("affected_files", []) or []:
+                add(path, "failure")
+    for checkpoint in state.get("checkpoint_metadata", []):
+        if isinstance(checkpoint, dict):
+            add(checkpoint.get("path"), "checkpoint")
+    return candidates, issues
+
+
+def _expand_grep_directory(root: str, relative: str,
+                           entries: dict[str, dict[str, Any]], issues: list[str]) -> None:
+    """Snapshot every directory in a recursive grep scope, within one bound."""
+    pending = [relative]
+    observed = 0
+    while pending:
+        current = pending.pop()
+        absolute = os.path.join(root, current)
+        try:
+            with os.scandir(absolute) as iterator:
+                children = list(iterator)
+        except OSError as error:
+            issues.append(f"grep directory {current} 无法遍历: {type(error).__name__}")
+            return
+        observed += len(children)
+        if observed > _MAX_MANIFEST_ENTRIES:
+            issues.append(f"grep 搜索范围超过 {_MAX_MANIFEST_ENTRIES} 项上限")
+            return
+        for child in children:
+            try:
+                if stat.S_ISDIR(child.stat(follow_symlinks=False).st_mode):
+                    child_relative = os.path.relpath(child.path, root)
+                    if child_relative not in entries:
+                        entries[child_relative] = _inspect_path(root, child_relative)
+                    pending.append(child_relative)
+            except OSError as error:
+                issues.append(f"grep directory {current} 条目无法检查: {type(error).__name__}")
+                return
+
+
+def build_workspace_manifest(state: dict[str, Any], workspace_root: str | os.PathLike[str] | None) -> dict[str, Any]:
+    """Build a deterministic, bounded content baseline for a v0.31 save."""
+    root = _normal_workspace_root(workspace_root)
+    candidates, issues = _collect_manifest_paths(state)
+    entries: dict[str, dict[str, Any]] = {}
+    for value, source in candidates:
+        relative, error = _relative_workspace_path(root, value)
+        if error:
+            issues.append(f"{source}: {error}")
+            continue
+        assert relative is not None
+        if relative not in entries:
+            entries[relative] = _inspect_path(root, relative)
+        if source == "grep directory" and entries[relative].get("kind") == "directory":
+            _expand_grep_directory(root, relative, entries, issues)
+    if len(entries) > _MAX_MANIFEST_ENTRIES:
+        issues.append(f"工作区清单超过 {_MAX_MANIFEST_ENTRIES} 项上限")
+    normalized_entries = [entries[key] for key in sorted(entries)[:_MAX_MANIFEST_ENTRIES]]
+    for entry in normalized_entries:
+        if not entry.get("available", False):
+            issues.append(f"无法检查路径: {entry.get('path', '<unknown>')}")
+    return {
+        "format": _MANIFEST_FORMAT,
+        "format_version": _MANIFEST_FORMAT_VERSION,
+        "root": root,
+        "complete": not issues,
+        "recoverable": not issues,
+        "issues": sorted(set(issues)),
+        "entries": normalized_entries,
+    }
 
 
 def _validate_context_export(payload: Any) -> None:
@@ -217,17 +447,25 @@ class SessionStore:
 
     def _make_envelope(self, session_id: str, state: dict[str, Any], context: dict[str, Any],
                        workspace_root: str | os.PathLike[str] | None,
-                       handoff_status: str, save_kind: str) -> dict[str, Any]:
+                       handoff_status: str, save_kind: str,
+                       *, session_generation: int = 1,
+                       workspace_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
         self._check_id(session_id)
         if handoff_status not in {"active", "clean"}:
             raise SessionValidationError("handoff_status 必须是 active 或 clean")
         if save_kind not in {"safe_point", "tool_boundary"}:
             raise SessionValidationError("save_kind 无效")
+        if (isinstance(session_generation, bool) or not isinstance(session_generation, int)
+                or session_generation < 1):
+            raise SessionValidationError("session_generation 无效")
         try:
             AgentState.validate_session_export(state)
         except (SessionExportError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"State 导出校验失败: {error}") from error
         _validate_context_export(context)
+        manifest = workspace_manifest or build_workspace_manifest(state, workspace_root)
+        if not isinstance(manifest, dict):
+            raise SessionValidationError("workspace_manifest 无效")
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "session_id": session_id,
@@ -236,6 +474,8 @@ class SessionStore:
             "saved_at": self._saved_at(),
             "save_kind": save_kind,
             "handoff_status": handoff_status,
+            "session_generation": session_generation,
+            "workspace_manifest": deepcopy(manifest),
             "state": deepcopy(state),
             "context": deepcopy(context),
         }
@@ -298,12 +538,26 @@ class SessionStore:
             context_export = context.export_session() if hasattr(context, "export_session") else deepcopy(context)
         except (SessionExportError, SessionValidationError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(str(error)) from error
-        envelope = self._make_envelope(
-            selected_id, state_export, context_export, workspace_root,
-            handoff_status, save_kind,
-        )
+        manifest = build_workspace_manifest(state_export, workspace_root)
         lock_fd = self._acquire_lock(selected_id)
         try:
+            previous_generation = 0
+            target = self.path_for(selected_id)
+            if target.exists():
+                try:
+                    previous = self.load(selected_id)
+                    previous_generation = int(previous.get("session_generation", 1))
+                except SessionError:
+                    # A caller may intentionally replace a legacy diagnostic
+                    # file after acquiring its lock.  The new v2 file starts a
+                    # fresh local commit sequence.
+                    previous_generation = 0
+            envelope = self._make_envelope(
+                selected_id, state_export, context_export, workspace_root,
+                handoff_status, save_kind,
+                session_generation=previous_generation + 1,
+                workspace_manifest=manifest,
+            )
             self._write_atomic(selected_id, envelope)
         except BaseException:
             try:
@@ -321,6 +575,73 @@ class SessionStore:
                 f"session 文件已替换，但独占锁清理失败: {type(error).__name__}",
             ) from error
         return deepcopy(envelope)
+
+    def claim_resume(self, session_id: str, expected: dict[str, Any], *,
+                     state_export: dict[str, Any] | None = None,
+                     context_export: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Atomically claim one validated clean v2 commit for this runtime.
+
+        The expected integrity digest is checked again while the exclusive lock
+        is held.  A race or an uncertain commit never returns a runnable
+        object to the caller.
+        """
+        selected_id = self._check_id(session_id)
+        if not isinstance(expected, dict) or expected.get("session_id") != selected_id:
+            raise SessionValidationError("待恢复 session 提交不匹配")
+        if state_export is not None:
+            try:
+                AgentState.validate_session_export(state_export)
+            except (SessionExportError, KeyError, TypeError, ValueError) as error:
+                raise SessionValidationError(f"恢复后的 State 导出校验失败: {error}") from error
+        if context_export is not None:
+            _validate_context_export(context_export)
+        lock_fd = self._acquire_lock(selected_id)
+        try:
+            current = self.load(selected_id)
+            if current.get("schema_version") != SCHEMA_VERSION:
+                raise SessionValidationError("待恢复 session 不是 schema 2")
+            if current.get("handoff_status") != "clean" or current.get("save_kind") != "safe_point":
+                raise SessionValidationError("session 不是可恢复的 clean safe_point")
+            if current.get("integrity") != expected.get("integrity"):
+                raise SessionValidationError("session 在恢复提交前发生变化")
+            # A candidate may wait for user or filesystem work before claim.
+            # The session lock serializes writers, but the workspace can still
+            # change independently during that interval.
+            from mini_agent.resume import check_workspace_manifest
+            workspace_issues = check_workspace_manifest(current, current["workspace_root"])
+            if workspace_issues:
+                raise SessionValidationError(
+                    "恢复占用前工作区检查失败：" + "；".join(workspace_issues[:20])
+                )
+            active = deepcopy(current)
+            active["handoff_status"] = "active"
+            active["session_generation"] = int(current.get("session_generation", 1)) + 1
+            active["saved_at"] = self._saved_at()
+            if state_export is not None:
+                active["state"] = deepcopy(state_export)
+            if context_export is not None:
+                active["context"] = deepcopy(context_export)
+            without_integrity = {key: value for key, value in active.items() if key != "integrity"}
+            active["integrity"] = {
+                "algorithm": _INTEGRITY_ALGORITHM,
+                "sha256": hashlib.sha256(_canonical_bytes(without_integrity)).hexdigest(),
+            }
+            self._validate_envelope(active, selected_id)
+            self._write_atomic(selected_id, active)
+        except BaseException:
+            try:
+                self._release_lock(selected_id, lock_fd)
+            except OSError:
+                pass
+            raise
+        try:
+            self._release_lock(selected_id, lock_fd)
+        except OSError as error:
+            raise SessionCommitUncertainError(
+                selected_id,
+                f"恢复占用已写入，但独占锁清理失败: {type(error).__name__}",
+            ) from error
+        return deepcopy(active)
 
     def create(self, state: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
         """Create a new random-ID session; equivalent to ``save(None, ...)``."""
@@ -367,10 +688,24 @@ class SessionStore:
         return self.load(session_id)
 
     def _validate_envelope(self, envelope: dict[str, Any], requested_id: str) -> None:
-        expected_fields = {
-            "schema_version", "session_id", "writer_version", "workspace_root",
-            "saved_at", "save_kind", "handoff_status", "state", "context", "integrity",
-        }
+        schema_version = envelope.get("schema_version")
+        if (isinstance(schema_version, bool)
+                or not isinstance(schema_version, int)
+                or schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}):
+            raise SessionValidationError("未知或不支持的 session schema_version")
+        if schema_version == LEGACY_SCHEMA_VERSION:
+            expected_fields = {
+                "schema_version", "session_id", "writer_version", "workspace_root",
+                "saved_at", "save_kind", "handoff_status", "state", "context", "integrity",
+            }
+        elif schema_version == SCHEMA_VERSION:
+            expected_fields = {
+                "schema_version", "session_id", "writer_version", "workspace_root",
+                "saved_at", "save_kind", "handoff_status", "session_generation",
+                "workspace_manifest", "state", "context", "integrity",
+            }
+        else:
+            expected_fields = {"schema_version"}
         missing = sorted(expected_fields - set(envelope))
         unknown = sorted(set(envelope) - expected_fields)
         if missing or unknown:
@@ -382,8 +717,6 @@ class SessionStore:
             if unknown:
                 detail.append("未知 " + ", ".join(unknown))
             raise SessionValidationError("session 字段无效: " + "; ".join(detail))
-        if envelope.get("schema_version") != SCHEMA_VERSION:
-            raise SessionValidationError("未知或不支持的 session schema_version")
         if envelope.get("session_id") != requested_id:
             raise SessionValidationError("session_id 与文件名不一致")
         if not isinstance(envelope.get("writer_version"), str) or not envelope["writer_version"]:
@@ -392,6 +725,11 @@ class SessionStore:
             raise SessionValidationError("handoff_status 无效")
         if envelope.get("save_kind") not in {"safe_point", "tool_boundary"}:
             raise SessionValidationError("save_kind 无效")
+        if schema_version == SCHEMA_VERSION:
+            generation = envelope.get("session_generation")
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+                raise SessionValidationError("session_generation 无效")
+            self._validate_workspace_manifest(envelope.get("workspace_manifest"), envelope["workspace_root"])
         if not isinstance(envelope.get("saved_at"), str) or not envelope["saved_at"].endswith("Z"):
             raise SessionValidationError("saved_at 无效")
         if envelope.get("workspace_root") != _normal_workspace_root(envelope.get("workspace_root")):
@@ -416,3 +754,65 @@ class SessionStore:
             raise
         except (KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"Context 引用校验失败: {error}") from error
+
+    @staticmethod
+    def _validate_workspace_manifest(manifest: Any, workspace_root: str) -> None:
+        if not isinstance(manifest, dict):
+            raise SessionValidationError("workspace_manifest 必须是 object")
+        expected = {"format", "format_version", "root", "complete", "recoverable", "issues", "entries"}
+        if set(manifest) != expected:
+            raise SessionValidationError("workspace_manifest 字段无效")
+        if (manifest.get("format") != _MANIFEST_FORMAT
+                or isinstance(manifest.get("format_version"), bool)
+                or manifest.get("format_version") != _MANIFEST_FORMAT_VERSION):
+            raise SessionValidationError("未知或不支持的 workspace_manifest 版本")
+        if manifest.get("root") != _normal_workspace_root(workspace_root):
+            raise SessionValidationError("workspace_manifest 根路径不一致")
+        if not isinstance(manifest.get("complete"), bool) or not isinstance(manifest.get("recoverable"), bool):
+            raise SessionValidationError("workspace_manifest 可用性字段无效")
+        if not isinstance(manifest.get("issues"), list) or any(not isinstance(item, str) for item in manifest["issues"]):
+            raise SessionValidationError("workspace_manifest issues 无效")
+        entries = manifest.get("entries")
+        if not isinstance(entries, list) or len(entries) > _MAX_MANIFEST_ENTRIES:
+            raise SessionValidationError("workspace_manifest entries 无效")
+        paths: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise SessionValidationError("workspace_manifest entry 无效")
+            path = entry["path"]
+            if (not path or "\x00" in path or os.path.isabs(path)
+                    or (path != "." and os.path.normpath(path) in {os.curdir, os.pardir})
+                    or os.path.normpath(path).startswith(os.pardir + os.sep)):
+                raise SessionValidationError("workspace_manifest 路径必须位于工作区内")
+            if path in paths:
+                raise SessionValidationError("workspace_manifest 路径重复")
+            paths.add(path)
+            if entry.get("kind") not in {"file", "directory", "absent", "symlink", "special", "unavailable"}:
+                raise SessionValidationError("workspace_manifest 路径类型无效")
+            if not isinstance(entry.get("available"), bool):
+                raise SessionValidationError("workspace_manifest entry 可用性无效")
+            if entry.get("kind") == "file" and entry.get("available") and not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))):
+                raise SessionValidationError("workspace_manifest 文件哈希无效")
+            if entry.get("kind") != "directory" and "entries" in entry:
+                raise SessionValidationError("workspace_manifest 非目录不能包含 entries")
+            child_entries = entry.get("entries")
+            if child_entries is not None:
+                if (entry.get("kind") != "directory" or not isinstance(child_entries, list)
+                        or len(child_entries) > _MAX_MANIFEST_DIRECTORY_ENTRIES):
+                    raise SessionValidationError("workspace_manifest 目录 entries 无效")
+                child_names: set[str] = set()
+                for child in child_entries:
+                    if not isinstance(child, dict) or not isinstance(child.get("name"), str):
+                        raise SessionValidationError("workspace_manifest 目录条目无效")
+                    name = child["name"]
+                    if (not name or name in child_names or name in {os.curdir, os.pardir}
+                            or os.path.basename(name) != name or "\x00" in name):
+                        raise SessionValidationError("workspace_manifest 目录条目名称无效")
+                    child_names.add(name)
+                    if child.get("kind") not in {"file", "directory", "symlink", "special", "unavailable"}:
+                        raise SessionValidationError("workspace_manifest 目录条目类型无效")
+                    if not isinstance(child.get("available"), bool):
+                        raise SessionValidationError("workspace_manifest 目录条目可用性无效")
+                    if (child.get("kind") == "file" and child.get("available")
+                            and not re.fullmatch(r"[0-9a-f]{64}", str(child.get("sha256", "")))):
+                        raise SessionValidationError("workspace_manifest 目录文件哈希无效")

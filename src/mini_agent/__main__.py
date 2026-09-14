@@ -21,6 +21,7 @@ from mini_agent.tools.base import ToolExecutor
 from mini_agent.output import TerminalOutput
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
 from mini_agent.processes import ProcessManager
+from mini_agent.resume import ResumeError, prepare_resume
 from mini_agent.session import SessionCommitUncertainError, SessionError, SessionStore
 
 
@@ -117,35 +118,65 @@ def main():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
-    state = AgentState()
-    process_manager = ProcessManager()
-    run_registry = create_registry(state, process_manager=process_manager)
-    registry = run_registry
-    instructions = InstructionLoader(os.getcwd()).load()
-    history = []
-    system_prompt = build_system_prompt(project_instructions=instructions) if instructions else build_system_prompt()
-    protected_messages = [{
-        "role": "system",
-        "content": system_prompt,
-    }]
-    context = ContextManager(state, history)
-    context.protected_messages = protected_messages
-    # Kept as a compatibility observer for callers using ToolExecutor.execute().
-    # The agent loop's structured path suppresses this legacy callback.
-    tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
+    argv = sys.argv[1:]
     input_session = InputSession()
     cli_output = TerminalOutput(OUTPUT_MODE)
     session_store = None
     session_id = None
     clean_shutdown = False
-    argv = sys.argv[1:]
-    if argv and argv[0] == "--plan":
+    resumed = False
+    if argv and argv[0] == "--resume":
+        if len(argv) != 2 or not argv[1].strip():
+            print("用法: python -m mini_agent --resume <session_id>")
+            return
+        session_id = argv[1]
+        try:
+            session_store = SessionStore()
+            candidate = prepare_resume(session_store, session_id, os.getcwd())
+            runtime = candidate.claim()
+        except SessionCommitUncertainError as error:
+            print(
+                f"会话提交状态未确认（session_id={error.session_id}）："
+                f"{_single_line_notice(error, 500)}；请检查磁盘文件和独占锁。"
+            )
+            return
+        except (SessionError, ResumeError, ValueError) as error:
+            print(f"会话恢复失败：{_single_line_notice(error, 500)}")
+            return
+        state = runtime.state
+        context = runtime.context
+        run_registry = runtime.registry
+        process_manager = runtime.process_manager
+        tool_executor = runtime.tool_executor
+        protected_messages = runtime.protected_messages
+        registry = run_registry
+        resumed = True
+        first_task = None
+        first_mode = "auto"
+    else:
+        state = AgentState()
+        process_manager = ProcessManager()
+        run_registry = create_registry(state, process_manager=process_manager)
+        registry = run_registry
+        instructions = InstructionLoader(os.getcwd()).load()
+        history = []
+        system_prompt = build_system_prompt(project_instructions=instructions) if instructions else build_system_prompt()
+        protected_messages = [{
+            "role": "system",
+            "content": system_prompt,
+        }]
+        context = ContextManager(state, history)
+        context.protected_messages = protected_messages
+        # Kept as a compatibility observer for callers using ToolExecutor.execute().
+        # The agent loop's structured path suppresses this legacy callback.
+        tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
+    if not resumed and argv and argv[0] == "--plan":
         if len(argv) != 2 or not argv[1].strip():
             print('用法: python -m mini_agent --plan "<任务>"')
             return
         first_task = argv[1]
         first_mode = "plan_only"
-    else:
+    elif not resumed:
         first_task = argv[0] if argv else None
         first_mode = "auto"
 
@@ -204,6 +235,28 @@ def main():
         if manual:
             cli_notice(("已保存会话：" if first_save else "已更新会话：") + new_session)
         return True
+
+    if resumed:
+        if state.planning_state.phase == "awaiting_approval":
+            cli_notice("会话已恢复；" + _render_plan_for_approval(state))
+        elif state.status == "blocked":
+            cli_notice(
+                f"会话已恢复，任务仍处于 blocked：{_single_line_notice(state.terminal_reason)}；"
+                "请使用 /resume <反馈>。"
+            )
+        elif state.status == "failed":
+            cli_notice(
+                f"会话已恢复，任务仍处于 failed：{_single_line_notice(state.terminal_reason)}；"
+                "请使用 /new <任务>。"
+            )
+        else:
+            restored_snapshot = state.snapshot()
+            cli_notice(
+                f"会话已恢复：任务={state.task or '-'}；"
+                f"task_id={state.task_id or '-'}；状态={state.status}；"
+                f"规划阶段={state.planning_state.phase}；修复阶段={state.repair_phase}；"
+                f"verification_required={str(restored_snapshot['verification_required']).lower()}；等待用户输入。"
+            )
 
     def cleanup_task_boundary():
         """Clean before State reset; an incomplete cleanup keeps the old task."""

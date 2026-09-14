@@ -199,7 +199,7 @@ class ExecutionGeneration:
     opened_by_failure_id: str | None = None
     opened_by_recovery_id: str | None = None
     opened_by_process_event_id: str | None = None
-    open_reason: Literal["task_start", "possible_effect", "recovery", "process_exit"] = "task_start"
+    open_reason: Literal["task_start", "possible_effect", "recovery", "process_exit", "resume"] = "task_start"
 
 
 @dataclass(frozen=True)
@@ -2993,12 +2993,23 @@ class AgentState:
             raise SessionExportError("generation 记录必须按顺序排列")
         if not generations or generations[0] != 0:
             raise SessionExportError("generation 必须从 0 开始")
+        if generations != list(range(generations[-1] + 1)):
+            raise SessionExportError("generation 记录必须连续")
         generation_ids = set(generations)
+        for generation in payload["generations"]:
+            if generation.get("open_reason") not in {
+                "task_start", "possible_effect", "recovery", "process_exit", "resume",
+            }:
+                raise SessionExportError("generation open_reason 无效")
+            if generation.get("generation_id") == 0 and generation.get("open_reason") != "task_start":
+                raise SessionExportError("初始 generation 必须是 task_start")
         current_generation = private.get("verification_generation")
         if not isinstance(current_generation, int) or current_generation < 0:
             raise SessionExportError("verification_generation 无效")
         if generation_ids and current_generation not in generation_ids:
             raise SessionExportError("当前 generation 不存在于 generation 记录")
+        if generations and current_generation != generations[-1]:
+            raise SessionExportError("当前 generation 必须是最新记录")
         if private.get("last_verified_generation") not in {-1, *generation_ids}:
             raise SessionExportError("last_verified_generation 引用不存在")
         if not isinstance(private.get("verification_required"), bool):
@@ -3239,6 +3250,205 @@ class AgentState:
                 raise SessionExportError("checkpoint metadata 无效")
             if checkpoint.get("attempt_id") not in attempt_set or checkpoint.get("generation_id") not in generation_ids:
                 raise SessionExportError("checkpoint metadata 引用无效")
+
+    @classmethod
+    def restore_session(cls, payload: Any, workspace_root: str | None = None) -> "AgentState":
+        """Rebuild authoritative State facts from a validated session export.
+
+        This conversion never restores operating-system handles.  Checkpoint
+        metadata and historical process records are imported as audit facts;
+        their live capabilities are intentionally supplied by the new runtime.
+        """
+        cls.validate_session_export(payload)
+        if not isinstance(payload, dict):  # keeps type checkers and callers honest
+            raise SessionExportError("State 导出必须是 JSON object")
+
+        def diff_from(raw: Any) -> PlanDifference | None:
+            if raw is None:
+                return None
+            if not isinstance(raw, dict):
+                raise SessionExportError("plan diff 无效")
+            retained = tuple(
+                PlanStepDifference(item["step_id"], bool(item.get("dependencies_changed", False)))
+                for item in raw.get("retained", [])
+            )
+            return PlanDifference(
+                retained=retained,
+                added=tuple(raw.get("added", [])),
+                cancelled=tuple(raw.get("cancelled", [])),
+                replaced=tuple(raw.get("replaced", [])),
+                goal_changed=bool(raw.get("goal_changed", False)),
+                constraints_changed=bool(raw.get("constraints_changed", False)),
+                success_criteria_changed=bool(raw.get("success_criteria_changed", False)),
+            )
+
+        def step_from(raw: dict[str, Any]) -> PlanStep:
+            return PlanStep(
+                raw["step_id"], raw["content"], raw.get("status", "pending"),
+                tuple(raw.get("depends_on", [])), tuple(raw.get("success_criteria", [])),
+                tuple(raw.get("replaces", [])),
+            )
+
+        revisions = [
+            PlanRevision(
+                raw["revision_id"], raw["generation_id"], raw.get("parent_revision_id"),
+                raw.get("trigger_id"), raw["goal"], tuple(raw.get("constraints", [])),
+                tuple(raw.get("success_criteria", [])),
+                tuple(step_from(step) for step in raw.get("steps", [])),
+                raw["reason"], diff_from(raw.get("diff")),
+            ) for raw in payload["plan_revisions"]
+        ]
+        progress = [PlanProgressEvent(
+            raw["progress_id"], raw["revision_id"], raw["generation_id"], raw["step_id"],
+            raw["from_status"], raw["to_status"], raw["reason"],
+        ) for raw in payload["plan_progress_history"]]
+        decisions = [UserPlanDecision(
+            raw["decision_id"], raw.get("revision_id"), raw["decision"], raw.get("feedback"),
+            raw["generation_id"], raw.get("previous_terminal_reason"),
+            raw.get("caused_by_failure_id"),
+        ) for raw in payload["user_plan_decisions"]]
+        triggers = [ReplanTrigger(
+            raw["trigger_id"], raw["generation_id"], raw["kind"], raw["reason"],
+            raw.get("caused_by_failure_id"), raw.get("caused_by_attempt_id"),
+            raw.get("caused_by_decision_id"), raw.get("status", "active"),
+            raw.get("result_revision_id"),
+        ) for raw in payload["replan_triggers"]]
+        planning = PlanningState(**{
+            key: payload["planning_state"][key]
+            for key in ("mode", "phase", "active_revision_id", "active_trigger_id",
+                        "replans_used", "replans_remaining", "trigger_no_progress_commits")
+        })
+        stagnation = LoopStagnationState(
+            payload["stagnation_state"].get("progress_epoch", 0),
+            payload["stagnation_state"].get("consecutive_no_progress_rounds", 0),
+            payload["stagnation_state"].get("last_round_fingerprint"),
+            tuple(payload["stagnation_state"].get("seen_observation_hashes", [])),
+            tuple(payload["stagnation_state"].get("seen_effect_action_hashes", [])),
+            payload["stagnation_state"].get("warning_kind"),
+            payload["stagnation_state"].get("last_reason"),
+        )
+        evidence = [VerificationEvidence(
+            raw["command"], raw["outcome"], raw.get("exit_code"), raw["output"],
+            raw.get("generation_id", 0), raw.get("caused_by_attempt_id"),
+        ) for raw in payload["verification_evidence"]]
+        verification_history = [VerificationEvidence(
+            raw["command"], raw["outcome"], raw.get("exit_code"), raw["output"],
+            raw.get("generation_id", 0), raw.get("caused_by_attempt_id"),
+        ) for raw in payload["verification_history"]]
+        generations = [ExecutionGeneration(
+            raw["generation_id"], raw.get("opened_by_attempt_id"),
+            raw.get("opened_by_failure_id"), raw.get("opened_by_recovery_id"),
+            raw.get("opened_by_process_event_id"), raw.get("open_reason", "task_start"),
+        ) for raw in payload["generations"]]
+        attempts = [ExecutionAttempt(
+            raw["attempt_id"], raw["pre_generation_id"], raw["generation_id"], raw["tool"],
+            raw["arguments_hash"], deepcopy(raw["redacted_arguments"]), raw["outcome"],
+            raw["duration_ms"], raw["effect_class"], raw["handler_admitted"], raw["permission"],
+            raw.get("caused_by_failure_id"), raw.get("caused_by_attempt_id"), raw.get("exit_code"),
+            raw.get("error_kind"), raw.get("output_excerpt", ""), raw.get("failure_id"),
+            raw.get("recovery_id"), raw.get("checkpoint_id"),
+        ) for raw in payload["attempts"]]
+        failures = [FailureEvent(
+            raw["failure_id"], raw["generation_id"], raw["phase"], raw["category"],
+            raw["retryable"], raw["caused_by_attempt_id"], tuple(raw.get("affected_files", [])),
+            raw.get("cause_hint"), raw.get("caused_by_process_event_id"),
+        ) for raw in payload["failures"]]
+        recoveries = [RecoveryAction(
+            raw["recovery_id"], raw["generation_id"], raw["action"], raw["reason"],
+            raw["caused_by_failure_id"], raw["status"], raw.get("requested_attempt"),
+            raw.get("requested_tool"), raw.get("requested_arguments_hash"),
+            deepcopy(raw.get("redacted_arguments")), raw.get("result_generation_id"),
+            raw.get("result_attempt"), raw.get("checkpoint_id"),
+        ) for raw in payload["recovery_actions"]]
+        trace_events = [TraceEvent(
+            raw["sequence_id"], raw["kind"], raw["generation_id"], raw.get("revision_id"),
+            raw.get("record_type"), raw.get("record_id"), raw.get("planning_phase_before"),
+            raw.get("planning_phase_after"), raw.get("repair_phase_before"),
+            raw.get("repair_phase_after"), raw.get("stagnation_kind"), raw.get("stagnation_count"),
+            raw.get("stagnation_fingerprint"),
+        ) for raw in payload["trace_events"]]
+        process_records = [ProcessRecord(
+            raw["process_id"], raw["task_id"], raw["start_attempt_id"], raw["start_generation_id"],
+            raw["command_summary"], raw["cwd_summary"], raw["pid"], raw["status"], raw["started_at"],
+            raw.get("ended_at"), raw.get("exit_code"), raw.get("stdout_offset", 0),
+            raw.get("stderr_offset", 0), raw.get("terminal_event_id"), raw.get("stdin_mode", "closed"),
+            raw.get("stdin_state", "disabled"), raw.get("write_pending", False), raw.get("stdin_error"),
+        ) for raw in payload["process_records"]]
+        process_events = [ProcessEvent(
+            raw["event_id"], raw["process_id"], raw["task_id"], raw["kind"], raw["generation_id"],
+            raw["start_attempt_id"], raw["stdout_offset"], raw["stderr_offset"], raw.get("exit_code"),
+            raw.get("caused_by_control_attempt_id"), raw.get("reason"),
+        ) for raw in payload["process_events"]]
+        awaiting_raw = payload.get("awaiting_process")
+        awaiting = None if awaiting_raw is None else ProcessWaitState(
+            tuple(awaiting_raw["process_ids"]), awaiting_raw["reason"],
+            tuple(awaiting_raw.get("last_observed_event_ids", [])),
+            tuple(awaiting_raw.get("last_stdout_offsets", [])),
+            tuple(awaiting_raw.get("last_stderr_offsets", [])),
+        )
+
+        state = cls(
+            task=payload["task"], task_id=payload["task_id"], tool_history=deepcopy(payload["tool_history"]),
+            files_changed=deepcopy(payload["files_changed"]), errors=deepcopy(payload["errors"]),
+            status=payload["status"], terminal_reason=payload["terminal_reason"],
+            plan_revisions=revisions, plan_progress_history=progress,
+            user_plan_decisions=decisions, replan_triggers=triggers, planning_state=planning,
+            stagnation_state=stagnation, verification_evidence=evidence,
+            verification_history=verification_history, generations=generations, attempts=attempts,
+            failures=failures, recovery_actions=recoveries, trace_events=trace_events,
+            process_records=process_records, process_events=process_events,
+            awaiting_process=awaiting, recovery_notice=payload["recovery_notice"],
+        )
+        private = payload["private"]
+        for name in (
+            "verification_generation", "last_verified_generation", "verification_required",
+            "next_attempt", "next_failure", "next_plan_revision", "next_plan_progress",
+            "next_plan_decision", "next_plan_trigger", "repair_cycles", "reserved_repair_cycles",
+            "repair_phase", "active_failure_id", "active_recovery_id", "next_recovery",
+            "next_trace_sequence", "next_task_id", "next_process_event",
+        ):
+            setattr(state, f"_{name}", deepcopy(private[name]))
+        state._fingerprint_counts = {
+            (item["tool"], item["arguments_hash"]): item["count"]
+            for item in private["fingerprint_counts"]
+        }
+        state._failure_retry_counts = {
+            item["failure_id"]: item["count"] for item in private["failure_retry_counts"]
+        }
+        state._original_attempt_arguments = {
+            item["attempt_id"]: deepcopy(item["arguments"])
+            for item in private["original_attempt_arguments"]
+        }
+        state._pending_process_controls = {
+            item["process_id"]: (item["expected"], item["attempt_id"])
+            for item in private["pending_process_controls"]
+        }
+        state._pending_attempts = set(private["pending_attempts"])
+        state._revision_attempt_boundaries = {
+            item["revision_id"]: item["attempt_count"]
+            for item in private["revision_attempt_boundaries"]
+        }
+        checkpoint_store = CheckpointStore(workspace_root)
+        checkpoint_store.import_snapshot(payload["checkpoint_metadata"])
+        state.bind_checkpoint_store(checkpoint_store)
+        with state._lock:
+            state._sync_current_goal_locked()
+            state._stagnation_progress_marker = state._progress_marker_locked()
+        return state
+
+    def begin_resume(self) -> int:
+        """Open an independent resume generation and invalidate old proof."""
+        with self._lock:
+            self._ensure_generation()
+            generation_id = self._verification_generation + 1
+            self._verification_generation = generation_id
+            self.generations.append(ExecutionGeneration(generation_id, open_reason="resume"))
+            self.verification_evidence.clear()
+            self._last_verified_generation = -1
+            self._verification_required = True
+            self._append_trace_event_locked("session_resumed", generation_id=generation_id)
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return generation_id
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

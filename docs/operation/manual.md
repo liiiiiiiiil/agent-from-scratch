@@ -1,8 +1,8 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.30**（会话持久化与安全点；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.31**（从完整安全点恢复会话；含此前可靠执行能力）。
 
-## v0.30 会话持久化与安全点
+## v0.31 会话持久化与安全恢复
 
 ### 开启、更新和关闭会话
 
@@ -17,7 +17,7 @@
 
 ### 文件位置、格式和隐私边界
 
-默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。文件 envelope 固定为 `schema_version=1`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、`active/clean`、State、Context 和覆盖其他字段的 SHA-256 完整性值。
+默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。新写入 envelope 使用 `schema_version=2`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、保存 generation、`active/clean`、State、Context、任务涉及路径的工作区清单和覆盖其他字段的 SHA-256 完整性值。schema 1 仍可读取诊断，但不能恢复。
 
 State 导出的是权威计划、执行、失败、恢复、generation、预算私有计数、原始恢复参数和检查点**元数据**；不会写入锁、`ProcessManager`、`Popen`、线程或检查点前镜像字节。Context 导出普通任务历史、摘要、压缩标记、摘要轮数和待消费 Runtime Notice，但不导出受保护的 system prompt。assistant 工具调用必须与按序的 `role=tool` 结果一一配对。
 
@@ -25,14 +25,29 @@ State 导出的是权威计划、执行、失败、恢复、generation、预算�
 
 ### 读取校验与故障诊断
 
-v0.30 的 SessionStore 提供读取、大小检查、schema 检查、字段/引用检查、工具结果配对检查和 SHA-256 校验，但**不提供跨进程恢复任务**；本版没有 `--resume`。`active` 文件可以用于诊断最后一次完整安全点，不能在 v0.30 直接继续执行任务。
+SessionStore 提供读取、大小检查、schema 检查、字段/引用检查、工具结果配对检查和 SHA-256 校验。使用下面的命令请求恢复：
+
+```bash
+PYTHONPATH=src python -m mini_agent --resume <session_id>
+```
+
+恢复只接受 `schema_version=2`、`save_kind=safe_point`、`handoff_status=clean` 且工作区清单仍匹配的会话。CLI 会先构造新的 State、Context、工具注册表、ProcessManager 和 PermissionGate，再在 session 独占锁内复核原提交与工作区清单，把会话改写为后继 generation 的 `active` 版本；提交成功后显示原任务状态并等待输入，不自动请求 LLM。工作区变化、无法完整检查的路径、`active` 会话、损坏文件和锁竞争都会在调用 LLM 或工具前拒绝。恢复后的正常退出才重新写入 `clean`；异常退出留下 `active`，不能再次直接恢复。
+
+v0.30 的 schema 1 会话仍可读取诊断，但不能续跑。旧验证资格在恢复时清空，`verification_history` 只用于审计和 Trace 回放；恢复后的任务需要独立验证。旧 PID、旧 `process_id` 和没有前镜像字节的旧 `ready` checkpoint 只保留审计记录，不能控制进程或执行回滚。
 
 - `session 文件不存在`：检查 `~/.mini_agent/sessions/` 和显示的 `session_id`，不要手工拼接其他路径。
+- `schema 1 会话只供诊断`：使用当前代码重新完成一个 `/save` 和正常 clean 交接，之后再用 `--resume`。
+- `工作区检查失败`：恢复前还原任务涉及文件和目录；清单按结构化文件参数、`files_changed`、失败和 checkpoint 记录建立，递归 `grep` 覆盖搜索范围内未匹配的文件。任务路径含符号链接或搜索范围超限时只保留诊断用途；shell 命令文本不会被猜测为路径或副作用。
+- `只有 clean 会话可以恢复`：active 会话可能对应进程清理或异常退出后的不确定窗口，先保留它用于诊断。
 - `session SHA-256 校验失败`、`JSON` 或引用错误：文件可能损坏或被手工修改；保留原文件以便诊断，不能把它当作可继续任务。
 - `session 文件超过上限`：历史或工具输出过大；先保留旧提交，不删除或截断半个工具回合。
 - `session 已被其他写入者锁定`：另一个 CLI 可能正在写入，或存在需要人工检查的遗留锁；Runtime 不会自动抢锁。
 - `会话保存失败`：若失败发生在替换前，上一份文件保持不变；CLI 不会伪造成功提示。若是清理失败，先处理报告中的 `process_id`、PID 或 stdin 原因。
 - `会话提交状态未确认`：文件可能已经换成新内容，但目录同步或锁清理没有完成；用显示的 session ID 检查磁盘文件和独占锁，不要假定旧提交仍在。
+
+## v0.30 会话持久化与安全点
+
+v0.30 引入 `/save`、本地 schema 1 session、脱敏 history、原子安全点和 `active/clean` 生命周期。它只负责校验和诊断；v0.31 的恢复入口使用 schema 2 和工作区清单。
 
 ## v0.29 后台进程有界文本输入
 
@@ -302,7 +317,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.30，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.31，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -336,7 +351,7 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |
 | `budgets` / `recovery_notice` | replan、无进展、失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
 
-v0.30 另有一份独立的 session 导出，不改变上表的公开 `snapshot()` 或 Trace 投影；导出格式是保存协议，不是 Trace 回放视图。
+v0.31 另有一份独立的 session 导出，不改变上表的公开 `snapshot()` 或 Trace 投影；导出格式是保存和恢复协议，不是 Trace 回放视图。
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 

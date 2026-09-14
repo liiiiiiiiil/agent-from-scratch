@@ -554,6 +554,19 @@ def _build_edges(
             edges.append(_edge("generation_opener", "task_start", _node("generation", gid), gid, True))
         elif gid == 0:
             _add_issue(issues, "初始 generation 0 不应有 opener")
+        elif generation.get("open_reason") == "resume" and not present:
+            resumed = any(
+                event.get("kind") == "session_resumed"
+                and event.get("generation_id") == gid
+                and event.get("record_type") is None
+                for event in trace_events
+            )
+            if not resumed:
+                _add_issue(issues, f"generation {gid} 缺少 session_resumed Runtime 事件")
+            edges.append(_edge(
+                "generation_opener", "runtime:resume", _node("generation", gid), gid,
+                resumed, None if resumed else "缺少恢复 Runtime 事件",
+            ))
         elif len(present) != 1:
             _add_issue(issues, f"generation {gid} 的 opener 不唯一或缺失")
             if not present:
@@ -1035,6 +1048,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     raw_checkpoints = _records(snapshot, "checkpoints", issues)
     raw_processes = _records(snapshot, "processes", issues) if "processes" in snapshot else []
     raw_process_events = _records(snapshot, "process_events", issues) if "process_events" in snapshot else []
+    raw_trace_events = _records(snapshot, "trace_events", issues) if "trace_events" in snapshot else []
 
     generations = [_safe_record(item, _GENERATION_FIELDS, issues, f"generations[{i}]")
                    for i, item in enumerate(raw_generations)]
@@ -1058,6 +1072,8 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
                       for i, item in enumerate(raw_processes)]
     process_events_list = [_safe_record(item, _PROCESS_EVENT_FIELDS, issues, f"process_events[{i}]")
                            for i, item in enumerate(raw_process_events)]
+    trace_events = [_safe_trace_event(item, issues, f"trace_events[{i}]")
+                    for i, item in enumerate(raw_trace_events)]
 
     generation_map: dict[int, dict[str, Any]] = {}
     for index, record in enumerate(generations):
@@ -1068,7 +1084,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         if gid in generation_map:
             _add_issue(issues, f"generation ID 重复: {gid}")
             continue
-        if record.get("open_reason") not in {"task_start", "possible_effect", "recovery", "process_exit"}:
+        if record.get("open_reason") not in {"task_start", "possible_effect", "recovery", "process_exit", "resume"}:
             _add_issue(issues, f"generation {gid}.open_reason 非法: {record.get('open_reason')}")
         if gid == 0 and record.get("open_reason") != "task_start":
             _add_issue(issues, "初始 generation 0 的 open_reason 必须是 task_start")
@@ -1353,7 +1369,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
 
     all_edges = _build_edges(
         generation_map, attempt_map, failure_map, recovery_map, evidence_list, issues,
-        process_events=process_event_map,
+        trace_events=trace_events, process_events=process_event_map,
     )
 
     # Completion evidence intentionally retains only the current generation;

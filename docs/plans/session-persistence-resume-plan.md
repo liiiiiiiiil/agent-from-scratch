@@ -1,10 +1,10 @@
 # 阶段九：会话持久化与恢复（Session Persistence & Resume）实施计划
 
-> 状态：v0.30 已完成；v0.31–v0.33 待实施
+> 状态：v0.30、v0.31 已完成；v0.32–v0.33 待实施
 > 前置阶段：阶段六可靠执行（`v0.17`–`v0.21`）、阶段七结构化计划（`v0.22`–`v0.25`）与阶段八进程管理（`v0.26`–`v0.29`）
 > 建议版本范围：`v0.30`–`v0.33`
 
-v0.30 已冻结的入口与格式：用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点自动更新同一文件。Session envelope 使用 `schema_version=1`、`writer_version`、规范化 `workspace_root`、UTC `saved_at`、`save_kind`、`handoff_status`、`state`、`context` 和 `integrity={"algorithm":"sha256","sha256":"..."}`。`active` 表示最后一次保存是可诊断的完整安全点，`clean` 只在正常退出或任务切换完成有界进程清理后提交。v0.30 的读取只做大小、版本、哈希、字段、引用和工具结果配对校验，不提供 `--resume` 或运行时恢复。
+v0.30 首次写入 schema 1；v0.31 的新写入格式为 `schema_version=2`，保留 `writer_version`、规范化 `workspace_root`、UTC `saved_at`、`save_kind`、`handoff_status`、`state`、`context`、工作区清单和 `integrity={"algorithm":"sha256","sha256":"..."}`。schema 1 仍可读取诊断，但只能恢复 schema 2。用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点自动更新同一文件。`active` 表示最后一次保存是可诊断的完整安全点，`clean` 只在正常退出或任务切换完成有界进程清理后提交。v0.31 增加 `--resume`，但只接受 `clean` 安全点并在提交 active 占用后等待用户输入，不自动调用 LLM。
 
 ## 1. 目标与定位
 
@@ -146,7 +146,7 @@ RoundCommit
 
 主要工作：
 
-1. 定义 `schema_version=1` 的 session envelope、私有目录、随机 ID、大小限制、原子写入、`active/clean` 交接标记与完整性校验；明确不支持的旧/未来版本如何拒绝。
+1. 定义 schema 1 的 session envelope、私有目录、随机 ID、大小限制、原子写入、`active/clean` 交接标记与完整性校验；明确不支持的旧/未来版本如何拒绝。
 2. 为 State 增加显式导出与校验接口，涵盖恢复必须的私有计数和因果记录；公开 `snapshot()` 与 Trace 行为保持不变。
 3. 持久化脱敏后的消息历史、摘要、裁剪位置；保留每个 assistant tool call 与 `role=tool` 的协议关联，绝不保存 `write_process.input` 正文。
 4. 只在完整安全点保存；对活动进程、在途写入、半轮工具结果和保存失败给出明确反馈。正常退出先执行既有进程清理，再写最后安全点与 `clean` 标记。
@@ -155,6 +155,8 @@ RoundCommit
 验收重点：同一安全点保存后读回的权威事实与协议关联等价；临时写入中断后旧提交仍可读；无法保存时不声称 session 已持久化；敏感 stdin 文本不出现在文件字节中。
 
 ### 5.2 `v0.31` Safe Resume
+
+状态：已完成。
 
 目标：从完整安全点在新 Python 进程中继续原任务，仍不承诺恢复中断中的工具调用。
 

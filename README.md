@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程到 `v0.30`（第 30 课：会话持久化与安全点）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程到 `v0.31`（第 31 课：从完整安全点恢复会话）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -66,6 +66,7 @@
     <tr><td><strong>v0.29</strong></td><td><a href="./docs/tutorials/29-interactive-process.md">驱动等待输入的后台进程</a></td><td>显式开启有界管道 stdin，写入少量 UTF-8 文本并发送 EOF，同时保持授权、脱敏、清理和独立验证边界。</td></tr>
     <tr><th colspan="3"><a id="stage-9"></a>阶段九 · 会话持久化与安全交接</th></tr>
     <tr><td><strong>v0.30</strong></td><td><a href="./docs/tutorials/30-session-persistence.md">会话持久化与安全点</a></td><td>通过 /save 显式开启本地保存，在完整安全点原子更新 active 会话，退出或任务切换时在进程清理后提交 clean；本版只能校验文件，不能恢复任务。</td></tr>
+    <tr><td><strong>v0.31</strong></td><td><a href="./docs/tutorials/31-safe-resume.md">从完整安全点恢复会话</a></td><td>用 --resume 检查 schema 2、工作区清单和 clean 交接，在新进程重建运行时；旧验证、进程句柄和 checkpoint 回滚资格不会被继承。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>

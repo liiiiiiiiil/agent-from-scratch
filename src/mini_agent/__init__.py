@@ -1,3 +1,3 @@
 """Public package metadata for mini_agent."""
 
-__version__ = "0.30.0"
+__version__ = "0.31.0"

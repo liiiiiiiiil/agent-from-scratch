@@ -15,7 +15,7 @@ import signal
 import subprocess
 from threading import Condition, Event, Lock, Thread
 import time
-from typing import Any
+from typing import Any, Iterable
 
 
 DEFAULT_MAX_ACTIVE_PROCESSES = 4
@@ -673,7 +673,8 @@ class ProcessManager:
 
     def __init__(self, max_active_processes: int = DEFAULT_MAX_ACTIVE_PROCESSES,
                  max_stream_bytes: int = DEFAULT_MAX_STREAM_BYTES,
-                 grace_seconds: float = DEFAULT_GRACE_SECONDS) -> None:
+                 grace_seconds: float = DEFAULT_GRACE_SECONDS,
+                 historical_process_ids: Iterable[str] = ()) -> None:
         if max_active_processes <= 0:
             raise ValueError("max_active_processes 必须大于 0")
         if max_stream_bytes <= 0:
@@ -687,12 +688,23 @@ class ProcessManager:
         self._next_process = 1
         self._starting: dict[str, int] = {}
         self._processes: dict[str, _ManagedProcess] = {}
+        self._historical_process_ids = {
+            value for value in historical_process_ids
+            if isinstance(value, str) and value
+        }
 
     def _allocate_id(self) -> str:
         with self._lock:
-            process_id = f"proc-{self._next_process}"
+            return self._allocate_id_locked()
+
+    def _allocate_id_locked(self) -> str:
+        """Allocate while ``self._lock`` is already held."""
+        process_id = f"proc-{self._next_process}"
+        while process_id in self._historical_process_ids or process_id in self._processes:
             self._next_process += 1
-            return process_id
+            process_id = f"proc-{self._next_process}"
+        self._next_process += 1
+        return process_id
 
     def start(self, command: str, cwd: str | None, task_id: str,
               stdin_mode: str = "closed") -> ProcessStart:
@@ -714,8 +726,7 @@ class ProcessManager:
             if active + starting >= self.max_active_processes:
                 raise ValueError(f"活动后台进程已达到上限 {self.max_active_processes}")
             self._starting[task_id] = starting + 1
-            process_id = f"proc-{self._next_process}"
-            self._next_process += 1
+            process_id = self._allocate_id_locked()
         kwargs: dict[str, Any] = {
             "shell": True,
             "cwd": resolved_cwd,

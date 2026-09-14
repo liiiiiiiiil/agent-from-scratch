@@ -117,6 +117,67 @@ class CheckpointStore:
         with self._lock:
             return [checkpoint.snapshot() for checkpoint in self._checkpoints.values()]
 
+    def import_snapshot(self, records: Any) -> None:
+        """Import metadata from a session without importing rollback bytes.
+
+        A v0.31 runtime has no safe way to recreate the private before-image
+        map from JSON.  Every old ``ready`` checkpoint is therefore retained
+        for audit but made unavailable, and the numeric allocator advances
+        past every historical checkpoint ID.
+        """
+        if not isinstance(records, list):
+            raise ValueError("checkpoint metadata 必须是列表")
+        with self._lock:
+            seen_ids: set[str] = set()
+            for raw in records:
+                if not isinstance(raw, dict):
+                    raise ValueError("checkpoint metadata 含无效记录")
+                fields = {
+                    "checkpoint_id", "attempt_id", "generation_id", "path",
+                    "before_type", "before_sha256", "after_type", "after_sha256",
+                    "mode", "status", "unavailable_reason", "created_at",
+                }
+                if set(raw) != fields:
+                    raise ValueError("checkpoint metadata 字段无效")
+                checkpoint_id = raw.get("checkpoint_id")
+                if not isinstance(checkpoint_id, str) or not checkpoint_id:
+                    raise ValueError("checkpoint_id 无效")
+                if checkpoint_id in seen_ids or checkpoint_id in self._checkpoints:
+                    raise ValueError("checkpoint_id 重复")
+                seen_ids.add(checkpoint_id)
+                status = raw.get("status")
+                reason = raw.get("unavailable_reason")
+                if status == "ready":
+                    status = "unavailable"
+                    reason = reason or "恢复后缺少前镜像字节，旧 checkpoint 仅供审计"
+                if status not in {"unavailable", "restored", "restore_failed"}:
+                    raise ValueError("旧 checkpoint 状态无效")
+                checkpoint = FileCheckpoint(
+                    checkpoint_id,
+                    raw["attempt_id"],
+                    raw["generation_id"],
+                    raw["path"],
+                    raw["before_type"],
+                    raw["before_sha256"],
+                    raw["after_type"],
+                    raw["after_sha256"],
+                    raw["mode"],
+                    status,
+                    reason,
+                    raw["created_at"],
+                )
+                self._checkpoints[checkpoint_id] = checkpoint
+                match = checkpoint_id.rsplit("-", 1)
+                if len(match) == 2 and match[0] == "cp":
+                    try:
+                        self._next_checkpoint = max(self._next_checkpoint, int(match[1]) + 1)
+                    except ValueError:
+                        pass
+            self._sequence = max(
+                [int(item.created_at) for item in self._checkpoints.values()
+                 if isinstance(item.created_at, int)] or [0]
+            ) + 1
+
     def available(self) -> list[FileCheckpoint]:
         with self._lock:
             return [

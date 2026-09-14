@@ -445,6 +445,39 @@ class ContextManager:
         if expected:
             raise ValueError("assistant tool call 结果未完整回灌")
 
+    @classmethod
+    def restore_session(
+        cls,
+        state: AgentState,
+        payload: object,
+        *,
+        budget: ContextBudget | None = None,
+        trim_policy: TrimPolicy | None = None,
+        summarizer: Callable[[list[Message]], str] | None = None,
+        keep_rounds: int = 6,
+        observability: bool = CONTEXT_OBSERVABILITY,
+        observer: Observer | None = None,
+        protected_messages: list[Message] | None = None,
+    ) -> "ContextManager":
+        """Rebuild history and compaction state without restoring prompts."""
+        cls.validate_session_export(payload)
+        if not isinstance(payload, dict):
+            raise ValueError("Context 导出必须是 JSON object")
+        history = deepcopy(payload["history"])
+        # Keep protocol order exactly as persisted.  Validation above rejects
+        # both orphan tool results and assistant calls without all results.
+        context = cls(
+            state, history, budget=budget, trim_policy=trim_policy,
+            summarizer=summarizer, keep_rounds=keep_rounds,
+            observability=observability, observer=observer,
+            protected_messages=protected_messages,
+        )
+        context._summary = payload["summary"]
+        context._compacted = payload["compacted"]
+        context._summarized_rounds = payload["summarized_rounds"]
+        context._runtime_notice = payload.get("runtime_notice")
+        return context
+
     def reset_task(self) -> None:
         """Discard task-local context while preserving protected messages."""
         self.history.clear()

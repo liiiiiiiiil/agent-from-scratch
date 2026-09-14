@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.31.0] - Safe resume from complete safe points
+
+- Raised new session writes to JSON `schema_version=2` with a bounded workspace manifest covering structured file facts, changed files, failures, checkpoints, and recursive grep scopes; shell command text is not treated as a path declaration.
+- Added `python -m mini_agent --resume <session_id>` for validated `clean` safe points. The CLI checks the workspace, builds a fresh State/Context/Registry/ProcessManager/PermissionGate, claims the session under its exclusive lock, and waits for user input without an automatic LLM request.
+- Added strict State and Context restoration, a resume generation, invalidated current verification evidence, preserved verification history, re-discovered project instructions, and fresh permission state.
+- Imported old checkpoint and process metadata for audit only: old `ready` checkpoints become unavailable without before-image bytes, old PIDs and process IDs are not controllable, and new process IDs skip historical IDs.
+- Kept schema 1 readable for diagnostics only; active, damaged, workspace-changed, incomplete, symlink-dependent, and lock-contended sessions fail before any LLM or handler call. The workspace is checked again when claiming a prepared resume candidate. Added lesson 31 and synchronized the manual, README files, and session-resume plan.
+
 ## [v0.30.0] - Session persistence and safe points
 
 - Added explicit `/save` opt-in session persistence with random session IDs and automatic active-point updates after complete agent turns.
