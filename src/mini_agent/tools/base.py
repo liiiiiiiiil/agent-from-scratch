@@ -68,6 +68,7 @@ class ExecutionResult:
     error_kind: str | None = None
     reservation: AttemptReservation | None = None
     checkpoint_id: str | None = None
+    process_metadata: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -155,6 +156,8 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
                 raise ValueError(f"参数 {key} 长度不足")
             if "maxLength" in prop and len(value) > prop["maxLength"]:
                 raise ValueError(f"参数 {key} 超过长度上限")
+            if "pattern" in prop and re.search(prop["pattern"], value) is None:
+                raise ValueError(f"参数 {key} 格式非法")
         if isinstance(value, list) and "maxItems" in prop and len(value) > prop["maxItems"]:
             raise ValueError(f"参数 {key} 超过数量上限")
     return normalized
@@ -447,6 +450,16 @@ class ToolExecutor:
                 checkpoint = checkpoint_store.capture_after(checkpoint_capture)
             except Exception:
                 pass
+        process_metadata = None
+        if name == "start_process" and isinstance(output, dict):
+            process_metadata = deepcopy(output)
+            public = {
+                key: output[key] for key in ("process_id", "pid", "status")
+                if key in output
+            }
+            if reservation is not None:
+                public["start_attempt_id"] = reservation.attempt_id
+            output = json.dumps(public, ensure_ascii=False)
         if checkpoint is not None:
             output = f"{output}\n{_checkpoint_notice(checkpoint)}"
         excerpt = _brief(output)
@@ -461,10 +474,12 @@ class ToolExecutor:
                 exit_code = int(match.group(1))
                 if exit_code != 0:
                     outcome, error_kind = "failed", "nonzero_exit"
-        result = ExecutionResult(name, normalized, "allowed", True, outcome,
-                                 int((monotonic() - started) * 1000), effect_class,
-                                 output, excerpt, exit_code, error_kind, reservation,
-                                 checkpoint_id)
+        result = ExecutionResult(
+            name, normalized, "allowed", True, outcome,
+            int((monotonic() - started) * 1000), effect_class,
+            output, excerpt, exit_code, error_kind, reservation,
+            checkpoint_id, process_metadata,
+        )
         if notify: self._notify_result(result)
         return result
 

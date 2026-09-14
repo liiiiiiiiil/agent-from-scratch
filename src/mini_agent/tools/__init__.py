@@ -10,6 +10,8 @@ from mini_agent.tools.file import (
     grep_tool,
 )
 from mini_agent.tools.shell import run_shell_tool
+from mini_agent.tools.process import make_start_process_tool
+from mini_agent.processes import ProcessManager
 from mini_agent.permission import PermissionGate
 from mini_agent.state import AgentState
 from mini_agent.tools.plan import (make_begin_plan_tool, make_cancel_planning_tool,
@@ -19,11 +21,15 @@ from mini_agent.recovery import RecoveryRuntime
 from mini_agent.checkpoint import CheckpointStore, make_rollback_checkpoint_tool
 
 def create_registry(state: AgentState | None = None,
-                    workspace_root: str | None = None) -> ToolRegistry:
+                    workspace_root: str | None = None,
+                    process_manager: ProcessManager | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
     if state is not None:
+        process_manager = process_manager or ProcessManager()
+        if hasattr(state, "bind_process_manager"):
+            state.bind_process_manager(process_manager)
         checkpoint_store = (
             getattr(state, "checkpoint_store", None)
             if workspace_root is None else None
@@ -31,6 +37,8 @@ def create_registry(state: AgentState | None = None,
         if hasattr(state, "bind_checkpoint_store"):
             state.bind_checkpoint_store(checkpoint_store)
         result._checkpoint_store = checkpoint_store
+        result._process_manager = process_manager
+        result.register(make_start_process_tool(state, process_manager))
         result.register(make_begin_plan_tool(state))
         result.register(make_cancel_planning_tool(state))
         result.register(make_commit_plan_tool(state))

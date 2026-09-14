@@ -23,7 +23,7 @@ class TraceQueryError(ValueError):
 
 _GENERATION_FIELDS = (
     "generation_id", "opened_by_attempt_id", "opened_by_failure_id",
-    "opened_by_recovery_id", "open_reason",
+    "opened_by_recovery_id", "opened_by_process_event_id", "open_reason",
 )
 _ATTEMPT_FIELDS = (
     "attempt_id", "pre_generation_id", "generation_id", "tool",
@@ -76,9 +76,20 @@ _CHECKPOINT_FIELDS = (
     "before_sha256", "after_type", "after_sha256", "mode", "status",
     "unavailable_reason", "created_at",
 )
+_PROCESS_FIELDS = (
+    "process_id", "task_id", "start_attempt_id", "start_generation_id",
+    "command_summary", "cwd_summary", "pid", "status", "started_at",
+    "ended_at", "exit_code", "stdout_offset", "stderr_offset",
+    "terminal_event_id",
+)
+_PROCESS_EVENT_FIELDS = (
+    "event_id", "process_id", "task_id", "kind", "generation_id",
+    "start_attempt_id", "stdout_offset", "stderr_offset", "exit_code",
+    "caused_by_control_attempt_id", "reason",
+)
 
 _ACCEPTED_RECOVERY_STATUSES = {"reserved", "executed", "terminal"}
-_STATE_STATUSES = {"running", "done", "blocked", "failed", "idle"}
+_STATE_STATUSES = {"running", "awaiting_process", "done", "blocked", "failed", "idle"}
 
 
 def _jsonish(value: Any) -> Any:
@@ -492,6 +503,7 @@ def _build_edges(
     plan_decisions: dict[int, dict[str, Any]] | None = None,
     triggers: dict[int, dict[str, Any]] | None = None,
     trace_events: list[dict[str, Any]] | None = None,
+    process_events: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     plan_revisions = plan_revisions or {}
@@ -499,12 +511,14 @@ def _build_edges(
     plan_decisions = plan_decisions or {}
     triggers = triggers or {}
     trace_events = trace_events or []
+    process_events = process_events or {}
 
     for gid, generation in generation_records.items():
         opener_fields = [
             ("attempt", "opened_by_attempt_id"),
             ("failure", "opened_by_failure_id"),
             ("recovery", "opened_by_recovery_id"),
+            ("process_event", "opened_by_process_event_id"),
         ]
         present = [(kind, field, generation.get(field)) for kind, field in opener_fields
                    if generation.get(field) is not None]
@@ -518,7 +532,10 @@ def _build_edges(
                 edges.append(_edge("generation_opener", "unknown", _node("generation", gid), gid, False,
                                    "缺少 generation opener"))
         for kind, field, identifier in present:
-            collection = {"attempt": attempts, "failure": failures, "recovery": recoveries}[kind]
+            collection = {
+                "attempt": attempts, "failure": failures, "recovery": recoveries,
+                "process_event": process_events,
+            }[kind]
             target = _mapping_get(collection, identifier)
             resolved = target is not None and gid != 0 and len(present) == 1
             detail = None
@@ -550,6 +567,16 @@ def _build_edges(
                     _add_issue(issues, f"generation {gid} 的 opener recovery 未打开该 generation")
                     resolved = False
                     detail = "opener recovery 的结果 generation/status 不一致"
+            elif generation.get("open_reason") == "process_exit":
+                if kind != "process_event":
+                    _add_issue(issues, f"generation {gid} 的 process_exit opener 必须是 process_event")
+                    resolved = False
+                    detail = "open_reason 与 opener 类型不一致"
+                elif (target.get("generation_id") != gid - 1
+                      or target.get("kind") not in {"exited", "failed"}):
+                    _add_issue(issues, f"generation {gid} 的进程退出事件未打开该 generation")
+                    resolved = False
+                    detail = "进程退出事件的 generation 不一致"
             else:
                 _add_issue(issues, f"generation {gid} 的 open_reason 与 opener 不一致")
                 resolved = False
@@ -891,7 +918,7 @@ def _build_edges(
         "user_plan_decision": "decision", "replan_trigger": "trigger",
         "attempt": "attempt", "failure": "failure",
         "recovery_action": "recovery", "verification_history": "verification",
-        "tool_history": "tool_history",
+        "tool_history": "tool_history", "process_event": "process_event",
     }
     for event in trace_events:
         record_type = event.get("record_type")
@@ -914,6 +941,8 @@ def _build_edges(
             exists = _mapping_contains(recoveries, record_id)
         elif record_type == "tool_history":
             exists = isinstance(record_id, int) and not isinstance(record_id, bool) and 0 <= record_id < len(tool_history)
+        elif record_type == "process_event":
+            exists = _mapping_contains(process_events, record_id)
         else:
             exists = isinstance(record_id, int) and 0 <= record_id < len(evidence)
         if not exists:
@@ -960,6 +989,8 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     )
     raw_revisions = _records(snapshot, "todo_revisions", issues)
     raw_checkpoints = _records(snapshot, "checkpoints", issues)
+    raw_processes = _records(snapshot, "processes", issues) if "processes" in snapshot else []
+    raw_process_events = _records(snapshot, "process_events", issues) if "process_events" in snapshot else []
 
     generations = [_safe_record(item, _GENERATION_FIELDS, issues, f"generations[{i}]")
                    for i, item in enumerate(raw_generations)]
@@ -979,6 +1010,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
                       for i, item in enumerate(raw_revisions)]
     checkpoints_list = [_safe_checkpoint(item, issues, f"checkpoints[{i}]")
                         for i, item in enumerate(raw_checkpoints)]
+    processes_list = [_safe_record(item, _PROCESS_FIELDS, issues, f"processes[{i}]")
+                      for i, item in enumerate(raw_processes)]
+    process_events_list = [_safe_record(item, _PROCESS_EVENT_FIELDS, issues, f"process_events[{i}]")
+                           for i, item in enumerate(raw_process_events)]
 
     generation_map: dict[int, dict[str, Any]] = {}
     for index, record in enumerate(generations):
@@ -989,7 +1024,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         if gid in generation_map:
             _add_issue(issues, f"generation ID 重复: {gid}")
             continue
-        if record.get("open_reason") not in {"task_start", "possible_effect", "recovery"}:
+        if record.get("open_reason") not in {"task_start", "possible_effect", "recovery", "process_exit"}:
             _add_issue(issues, f"generation {gid}.open_reason 非法: {record.get('open_reason')}")
         if gid == 0 and record.get("open_reason") != "task_start":
             _add_issue(issues, "初始 generation 0 的 open_reason 必须是 task_start")
@@ -1008,6 +1043,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     failure_map = _id_map(failures_list, "failure_id", "failure", issues)
     recovery_map = _id_map(recoveries_list, "recovery_id", "recovery", issues)
     checkpoint_map = _id_map(checkpoints_list, "checkpoint_id", "checkpoint", issues)
+    process_event_map = _id_map(process_events_list, "event_id", "process event", issues)
     revision_ids: set[int] = set()
     for index, revision in enumerate(revisions_list):
         revision_id = revision.get("revision_id")
@@ -1113,6 +1149,77 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         if value is not None and (not _valid_generation(value) or value not in generation_map):
             _add_issue(issues, f"checkpoint[{index}].generation_id 引用不存在或非法: {value}")
 
+    process_ids: set[str] = set()
+    for index, process in enumerate(processes_list):
+        owner = f"processes[{index}]"
+        process_id = process.get("process_id")
+        if not isinstance(process_id, str) or not process_id:
+            _add_issue(issues, f"{owner}.process_id 非法: {process_id}")
+        elif process_id in process_ids:
+            _add_issue(issues, f"process ID 重复: {process_id}")
+        else:
+            process_ids.add(process_id)
+        if process.get("status") not in {"running", "exited", "failed", "terminated"}:
+            _add_issue(issues, f"{owner}.status 非法: {process.get('status')}")
+        for field in ("start_generation_id",):
+            value = process.get(field)
+            if not _valid_generation(value) or value not in generation_map:
+                _add_issue(issues, f"{owner}.{field} 引用不存在或非法: {value}")
+        _ref_issue(issues, owner, "start_attempt_id", process.get("start_attempt_id"), attempt_map)
+        _ref_issue(issues, owner, "terminal_event_id", process.get("terminal_event_id"), process_event_map)
+    process_event_ids: set[str] = set()
+    terminal_events: dict[str, int] = {}
+    started_events: dict[str, int] = {}
+    for index, event in enumerate(process_events_list):
+        owner = f"process_events[{index}]"
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            _add_issue(issues, f"{owner}.event_id 非法: {event_id}")
+        elif event_id in process_event_ids:
+            _add_issue(issues, f"process event ID 重复: {event_id}")
+        else:
+            process_event_ids.add(event_id)
+        if event.get("kind") not in {"started", "exited", "failed", "terminated", "killed", "cleanup_failed"}:
+            _add_issue(issues, f"{owner}.kind 非法: {event.get('kind')}")
+        if event.get("process_id") not in process_ids:
+            _add_issue(issues, f"{owner}.process_id 引用不存在: {event.get('process_id')}")
+        if snapshot.get("task_id") and event.get("task_id") != snapshot.get("task_id"):
+            _add_issue(issues, f"{owner}.task_id 与当前任务不一致: {event.get('task_id')}")
+        value = event.get("generation_id")
+        if not _valid_generation(value) or value not in generation_map:
+            _add_issue(issues, f"{owner}.generation_id 引用不存在或非法: {value}")
+        _ref_issue(issues, owner, "start_attempt_id", event.get("start_attempt_id"), attempt_map)
+        if event.get("kind") == "started":
+            process_id = event.get("process_id")
+            started_events[process_id] = started_events.get(process_id, 0) + 1
+        if event.get("kind") in {"exited", "failed", "terminated", "killed"}:
+            process_id = event.get("process_id")
+            terminal_events[process_id] = terminal_events.get(process_id, 0) + 1
+    for process_id, count in terminal_events.items():
+        if count > 1:
+            _add_issue(issues, f"process {process_id} 的最终事件超过一条")
+    process_map = {item.get("process_id"): item for item in processes_list}
+    for process_id, process in process_map.items():
+        if started_events.get(process_id, 0) != 1:
+            _add_issue(issues, f"process {process_id} 必须有且只有一条 started 事件")
+        terminal_id = process.get("terminal_event_id")
+        terminal = process_event_map.get(terminal_id) if terminal_id else None
+        if process.get("status") == "running" and terminal_id is not None:
+            _add_issue(issues, f"running process {process_id} 不能引用最终事件")
+        if process.get("status") != "running" and terminal is None:
+            _add_issue(issues, f"非 running process {process_id} 缺少最终事件")
+        if terminal is not None:
+            if terminal.get("process_id") != process_id:
+                _add_issue(issues, f"process {process_id} 的 terminal_event_id 跨进程引用")
+            if terminal.get("start_attempt_id") != process.get("start_attempt_id"):
+                _add_issue(issues, f"process {process_id} 的最终事件未引用启动 attempt")
+            expected_kinds = {
+                "exited": {"exited"}, "failed": {"failed"},
+                "terminated": {"terminated", "killed"},
+            }.get(process.get("status"), set())
+            if expected_kinds and terminal.get("kind") not in expected_kinds:
+                _add_issue(issues, f"process {process_id} 的状态与最终事件类型不一致")
+
     evidence_by_attempt: dict[str, list[dict[str, Any]]] = {}
     for item in evidence_list:
         attempt_id = item.get("caused_by_attempt_id")
@@ -1138,7 +1245,8 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             continue
         for field, collection in (("opened_by_attempt_id", attempt_map),
                                   ("opened_by_failure_id", failure_map),
-                                  ("opened_by_recovery_id", recovery_map)):
+                                  ("opened_by_recovery_id", recovery_map),
+                                  ("opened_by_process_event_id", process_event_map)):
             _ref_issue(issues, f"generation {gid}", field, record.get(field), collection)
 
     current_generation = snapshot.get("current_generation_id")
@@ -1149,7 +1257,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     if snapshot.get("status") not in _STATE_STATUSES:
         _add_issue(issues, f"status 非法: {snapshot.get('status')}")
 
-    all_edges = _build_edges(generation_map, attempt_map, failure_map, recovery_map, evidence_list, issues)
+    all_edges = _build_edges(
+        generation_map, attempt_map, failure_map, recovery_map, evidence_list, issues,
+        process_events=process_event_map,
+    )
 
     # Completion evidence intentionally retains only the current generation;
     # the append-only history above is allowed to span every generation.
@@ -1161,7 +1272,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
                 _add_issue(issues, f"current verification[{index}] 不存在于 verification history")
 
     referenced_generation_ids: set[int] = set(generation_ids)
-    for collection in (attempts_list, failures_list, recoveries_list, evidence_list, revisions_list):
+    for collection in (
+        attempts_list, failures_list, recoveries_list, evidence_list, revisions_list,
+        process_events_list,
+    ):
         for record in collection:
             for field in ("generation_id", "pre_generation_id", "result_generation_id"):
                 value = record.get(field)
@@ -1204,6 +1318,14 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         grouped_recoveries = [deepcopy(item) for item in recoveries_list if item.get("generation_id") == gid]
         grouped_evidence = [deepcopy(item) for item in evidence_list if item.get("generation_id") == gid]
         grouped_revisions = [deepcopy(item) for item in revisions_list if item.get("generation_id") == gid]
+        grouped_process_events = [
+            deepcopy(item) for item in process_events_list if item.get("generation_id") == gid
+        ]
+        grouped_processes = [
+            deepcopy(item) for item in processes_list
+            if item.get("start_generation_id") == gid
+            or process_event_map.get(item.get("terminal_event_id"), {}).get("generation_id") == gid
+        ]
         local_edges = [deepcopy(edge) for edge in all_edges
                        if edge.get("generation_id") == gid
                        or edge.get("from") == _node("generation", gid)
@@ -1225,6 +1347,8 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             "failures": grouped_failures,
             "recovery_actions": grouped_recoveries,
             "verification_evidence": grouped_evidence,
+            "processes": grouped_processes,
+            "process_events": grouped_process_events,
             "causal_edges": local_edges,
             "edges": local_edges,
             "conclusion": conclusion,
@@ -1242,9 +1366,11 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
 
     task_info = {
         "task": _safe_text(snapshot.get("task", "")),
+        "task_id": snapshot.get("task_id", ""),
         "current_goal": _safe_text(snapshot.get("current_goal", "")),
         "status": snapshot.get("status", "running"),
         "terminal_reason": _safe_text(snapshot.get("terminal_reason", "")),
+        "awaiting_process": _jsonish(snapshot.get("awaiting_process")),
     }
     query = {
         "generation_id": generation_id,
@@ -1324,6 +1450,7 @@ def build_trace(
     raw_decisions = raw_records("user_plan_decisions") if "user_plan_decisions" in snapshot else []
     raw_triggers = raw_records("replan_triggers") if "replan_triggers" in snapshot else []
     raw_events = raw_records("trace_events") if "trace_events" in snapshot else []
+    raw_process_events = raw_records("process_events") if "process_events" in snapshot else []
 
     plan_records = [
         _safe_plan_revision(item, issues, f"plan_revisions[{index}]")
@@ -1344,6 +1471,10 @@ def build_trace(
     event_records = [
         _safe_trace_event(item, issues, f"trace_events[{index}]")
         for index, item in enumerate(raw_events)
+    ]
+    process_event_records = [
+        _safe_record(item, _PROCESS_EVENT_FIELDS, issues, f"process_events[{index}]")
+        for index, item in enumerate(raw_process_events)
     ]
 
     plan_map: dict[int, dict[str, Any]] = {}
@@ -1389,6 +1520,11 @@ def build_trace(
             _add_issue(issues, f"trigger ID 重复: {identifier}")
             continue
         trigger_map[identifier] = record
+
+    process_event_map = {
+        record.get("event_id"): record for record in process_event_records
+        if isinstance(record.get("event_id"), str) and record.get("event_id")
+    }
 
     # A plan-bearing v0.22/v0.24 snapshot without v0.25 events can still
     # expose its immutable structure.  Cross-record ordering and ownership
@@ -1457,6 +1593,7 @@ def build_trace(
         "failure": failures,
         "recovery_action": recoveries,
         "verification_history": evidence,
+        "process_event": process_event_map,
         "tool_history": tool_history,
     }
     for index, event in enumerate(event_records):
@@ -1856,6 +1993,7 @@ def build_trace(
             ("failure", failures, "failure_recorded"),
             ("recovery_action", recoveries, None),
             ("verification_history", dict(enumerate(evidence)), "verification_recorded"),
+            ("process_event", process_event_map, "process_event"),
         )
         recovery_kinds = {
             "recovery_proposed", "recovery_activated", "recovery_result", "recovery_rejected",
@@ -1881,6 +2019,7 @@ def build_trace(
     all_edges = _build_edges(
         generation_map, attempts, failures, recoveries, evidence, issues,
         plan_map, progress_map, decision_map, trigger_map, event_records,
+        process_event_map,
     )
     all_edges.extend(missing_fact_edges)
 
@@ -1929,6 +2068,11 @@ def build_trace(
             for index, record in enumerate(evidence)
             if _valid_generation(record.get("generation_id"))
         },
+        **{
+            _node("process_event", identifier): record.get("generation_id")
+            for identifier, record in process_event_map.items()
+            if _valid_generation(record.get("generation_id"))
+        },
     }
     endpoint_generation.update({
         _node("generation", identifier): identifier
@@ -1952,6 +2096,7 @@ def build_trace(
         "failure": failures,
         "recovery_action": recoveries,
         "verification_history": evidence,
+        "process_event": process_event_map,
     }
 
     def event_record(event: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1983,6 +2128,7 @@ def build_trace(
             "recovery_proposed", "recovery_activated", "recovery_result", "recovery_rejected",
         },
         "verification_history": {"verification_recorded"},
+        "process_event": {"process_event"},
     }
     plan_views: list[dict[str, Any]] = []
     for revision_id_value in sorted(plan_map):

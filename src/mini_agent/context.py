@@ -354,6 +354,7 @@ class ContextManager:
 
         base_lines = ["[Structured State]"]
         if snapshot["task"]: base_lines.append(f"Task: {bounded(snapshot['task'], 1200)}")
+        if snapshot.get("task_id"): base_lines.append(f"Task ID: {bounded(snapshot['task_id'], 120)}")
         if snapshot["current_goal"]: base_lines.append(f"Current goal: {bounded(snapshot['current_goal'], 800)}")
         planning_state = snapshot.get("planning_state", {})
         active_plan = snapshot.get("active_plan")
@@ -480,6 +481,26 @@ class ContextManager:
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
+        process_records = snapshot.get("processes", [])
+        if process_records:
+            base_lines.append("Background processes:")
+            for process in process_records[-8:]:
+                if not isinstance(process, dict):
+                    continue
+                base_lines.append(
+                    f"  {process.get('process_id', '?')} status={process.get('status', '?')} "
+                    f"pid={process.get('pid', '?')} "
+                    f"stdout_offset={process.get('stdout_offset', 0)} "
+                    f"stderr_offset={process.get('stderr_offset', 0)} "
+                    f"command={bounded(process.get('command_summary', ''), 240)}"
+                )
+        if snapshot.get("awaiting_process"):
+            waiting = snapshot["awaiting_process"]
+            base_lines.append(
+                "Awaiting process: "
+                f"ids={bounded(waiting.get('process_ids', []), 300)}; "
+                f"reason={bounded(waiting.get('reason', ''), 120)}"
+            )
         repair_loop = snapshot.get("repair_loop", {})
         if repair_loop and repair_loop.get("phase") != "idle":
             base_lines.append(
@@ -581,8 +602,24 @@ class ContextManager:
             # text may be dropped after state is rebuilt from the snapshot.
             compact_lines = [
                 "[Structured State]",
+                f"Task ID: {bounded(snapshot.get('task_id') or '-', 120)}",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
+            if process_records:
+                compact_lines.append(
+                    "Background processes: " + bounded("; ".join(
+                        f"{item.get('process_id', '?')}={item.get('status', '?')}"
+                        f"/pid:{item.get('pid', '?')}"
+                        f"/out:{item.get('stdout_offset', 0)},{item.get('stderr_offset', 0)}"
+                        for item in process_records[-8:] if isinstance(item, dict)
+                    ), 1200)
+                )
+            if snapshot.get("awaiting_process"):
+                compact_lines.append(
+                    "Awaiting process: " + bounded(
+                        str(snapshot["awaiting_process"]), 500,
+                    )
+                )
             compact_lines.extend(bounded(line, 1500) for line in plan_lines)
             active_trigger = next(
                 (item for item in snapshot.get("replan_triggers", [])
@@ -639,8 +676,24 @@ class ContextManager:
             # do not cut a failure reference or terminal reason in half.
             compact_lines = [
                 "[Structured State]",
+                f"Task ID: {bounded(snapshot.get('task_id') or '-', 120)}",
                 f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}",
             ]
+            if process_records:
+                compact_lines.append(
+                    "Background processes: " + bounded("; ".join(
+                        f"{item.get('process_id', '?')}={item.get('status', '?')}"
+                        f"/pid:{item.get('pid', '?')}"
+                        f"/out:{item.get('stdout_offset', 0)},{item.get('stderr_offset', 0)}"
+                        for item in process_records[-8:] if isinstance(item, dict)
+                    ), 1200)
+                )
+            if snapshot.get("awaiting_process"):
+                compact_lines.append(
+                    "Awaiting process: " + bounded(
+                        str(snapshot["awaiting_process"]), 500,
+                    )
+                )
             if active_plan:
                 # Preserve the execution-critical plan shape even when the
                 # full critical-state block must degrade again: revision,

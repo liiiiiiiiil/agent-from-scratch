@@ -49,6 +49,11 @@ PERMISSION_RULES = {
         "echo *": ALLOW,  # 只读命令放行
         "*": ASK,  # 其他命令每次问
     },
+    # Background execution has its own command rules.  An approval for
+    # run_shell must never silently authorize a long-lived process.
+    "start_process": {
+        "*": ASK,
+    },
 }
 
 
@@ -172,6 +177,8 @@ class PermissionGate:
         对其他工具：返回 "*"（行为不变，一维兼容）
         """
         if tool_name == "run_shell":
+            return args.get("command", "*")
+        if tool_name == "start_process":
             return args.get("command", "*")
         if tool_name in ("read_file", "write_file", "edit_file", "rollback_checkpoint"):
             return args.get("path", "*")

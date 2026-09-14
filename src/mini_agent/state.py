@@ -21,6 +21,8 @@ FailureCategory = Literal["protocol", "permission", "transient", "deterministic"
 RepairPhase = Literal["idle", "diagnosis_required", "verification_required"]
 PlanStepStatus = Literal["pending", "in_progress", "completed"]
 PlanningPhase = Literal["direct", "exploring", "awaiting_approval", "executing"]
+ProcessStatus = Literal["running", "exited", "failed", "terminated"]
+ProcessEventKind = Literal["started", "exited", "failed", "terminated", "killed", "cleanup_failed"]
 
 _STEP_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PLAN_STEP_LIMIT = 50
@@ -182,7 +184,54 @@ class ExecutionGeneration:
     opened_by_attempt_id: str | None = None
     opened_by_failure_id: str | None = None
     opened_by_recovery_id: str | None = None
-    open_reason: Literal["task_start", "possible_effect", "recovery"] = "task_start"
+    opened_by_process_event_id: str | None = None
+    open_reason: Literal["task_start", "possible_effect", "recovery", "process_exit"] = "task_start"
+
+
+@dataclass(frozen=True)
+class ProcessRecord:
+    """Serializable current projection for one task-owned process."""
+
+    process_id: str
+    task_id: str
+    start_attempt_id: str
+    start_generation_id: int
+    command_summary: str
+    cwd_summary: str
+    pid: int
+    status: ProcessStatus
+    started_at: str
+    ended_at: str | None = None
+    exit_code: int | None = None
+    stdout_offset: int = 0
+    stderr_offset: int = 0
+    terminal_event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ProcessEvent:
+    """Append-only lifecycle fact; log bodies never enter State."""
+
+    event_id: str
+    process_id: str
+    task_id: str
+    kind: ProcessEventKind
+    generation_id: int
+    start_attempt_id: str
+    stdout_offset: int
+    stderr_offset: int
+    exit_code: int | None = None
+    caused_by_control_attempt_id: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ProcessWaitState:
+    process_ids: tuple[str, ...]
+    reason: Literal["no_new_output", "still_running"]
+    last_observed_event_ids: tuple[str, ...] = ()
+    last_stdout_offsets: tuple[int, ...] = ()
+    last_stderr_offsets: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -271,6 +320,7 @@ class TraceEvent:
 @dataclass
 class AgentState:
     task: str = ""
+    task_id: str = ""
     current_goal: str = ""
     tool_history: list[dict] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
@@ -290,6 +340,9 @@ class AgentState:
     failures: list[FailureEvent] = field(default_factory=list)
     recovery_actions: list[RecoveryAction] = field(default_factory=list)
     trace_events: list[TraceEvent] = field(default_factory=list)
+    process_records: list[ProcessRecord] = field(default_factory=list)
+    process_events: list[ProcessEvent] = field(default_factory=list)
+    awaiting_process: ProcessWaitState | None = None
     recovery_notice: str = ""
     _verification_generation: int = field(default=0, init=False, repr=False)
     _last_verified_generation: int = field(default=-1, init=False, repr=False)
@@ -310,9 +363,12 @@ class AgentState:
     _original_attempt_arguments: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _next_recovery: int = field(default=1, init=False, repr=False)
     _next_trace_sequence: int = field(default=1, init=False, repr=False)
+    _next_task_id: int = field(default=1, init=False, repr=False)
+    _next_process_event: int = field(default=1, init=False, repr=False)
     _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _stagnation_progress_marker: str | None = field(default=None, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
+    _process_manager: Any = field(default=None, init=False, repr=False, compare=False)
     _lock: Any = field(default_factory=Lock, init=False, repr=False, compare=False)
     _projection_ready: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -412,6 +468,10 @@ class AgentState:
             "files_changed": tuple(sorted(self.files_changed)),
             "verification_required": self._verification_required,
             "verification_conclusion": latest_verification,
+            "processes": tuple(
+                (item.process_id, item.status, item.stdout_offset, item.stderr_offset)
+                for item in self.process_records
+            ),
         }
         return json.dumps(marker, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"), default=str)
@@ -429,6 +489,8 @@ class AgentState:
             return "使用 /resume <反馈>，或 /new <任务>" if resumable else "使用 /new <任务>"
         if self.planning_state.phase == "awaiting_approval":
             return "等待 CLI 用户批准、驳回或继续调查"
+        if self.status == "awaiting_process":
+            return "继续输入以观察后台进程"
         if self._repair_phase == "verification_required":
             return "独占调用 run_shell(purpose=verification)"
         if self._repair_phase == "diagnosis_required":
@@ -683,6 +745,34 @@ class AgentState:
     def failure_events(self) -> list[FailureEvent]:
         with self._lock:
             return list(self.failures)
+
+    @property
+    def process_manager(self) -> Any:
+        return self._process_manager
+
+    @property
+    def processes(self) -> list[ProcessRecord]:
+        """Return a detached view of task-local process metadata."""
+        with self._lock:
+            return list(self.process_records)
+
+    @property
+    def process_lifecycle_events(self) -> list[ProcessEvent]:
+        with self._lock:
+            return list(self.process_events)
+
+    def bind_process_manager(self, manager: Any) -> None:
+        """Bind the runtime owner without placing operating-system handles in State."""
+        with self._lock:
+            self._process_manager = manager
+
+    def ensure_task_id(self) -> str:
+        """Allocate a task id for compatibility callers that skipped begin_task."""
+        with self._lock:
+            if not self.task_id:
+                self.task_id = f"task-{self._next_task_id}"
+                self._next_task_id += 1
+            return self.task_id
 
     @property
     def checkpoint_store(self) -> CheckpointStore | None:
@@ -1553,6 +1643,223 @@ class AgentState:
             return None, "checkpoint 创建晚于目标 failure"
         return checkpoint, None
 
+    def _register_process_start_locked(self, result: Any, attempt: ExecutionAttempt) -> None:
+        """Register a successful start beside its already committed attempt."""
+        metadata = getattr(result, "process_metadata", None)
+        if not isinstance(metadata, dict):
+            return
+        process_id = metadata.get("process_id")
+        task_id = metadata.get("task_id") or self.task_id
+        pid = metadata.get("pid")
+        if (not isinstance(process_id, str) or not process_id
+                or not isinstance(task_id, str) or task_id != self.task_id
+                or isinstance(pid, bool) or not isinstance(pid, int)):
+            return
+        if any(item.process_id == process_id for item in self.process_records):
+            return
+        started_at = str(metadata.get("started_at") or "")
+        record = ProcessRecord(
+            process_id, task_id, attempt.attempt_id, attempt.generation_id,
+            str(metadata.get("command") or "")[:240],
+            str(metadata.get("cwd") or "")[:400], pid, "running", started_at,
+        )
+        event_id = f"pe-{self._next_process_event}"
+        self._next_process_event += 1
+        event = ProcessEvent(
+            event_id, process_id, task_id, "started", attempt.generation_id,
+            attempt.attempt_id, 0, 0,
+        )
+        self.process_records.append(record)
+        self.process_events.append(event)
+        self._append_trace_event_locked(
+            "process_event",
+            generation_id=attempt.generation_id,
+            revision_id=self.planning_state.active_revision_id,
+            record_type="process_event",
+            record_id=event_id,
+        )
+
+    def sync_processes(self, facts: Any) -> list[ProcessEvent]:
+        """Commit manager observations at one foreground synchronization point."""
+        committed: list[ProcessEvent] = []
+        with self._lock:
+            if not isinstance(facts, (list, tuple)):
+                return committed
+            for fact in facts:
+                process_id = getattr(fact, "process_id", None)
+                if not isinstance(process_id, str):
+                    continue
+                index = next(
+                    (i for i, item in enumerate(self.process_records)
+                     if item.process_id == process_id and item.task_id == self.task_id),
+                    None,
+                )
+                if index is None:
+                    # A start can finish before its attempt is committed.  It
+                    # becomes visible only after record_execution_result adds
+                    # the ProcessRecord and started event atomically.
+                    continue
+                record = self.process_records[index]
+                stdout_offset = max(record.stdout_offset, int(getattr(fact, "stdout_offset", 0) or 0))
+                stderr_offset = max(record.stderr_offset, int(getattr(fact, "stderr_offset", 0) or 0))
+                if record.terminal_event_id is not None:
+                    if (stdout_offset != record.stdout_offset or stderr_offset != record.stderr_offset):
+                        self.process_records[index] = replace(
+                            record, stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                        )
+                    continue
+                status = str(getattr(fact, "status", "running"))
+                if status not in ("running", "exited", "failed"):
+                    status = "running"
+                if not bool(getattr(fact, "newly_exited", False)):
+                    self.process_records[index] = replace(
+                        record, stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                    )
+                    continue
+                event_id = f"pe-{self._next_process_event}"
+                self._next_process_event += 1
+                event_kind: ProcessEventKind = "exited" if status == "exited" else "failed"
+                generation_id = self._verification_generation
+                event = ProcessEvent(
+                    event_id, process_id, self.task_id, event_kind, generation_id,
+                    record.start_attempt_id, stdout_offset, stderr_offset,
+                    getattr(fact, "exit_code", None), reason="natural_exit",
+                )
+                self.process_events.append(event)
+                self.process_records[index] = replace(
+                    record, status=status, ended_at=getattr(fact, "ended_at", None),
+                    exit_code=getattr(fact, "exit_code", None),
+                    stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                    terminal_event_id=event_id,
+                )
+                self._append_trace_event_locked(
+                    "process_event", generation_id=generation_id,
+                    revision_id=self.planning_state.active_revision_id,
+                    record_type="process_event", record_id=event_id,
+                )
+                active_failure = self._active_failure_id
+                strict_verification = self._repair_phase == "verification_required"
+                self._verification_generation += 1
+                self.generations.append(ExecutionGeneration(
+                    self._verification_generation,
+                    opened_by_process_event_id=event_id,
+                    open_reason="process_exit",
+                ))
+                self.verification_evidence.clear()
+                self._last_verified_generation = -1
+                self._verification_required = True
+                if active_failure or strict_verification:
+                    # Preserve existing repair facts; the process event is a
+                    # second cause and must not overwrite the active failure.
+                    if self.status not in ("blocked", "failed"):
+                        self.status = "blocked"
+                        self.terminal_reason = (
+                            "process_exit_conflict: "
+                            f"process_id={process_id}; event={event_id}; "
+                            f"active_failure={active_failure or '-'}; "
+                            f"strict_verification={str(strict_verification).lower()}"
+                        )
+                if self._process_manager is not None and hasattr(self._process_manager, "acknowledge_exit"):
+                    self._process_manager.acknowledge_exit(process_id)
+                committed.append(event)
+        return committed
+
+    def active_process_records(self) -> list[ProcessRecord]:
+        with self._lock:
+            return [item for item in self.process_records if item.status == "running"]
+
+    def enter_awaiting_process(self, reason: str = "still_running") -> ProcessWaitState | None:
+        with self._lock:
+            active = [item for item in self.process_records if item.status == "running"]
+            if not active or self.status in ("blocked", "failed"):
+                return None
+            wait = ProcessWaitState(
+                tuple(item.process_id for item in active),
+                reason if reason in ("no_new_output", "still_running") else "still_running",
+                tuple(item.terminal_event_id or "" for item in active),
+                tuple(item.stdout_offset for item in active),
+                tuple(item.stderr_offset for item in active),
+            )
+            self.awaiting_process = wait
+            self.status = "awaiting_process"
+            return wait
+
+    def resume_process_wait(self) -> None:
+        with self._lock:
+            if self.status == "awaiting_process":
+                self.status = "running"
+            self.awaiting_process = None
+
+    def record_process_cleanup(self, report: Any) -> None:
+        """Commit cleanup confirmations while the old task is still retained."""
+        with self._lock:
+            for item in getattr(report, "items", ()):
+                process_id = getattr(item, "process_id", None)
+                index = next((i for i, record in enumerate(self.process_records)
+                              if record.process_id == process_id), None)
+                if index is None:
+                    continue
+                record = self.process_records[index]
+                if getattr(item, "complete", False):
+                    if record.terminal_event_id is not None:
+                        continue
+                    event_id = f"pe-{self._next_process_event}"
+                    self._next_process_event += 1
+                    kind: ProcessEventKind = "killed" if getattr(item, "killed", False) else "terminated"
+                    event = ProcessEvent(
+                        event_id, record.process_id, record.task_id, kind,
+                        self._verification_generation, record.start_attempt_id,
+                        max(record.stdout_offset, int(getattr(item, "stdout_offset", 0) or 0)),
+                        max(record.stderr_offset, int(getattr(item, "stderr_offset", 0) or 0)),
+                        getattr(item, "exit_code", None),
+                        reason=str(getattr(item, "reason", "cleanup")),
+                    )
+                    self.process_events.append(event)
+                    self._append_trace_event_locked(
+                        "process_event",
+                        generation_id=self._verification_generation,
+                        revision_id=self.planning_state.active_revision_id,
+                        record_type="process_event",
+                        record_id=event_id,
+                    )
+                    self.process_records[index] = replace(
+                        record, status="terminated",
+                        ended_at=getattr(item, "ended_at", None) or record.ended_at or "cleanup",
+                        exit_code=getattr(item, "exit_code", None),
+                        stdout_offset=event.stdout_offset,
+                        stderr_offset=event.stderr_offset,
+                        terminal_event_id=event_id,
+                    )
+                else:
+                    event_id = f"pe-{self._next_process_event}"
+                    self._next_process_event += 1
+                    cleanup_event = ProcessEvent(
+                        event_id, record.process_id, record.task_id, "cleanup_failed",
+                        self._verification_generation, record.start_attempt_id,
+                        max(record.stdout_offset, int(getattr(item, "stdout_offset", 0) or 0)),
+                        max(record.stderr_offset, int(getattr(item, "stderr_offset", 0) or 0)),
+                        getattr(item, "exit_code", None),
+                        reason=str(getattr(item, "reason", "cleanup incomplete")),
+                    )
+                    self.process_events.append(cleanup_event)
+                    self._append_trace_event_locked(
+                        "process_event",
+                        generation_id=self._verification_generation,
+                        revision_id=self.planning_state.active_revision_id,
+                        record_type="process_event",
+                        record_id=event_id,
+                    )
+            incomplete = getattr(report, "incomplete", ())
+            if incomplete:
+                self.terminal_reason = (
+                    "process_cleanup_incomplete: "
+                    + "; ".join(
+                        f"pid={getattr(item, 'pid', '?')}, process_id={getattr(item, 'process_id', '?')}: "
+                        f"{getattr(item, 'reason', 'unknown')}"
+                        for item in incomplete
+                    )
+                )
+
     def _ensure_generation(self) -> None:
         if not self.generations:
             self.generations.append(ExecutionGeneration(self._verification_generation))
@@ -2012,6 +2319,8 @@ class AgentState:
                 record_type="attempt",
                 record_id=attempt_id,
             )
+            if result.tool == "start_process" and result.outcome == "succeeded":
+                self._register_process_start_locked(result, attempt)
             if getattr(reservation, "recovery_id", None):
                 rid = reservation.recovery_id
                 for i, action in enumerate(self.recovery_actions):
@@ -2211,6 +2520,8 @@ class AgentState:
         if mode not in ("auto", "plan_only"):
             raise ValueError("未知规划模式")
         with self._lock:
+            self.task_id = f"task-{self._next_task_id}"
+            self._next_task_id += 1
             self.task = task; object.__setattr__(self, "current_goal", ""); self.status = "running"; self.terminal_reason = ""
             self.tool_history.clear(); self.files_changed.clear(); self.errors.clear()
             self.plan_revisions.clear(); self.plan_progress_history.clear()
@@ -2221,6 +2532,7 @@ class AgentState:
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
             self.trace_events.clear()
+            self.process_records.clear(); self.process_events.clear(); self.awaiting_process = None
             self._verification_generation = 0; self._last_verified_generation = -1
             self._verification_required = False; self._repair_phase = "idle"
             self._active_failure_id = None; self._active_recovery_id = None
@@ -2230,6 +2542,7 @@ class AgentState:
             self._fingerprint_counts.clear(); self._repair_cycles = 0; self._reserved_repair_cycles = 0
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             self._next_trace_sequence = 1
+            self._next_process_event = 1
             self._revision_attempt_boundaries.clear()
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()
@@ -2265,7 +2578,37 @@ class AgentState:
     def completion_reminder(self) -> dict[str, object] | None:
         with self._lock:
             if self.status in ("blocked", "failed"): return None
+            if self.status == "awaiting_process": return None
             if self.planning_state.phase == "awaiting_approval": return None
+            active_processes = [
+                item for item in self.process_records if item.status == "running"
+            ]
+            if active_processes:
+                return {
+                    "unfinished_todos": [
+                        step["content"] for step in (self._plan_view_locked() or {}).get("steps", [])
+                        if step["status"] != "completed"
+                    ],
+                    "unfinished_plan_steps": [
+                        step["content"] for step in (self._plan_view_locked() or {}).get("steps", [])
+                        if step["status"] != "completed"
+                    ],
+                    "verification_required": self._verification_required,
+                    "repair_phase": self._repair_phase,
+                    "active_failure_id": self._active_failure_id,
+                    "active_recovery_id": self._active_recovery_id,
+                    "awaiting_process": True,
+                    "process_ids": [item.process_id for item in active_processes],
+                    "progress_marker": (
+                        "awaiting_process",
+                        tuple(item.process_id for item in active_processes),
+                        self._verification_generation,
+                    ),
+                    "message": (
+                        "后台进程仍在运行。请交回 CLI，显示 process_id 后等待用户继续输入；"
+                        "进程退出后必须重新独立 verification。"
+                    ),
+                }
             active = self._plan_view_locked()
             missing = [step["content"] for step in (active or {}).get("steps", [])
                        if step["status"] != "completed"]
@@ -2336,7 +2679,7 @@ class AgentState:
                 "",
             )
             return {
-                "task": self.task, "current_goal": projected_current_goal,
+                "task": self.task, "task_id": self.task_id, "current_goal": projected_current_goal,
                 "tool_history": deepcopy(self.tool_history), "files_changed": deepcopy(self.files_changed),
                 "errors": deepcopy(self.errors), "status": self.status, "terminal_reason": self.terminal_reason,
                 "allowed_next_action": self._allowed_next_action_locked(),
@@ -2412,6 +2755,9 @@ class AgentState:
                 "failures": [asdict(x) for x in self.failures],
                 "recovery_actions": [asdict(x) for x in self.recovery_actions],
                 "trace_events": [asdict(x) for x in self.trace_events],
+                "processes": [asdict(x) for x in self.process_records],
+                "process_events": [asdict(x) for x in self.process_events],
+                "awaiting_process": asdict(self.awaiting_process) if self.awaiting_process is not None else None,
                 "checkpoints": self._checkpoint_store.snapshot() if self._checkpoint_store is not None else [],
                 "rollback_checkpoints": (
                     [checkpoint.snapshot() for checkpoint in self._checkpoint_store.available()]

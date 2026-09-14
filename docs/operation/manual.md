@@ -1,6 +1,24 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.25**（计划轨迹回放与验收；含 v0.24 证据驱动重规划、v0.23 只读规划与用户交接、v0.22 Plan Contract、v0.21 Trace & Replay 和此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.26**（后台进程启动与任务边界；含 v0.25 计划轨迹回放、v0.24 证据驱动重规划、v0.23 只读规划与用户交接及此前可靠执行能力）。
+
+## v0.26 后台进程启动与任务边界
+
+长命令会让同步执行器一直等到命令退出；开发服务器、文件监听器或持续构建因此无法在同一个 Agent 任务中继续工作。v0.26 增加 `start_process(command, cwd?)`：它沿用 `run_shell` 的 shell 字符串语义，但创建进程后立即返回任务专属的 `process_id`。`run_shell` 仍保持同步执行、30 秒超时和原有 `[exit=N]` 返回格式。
+
+后台进程的运行态由 CLI 生命周期内的 `ProcessManager` 持有。State 只保存可快照的 `ProcessRecord` 和 append-only `ProcessEvent`：任务 ID、启动 attempt、generation、PID、状态、时间、退出码、stdout/stderr 累计字节位置和最终事件 ID；不保存 `Popen`、管道、线程或完整日志。每个任务最多有 4 个活动进程，每条输出流最多保留 64 KiB；启动时立即排空两条管道，stdin 连接 `DEVNULL`。
+
+成功结果是有界 JSON，例如：
+
+```json
+{"process_id":"proc-1","pid":12345,"status":"running","start_attempt_id":"a-3"}
+```
+
+这只表示进程已经创建。自然零退出记录 `exited`，自然非零退出记录 `failed`，并引用启动 attempt；同步退出会使当前 verification 失效、开启一个新的 generation。进程状态、启动结果和缓冲位置都不是 verification evidence，退出后仍需用独立的 `run_shell(purpose="verification")` 验证最终状态。
+
+模型在后台进程仍运行时给出无 `tool_calls` 的文本，Runtime 会把任务置为 `awaiting_process`，交回 CLI，不把它判为 `done`，也不额外消耗一轮 LLM。CLI 显示 task/process ID、累计输出位置和剩余计划、修复、验证义务；下一次用户输入会先同步退出事实，再恢复原任务。
+
+`/new`、`/reset`、EOF、`exit`、`KeyboardInterrupt` 和异常退出都会在清空 State 前清理当前任务的进程：先请求正常终止并等待最多 2 秒，再强制结束并等待最多 2 秒；确认进程结束后有界等待收集线程读到 stdout/stderr 的 EOF，才关闭管道。POSIX 还须确认受管进程组已消失；外层 shell 先退出时，同组后代或仍持有管道的后代都会继续阻止任务完成和释放活动额度。Windows 在直接子进程与两条管道已确认结束时允许切换任务，报告中仍说明无法证明任意派生进程树已结束。清理不完整时保留旧任务和 Manager 登记信息，报告 PID、process ID 和原因；POSIX 无法控制脱离进程组且关闭继承管道的后代。
 
 ## v0.25 计划轨迹回放与验收
 
@@ -202,6 +220,8 @@ PYTHONPATH=src python -m mini_agent
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
 
+进程运行参数是 v0.26 的固定实现默认值，不需要写入配置：每任务最多 4 个活动进程；每进程 stdout、stderr 各保留最多 64 KiB；任务边界正常终止和强制结束各等待最多 2 秒。
+
 > 真实配置写进 `config_local.py`（不进 git）；无 `config_local.py` 时回退到 `config.py` 占位值。
 
 ---
@@ -221,11 +241,11 @@ python -m mini_agent
 启动后进入交互提示符。安装 `interactive` extra 后，Enter 提交、Shift+Enter 换行，粘贴多行文本后按 Enter 提交；未安装时使用标准库单行输入。输入 `exit` 或 `quit` 退出，或按 Ctrl+C/Ctrl+D。
 
 普通后续输入默认继续当前任务。使用 `/new <任务>` 清空旧任务并开始新任务，使用
-`/reset` 清空当前任务和任务级状态；会话内已经授予的权限和项目级指令不受影响。
+`/reset` 清空当前任务和任务级状态；两个命令会先清理该任务登记的后台进程，清理不完整时保留旧任务并报告原因。会话内已经授予的权限和项目级指令不受影响。
 
 ---
 
-## 3. 当前能力（v0.25，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.26，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -243,7 +263,10 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `tool_history` | 工具名、参数、成功状态、结果摘要 |
 | `files_changed` | 成功写入或编辑过的文件路径 |
 | `errors` | 权限拒绝或工具失败记录 |
-| `status` | `running` / `done` / `blocked` / `failed` |
+| `status` | `running` / `awaiting_process` / `done` / `blocked` / `failed` |
+| `task_id` | 每次 `begin_task` 分配且不复用的任务 ID |
+| `processes` / `process_events` | 当前任务的后台进程投影与 append-only 生命周期事件 |
+| `awaiting_process` | 进程仍运行时的非终态 CLI 交接信息 |
 | `todos` | active Plan Contract 的只读兼容投影 |
 | `plan_revisions` / `plan_progress_history` | 不可变计划结构历史与独立步骤进度事件；完整历史不直接注入 LLM 上下文 |
 | `planning_state` / `active_plan` | 当前计划阶段、active revision 和应用进度事件后的执行视图 |
@@ -311,11 +334,12 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `list_dir` | `path?: str` | allow | 列出目录内容，目录加 `/` 后缀，上限 200 条 |
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
+| `start_process` | `command: str, cwd?: str` | **独立按命令模式 ASK** | 启动后台 shell 命令，立即返回 `process_id`；每任务最多 4 个活动进程 |
 | `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件检查点 |
 
 ### 3.6 权限交互
 
-v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。
+v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 和 `start_process` 各自提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。`start_process` 有自己的规则表，不继承 `run_shell` 已放行的命令。
 
 **规则格式**（`permission.py` 的 `PERMISSION_RULES`）：
 
@@ -348,6 +372,8 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 | `echo *` | allow | 只读命令放行 |
 | `*` | ask | 其他命令每次问用户 |
 
+`start_process` 默认对所有命令 ASK。用户选择 `always` 后只保存 `start_process` 对应的命令 pattern；它不会改变同一命令在 `run_shell` 中的授权。
+
 `write_file`/`edit_file` 执行前会提示：
 ```
 允许执行 write_file({...})? [once/always/reject]
@@ -363,6 +389,8 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 2. `ToolExecutor` 先过权限闸门（`PermissionGate.guard`）
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
+
+`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型在仍有活动进程时只回复文本，会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.26 不提供模型可调用的状态读取、日志读取或 terminate/kill 工具；这些能力分别属于后续版本，任务边界清理仍由 Runtime 执行。
 
 如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
@@ -413,9 +441,8 @@ $env:PYTHONPATH="src"; python tests/test_executor.py   # Executor 结果回调
 
 ### 4.2 快速验证 import 链路
 ```bash
-$env:PYTHONPATH="src"
-python -c "from mini_agent.tools import registry; print([t.name for t in registry.list_tools()])"
-# 期望输出: ['calculate', 'read_file', 'write_file', 'edit_file', 'list_dir', 'grep', 'run_shell']
+PYTHONPATH=src python -c "from mini_agent.state import AgentState; from mini_agent.tools import create_registry; print([t.name for t in create_registry(AgentState()).list_tools()])"
+# 期望输出包含: calculate, read_file, write_file, edit_file, list_dir, grep, run_shell, start_process
 ```
 
 ---
@@ -437,3 +464,6 @@ agent loop 不对 LLM 或 CLI 顶层异常做兜底；这是为了保持核心�
 
 ### Q5：中文乱码（Windows 控制台）
 `__main__.py` 已对 win32 设 `sys.stdout.reconfigure(encoding="utf-8")`。若仍乱码，PowerShell 执行 `chcp 65001` 切到 UTF-8。
+
+### Q6：后台进程显示 awaiting_process
+这是非终态交接，表示模型已经暂停回复但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。v0.26 没有模型可调用的日志读取或主动终止工具，`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。

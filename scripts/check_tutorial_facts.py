@@ -37,6 +37,7 @@ EXPECTED = {
     "23-plan-mode-handoff.md": ("v0.23", "v0.22..v0.23"),
     "24-replanning-policy.md": ("v0.24", "v0.23..v0.24"),
     "25-plan-trace-evaluation.md": ("v0.25", "v0.24..v0.25"),
+    "26-background-process-boundaries.md": ("v0.26", "v0.25..v0.26"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

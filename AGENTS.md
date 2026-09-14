@@ -26,7 +26,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.23`（只读规划与用户交接）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.26`（后台进程启动与任务边界）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
 `progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、
@@ -35,12 +35,15 @@ generation 或 `verification_required` 发生变化后才允许再次提醒。�
 调用推进工具；确实无法继续时才说明具体阻塞原因。没有 `progress_marker` 的旧式
 State 保持一次提醒兼容行为。
 
+活动后台进程属于当前 `task_id`，必须阻止任务进入 `done`。模型无工具调用而进程仍运行时使用 `awaiting_process` 交回 CLI；用户恢复前先同步进程。`/new`、`/reset`、EOF、`exit` 和异常退出必须先有界清理当前任务登记的进程；清理不完整时保留旧任务并报告具体进程 ID、PID 和原因。
+
 ## 架构索引
 
 - `src/mini_agent/agent.py`：LLM 调用与 agent loop。
 - `context.py`：每轮上下文视图、预算裁剪、历史压缩和受保护指令注入。
 - `state.py`：独立于消息历史的任务、Plan Contract、工具和验证状态；`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读投影。
 - `permission.py`：按工具与参数模式匹配的 allow/deny/ask 权限闸门。
+- `processes.py`：CLI 生命周期内的后台进程句柄、进程组、双流排空、环形缓冲和有界清理；不可快照资源不进入 State。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。
 

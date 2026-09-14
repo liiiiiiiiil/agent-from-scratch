@@ -324,6 +324,17 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         output.close()
         return value
 
+    def _sync_processes():
+        state = getattr(context_manager, "state", None)
+        manager = getattr(getattr(tool_executor, "registry", None), "_process_manager", None)
+        if state is None or manager is None or not hasattr(state, "sync_processes"):
+            return
+        task_id = getattr(state, "task_id", "")
+        if not task_id:
+            return
+        facts = manager.sync_processes(task_id)
+        state.sync_processes(facts)
+
     def _terminal_state_result(state):
         """Return the loop result for a terminal State, if it became terminal."""
         status = getattr(state, "status", None) if state is not None else None
@@ -339,6 +350,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         return _finish("计划等待用户决定")
 
     for i in range(MAX_ITERATIONS):
+        _sync_processes()
         prepared_messages = context_manager.prepare_messages()
         if not internal_retry:
             output.round_start(i + 1)
@@ -435,6 +447,14 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         # 无 tool_calls = 模型给出最终文本回复，结束
         if not msg.get("tool_calls"):
             state = getattr(context_manager, "state", None)
+            _sync_processes()
+            terminal_result = _terminal_state_result(state)
+            if terminal_result is not None:
+                return _finish(terminal_result)
+            if (state is not None and hasattr(state, "active_process_records")
+                    and state.active_process_records()):
+                state.enter_awaiting_process("still_running")
+                return _finish(msg.get("content", ""))
             if (state is not None and
                     getattr(getattr(state, "planning_state", None), "phase", None) == "exploring" and
                     getattr(state, "repair_phase", "idle") == "idle" and
@@ -685,6 +705,11 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "tool_call_id": tool_call_id,
                 "content": content,
             })
+
+        # A process can exit while the tool round is being committed.  Sync
+        # only after every role=tool result is in history so the next context
+        # view sees one complete protocol round plus the lifecycle fact.
+        _sync_processes()
 
         # A tool handler may exhaust a budget or apply a recovery strategy
         # that makes the task terminal.  All results above must still be

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [v0.26.0] - Background process start and task boundaries
+
+- Added the standard-library `ProcessManager` and the model-visible `start_process(command, cwd?)` tool. It returns immediately with a task-owned `process_id`, keeps stdin closed, drains both output streams, and bounds each stream at 64 KiB.
+- Added task-scoped process records and append-only `started`, natural `exited`, and natural `failed` lifecycle events with generation and launch-attempt references. Process exit invalidates current verification and opens exactly one successor generation.
+- Added the `awaiting_process` handoff for text-only model replies while a process is still running. The CLI resumes the original task on the next user input after synchronizing process state.
+- Added task-boundary cleanup for `/new`, `/reset`, EOF, `exit`, `KeyboardInterrupt`, and exceptional CLI exits. Completion waits for the direct child, the managed POSIX process group, and both output pipes; incomplete cleanup retains the process ID and PID for a bounded retry. On Windows, confirmed direct-child and pipe cleanup permits task switching while reporting the unverified descendant-tree limit.
+- Stream collectors now expose short flushed output promptly and retain started-thread registrations across startup failures. Detached POSIX descendants that close inherited pipes and leave the managed group remain outside this lifecycle boundary.
+- Preserved synchronous `run_shell` behavior, its 30-second timeout, output format, and independent command-pattern permission rules.
+- Added lesson 26, process lifecycle tests, and synchronized the runbook, navigation, README files, package version, and process-management plan status.
+
 ## [v0.25.0] - Plan trace and evaluation
 
 - Added append-only task-local `TraceEvent` ordering for plan, trigger, decision, execution, recovery, verification, and stagnation facts.
