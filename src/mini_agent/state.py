@@ -46,6 +46,10 @@ class PlanRejected(ValueError):
     """A model plan request failed validation without becoming an execution failure."""
 
 
+class SessionExportError(ValueError):
+    """The task is not at a complete, serializable session safety point."""
+
+
 @dataclass(frozen=True)
 class PlanStepDifference:
     step_id: str
@@ -381,6 +385,7 @@ class AgentState:
     _next_task_id: int = field(default=1, init=False, repr=False)
     _next_process_event: int = field(default=1, init=False, repr=False)
     _pending_process_controls: dict[str, tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
+    _pending_attempts: set[str] = field(default_factory=set, init=False, repr=False)
     _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
     _stagnation_progress_marker: str | None = field(default=None, init=False, repr=False)
     _checkpoint_store: CheckpointStore | None = field(default=None, init=False, repr=False, compare=False)
@@ -1983,10 +1988,12 @@ class AgentState:
                 # verification phase.  Normal multi-step edits may continue
                 # before their final verification.
                 self._verification_required = True
-            return AttemptReservation(
+            reservation = AttemptReservation(
                 attempt_id, before, self._verification_generation,
                 fingerprint_reserved=fingerprint_reserved,
             )
+            self._pending_attempts.add(attempt_id)
+            return reservation
 
     def recovery_target(self, action: str, caused_by_failure_id: str,
                         requested_attempt: str | None = None,
@@ -2264,6 +2271,7 @@ class AgentState:
             fingerprint_reserved=True,
         )
         self._next_attempt += 1
+        self._pending_attempts.add(ar.attempt_id)
         return action_record, ar, requested_arguments
 
     def reject_recovery(self, action: Any, caused_by_failure_id: Any, reason: Any,
@@ -2355,6 +2363,7 @@ class AgentState:
                 attempt_id = reservation.attempt_id
                 pre_generation = reservation.pre_generation_id
                 generation_id = reservation.generation_id
+                self._pending_attempts.discard(attempt_id)
             args = deepcopy(result.arguments)
             arguments_hash = canonical_arguments_hash(args)
             fingerprint = (result.tool, arguments_hash)
@@ -2648,6 +2657,7 @@ class AgentState:
             self._next_trace_sequence = 1
             self._next_process_event = 1
             self._pending_process_controls.clear()
+            self._pending_attempts.clear()
             self._revision_attempt_boundaries.clear()
             if self._checkpoint_store is not None:
                 self._checkpoint_store.clear()
@@ -2781,6 +2791,454 @@ class AgentState:
                 "progress_marker": progress_marker,
                 "message": message,
             }
+
+    def session_safety_issues(self) -> list[str]:
+        """Return reasons why this State cannot be saved at a safe point."""
+        with self._lock:
+            return self._session_safety_issues_locked()
+
+    def _session_safety_issues_locked(self) -> list[str]:
+        issues: list[str] = []
+        if self._pending_attempts:
+            issues.append("存在未结算的 tool attempt: " + ", ".join(sorted(self._pending_attempts)))
+        if self._reserved_repair_cycles:
+            issues.append("存在未结算的 recovery 预算预留")
+        proposed_recoveries = [item.recovery_id for item in self.recovery_actions if item.status == "proposed"]
+        if proposed_recoveries:
+            issues.append("存在未结算的 recovery action: " + ", ".join(proposed_recoveries))
+        if self._pending_process_controls:
+            issues.append("存在未提交的进程控制结果")
+        active = [item for item in self.process_records
+                  if item.status == "running" or item.write_pending]
+        if active:
+            issues.append(
+                "存在活动后台进程或在途 stdin: "
+                + ", ".join(f"{item.process_id}(pid={item.pid})" for item in active)
+            )
+        uncommitted_events = [item.process_id for item in self.process_records
+                              if item.status != "running" and item.terminal_event_id is None]
+        if uncommitted_events:
+            issues.append(
+                "存在尚未提交终止事件的进程: " + ", ".join(uncommitted_events)
+            )
+        return issues
+
+    def export_session(self) -> dict[str, Any]:
+        """Export authoritative, JSON-safe task facts for v0.30 sessions.
+
+        Runtime locks, the ProcessManager, checkpoint image bytes and all
+        other live handles are deliberately absent.  Derived projections such
+        as ``todos`` and ``current_goal`` are recomputed by the runtime and
+        therefore are not stored as authoritative facts.
+        """
+        with self._lock:
+            issues = self._session_safety_issues_locked()
+            if issues:
+                raise SessionExportError("；".join(issues))
+
+            generations = [asdict(item) for item in self.generations]
+            if not generations:
+                # Legacy callback users can have execution facts without an
+                # explicit structured reservation.  Represent the implicit
+                # task-start generation in the export without mutating State.
+                generations = [asdict(ExecutionGeneration(0, open_reason="task_start"))]
+
+            payload = {
+                "format": "mini_agent.state",
+                "format_version": 1,
+                "task": self.task,
+                "task_id": self.task_id,
+                "tool_history": deepcopy(self.tool_history),
+                "files_changed": deepcopy(self.files_changed),
+                "errors": deepcopy(self.errors),
+                "status": self.status,
+                "terminal_reason": self.terminal_reason,
+                "plan_revisions": [asdict(item) for item in self.plan_revisions],
+                "plan_progress_history": [asdict(item) for item in self.plan_progress_history],
+                "user_plan_decisions": [asdict(item) for item in self.user_plan_decisions],
+                "replan_triggers": [asdict(item) for item in self.replan_triggers],
+                "planning_state": asdict(self.planning_state),
+                "stagnation_state": asdict(self.stagnation_state),
+                "verification_evidence": [asdict(item) for item in self.verification_evidence],
+                "verification_history": [asdict(item) for item in self.verification_history],
+                "generations": generations,
+                "attempts": [asdict(item) for item in self.attempts],
+                "failures": [asdict(item) for item in self.failures],
+                "recovery_actions": [asdict(item) for item in self.recovery_actions],
+                "trace_events": [asdict(item) for item in self.trace_events],
+                "process_records": [asdict(item) for item in self.process_records],
+                "process_events": [asdict(item) for item in self.process_events],
+                "awaiting_process": asdict(self.awaiting_process) if self.awaiting_process else None,
+                "recovery_notice": self.recovery_notice,
+                "private": {
+                    "verification_generation": self._verification_generation,
+                    "last_verified_generation": self._last_verified_generation,
+                    "verification_required": self._verification_required,
+                    "next_attempt": self._next_attempt,
+                    "next_failure": self._next_failure,
+                    "next_plan_revision": self._next_plan_revision,
+                    "next_plan_progress": self._next_plan_progress,
+                    "next_plan_decision": self._next_plan_decision,
+                    "next_plan_trigger": self._next_plan_trigger,
+                    "fingerprint_counts": [
+                        {"tool": tool, "arguments_hash": arguments_hash, "count": count}
+                        for (tool, arguments_hash), count in sorted(self._fingerprint_counts.items())
+                    ],
+                    "repair_cycles": self._repair_cycles,
+                    "reserved_repair_cycles": self._reserved_repair_cycles,
+                    "repair_phase": self._repair_phase,
+                    "active_failure_id": self._active_failure_id,
+                    "active_recovery_id": self._active_recovery_id,
+                    "failure_retry_counts": [
+                        {"failure_id": failure_id, "count": count}
+                        for failure_id, count in sorted(self._failure_retry_counts.items())
+                    ],
+                    "original_attempt_arguments": [
+                        {"attempt_id": attempt_id, "arguments": deepcopy(arguments)}
+                        for attempt_id, arguments in sorted(self._original_attempt_arguments.items())
+                    ],
+                    "next_recovery": self._next_recovery,
+                    "next_trace_sequence": self._next_trace_sequence,
+                    "next_task_id": self._next_task_id,
+                    "next_process_event": self._next_process_event,
+                    "pending_process_controls": [
+                        {"process_id": process_id, "expected": expected, "attempt_id": attempt_id}
+                        for process_id, (expected, attempt_id)
+                        in sorted(self._pending_process_controls.items())
+                    ],
+                    "pending_attempts": sorted(self._pending_attempts),
+                    "revision_attempt_boundaries": [
+                        {"revision_id": revision_id, "attempt_count": attempt_count}
+                        for revision_id, attempt_count in sorted(self._revision_attempt_boundaries.items())
+                    ],
+                    "stagnation_progress_marker": self._stagnation_progress_marker,
+                },
+                "checkpoint_metadata": (
+                    self._checkpoint_store.snapshot()
+                    if self._checkpoint_store is not None else []
+                ),
+            }
+
+        # Dataclass tuples are intentional in the runtime, but session export
+        # is a plain JSON value so that canonical hashing is independent of the
+        # encoder used by callers.
+        normalized = json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        self.validate_session_export(normalized)
+        return normalized
+
+    @staticmethod
+    def validate_session_export(payload: Any) -> None:
+        """Validate State references and private counters without restoring it."""
+        if not isinstance(payload, dict):
+            raise SessionExportError("State 导出必须是 JSON object")
+        if payload.get("format") != "mini_agent.state" or payload.get("format_version") != 1:
+            raise SessionExportError("未知或不支持的 State 导出版本")
+
+        def require_type(name: str, expected: type | tuple[type, ...]) -> Any:
+            value = payload.get(name)
+            if not isinstance(value, expected):
+                raise SessionExportError(f"State 字段 {name} 类型无效")
+            return value
+
+        task = require_type("task", str)
+        task_id = require_type("task_id", str)
+        status = require_type("status", str)
+        if status not in {"idle", "running", "awaiting_process", "done", "blocked", "failed"}:
+            raise SessionExportError(f"未知 State status: {status}")
+
+        list_names = (
+            "tool_history", "files_changed", "errors", "plan_revisions",
+            "plan_progress_history", "user_plan_decisions", "replan_triggers",
+            "verification_evidence", "verification_history", "generations",
+            "attempts", "failures", "recovery_actions", "trace_events",
+            "process_records", "process_events", "checkpoint_metadata",
+        )
+        for name in list_names:
+            require_type(name, list)
+        record_lists = (
+            "plan_revisions", "plan_progress_history", "user_plan_decisions",
+            "replan_triggers", "verification_evidence", "verification_history",
+            "generations", "attempts", "failures", "recovery_actions",
+            "trace_events", "process_records", "process_events", "checkpoint_metadata",
+        )
+        for name in record_lists:
+            if any(not isinstance(item, dict) for item in payload[name]):
+                raise SessionExportError(f"State {name} 含非 object 记录")
+        planning = require_type("planning_state", dict)
+        stagnation = require_type("stagnation_state", dict)
+        private = require_type("private", dict)
+
+        required_private = {
+            "verification_generation", "last_verified_generation", "verification_required",
+            "next_attempt", "next_failure", "next_plan_revision", "next_plan_progress",
+            "next_plan_decision", "next_plan_trigger", "fingerprint_counts", "repair_cycles",
+            "reserved_repair_cycles", "repair_phase", "active_failure_id", "active_recovery_id",
+            "failure_retry_counts", "original_attempt_arguments", "next_recovery",
+            "next_trace_sequence", "next_task_id", "next_process_event",
+            "pending_process_controls", "pending_attempts", "revision_attempt_boundaries",
+        }
+        missing_private = sorted(required_private - set(private))
+        if missing_private:
+            raise SessionExportError("State private 字段缺失: " + ", ".join(missing_private))
+
+        def unique(items: list[Any], label: str) -> None:
+            if len(items) != len(set(items)):
+                raise SessionExportError(f"State {label} 含重复 ID")
+
+        generations = [item.get("generation_id") for item in payload["generations"]]
+        if any(not isinstance(item, int) or item < 0 for item in generations):
+            raise SessionExportError("generation_id 必须是非负整数")
+        unique(generations, "generation")
+        if generations != sorted(generations):
+            raise SessionExportError("generation 记录必须按顺序排列")
+        if not generations or generations[0] != 0:
+            raise SessionExportError("generation 必须从 0 开始")
+        generation_ids = set(generations)
+        current_generation = private.get("verification_generation")
+        if not isinstance(current_generation, int) or current_generation < 0:
+            raise SessionExportError("verification_generation 无效")
+        if generation_ids and current_generation not in generation_ids:
+            raise SessionExportError("当前 generation 不存在于 generation 记录")
+        if private.get("last_verified_generation") not in {-1, *generation_ids}:
+            raise SessionExportError("last_verified_generation 引用不存在")
+        if not isinstance(private.get("verification_required"), bool):
+            raise SessionExportError("verification_required 类型无效")
+        for name in (
+            "fingerprint_counts", "failure_retry_counts", "original_attempt_arguments",
+            "pending_process_controls", "pending_attempts", "revision_attempt_boundaries",
+        ):
+            if not isinstance(private.get(name), list):
+                raise SessionExportError(f"State private 字段 {name} 类型无效")
+        if any(not isinstance(item, dict) for item in private["fingerprint_counts"]):
+            raise SessionExportError("fingerprint_counts 含非 object 记录")
+        if any(not isinstance(item, dict) for item in private["failure_retry_counts"]):
+            raise SessionExportError("failure_retry_counts 含非 object 记录")
+        if any(not isinstance(item, dict) for item in private["original_attempt_arguments"]):
+            raise SessionExportError("original_attempt_arguments 含非 object 记录")
+        if any(not isinstance(item, dict) for item in private["revision_attempt_boundaries"]):
+            raise SessionExportError("revision_attempt_boundaries 含非 object 记录")
+
+        plan_revisions = payload["plan_revisions"]
+        revision_ids = [item.get("revision_id") for item in plan_revisions]
+        if any(not isinstance(item, int) or item <= 0 for item in revision_ids):
+            raise SessionExportError("revision_id 必须是正整数")
+        unique(revision_ids, "revision")
+        revision_set = set(revision_ids)
+        step_sets: dict[int, set[str]] = {}
+        for revision in plan_revisions:
+            if revision.get("generation_id") not in generation_ids:
+                raise SessionExportError("plan revision 引用了不存在的 generation")
+            parent = revision.get("parent_revision_id")
+            if parent is not None and (parent not in revision_set or parent >= revision["revision_id"]):
+                raise SessionExportError("plan revision parent 引用无效")
+            steps = revision.get("steps")
+            if not isinstance(steps, list):
+                raise SessionExportError("plan revision steps 类型无效")
+            step_ids = [step.get("step_id") for step in steps if isinstance(step, dict)]
+            if len(step_ids) != len(steps) or any(not isinstance(step_id, str) or not step_id for step_id in step_ids):
+                raise SessionExportError("plan step ID 无效")
+            unique(step_ids, "plan step")
+            step_sets[revision["revision_id"]] = set(step_ids)
+            for step in steps:
+                if any(dependency not in step_sets[revision["revision_id"]]
+                       for dependency in step.get("depends_on", [])):
+                    raise SessionExportError("plan step dependency 引用无效")
+        for event in payload["plan_progress_history"]:
+            if not isinstance(event, dict) or event.get("revision_id") not in revision_set:
+                raise SessionExportError("plan progress 引用了不存在的 revision")
+            if event.get("step_id") not in step_sets[event["revision_id"]]:
+                raise SessionExportError("plan progress 引用了不存在的 step")
+            if event.get("generation_id") not in generation_ids:
+                raise SessionExportError("plan progress 引用了不存在的 generation")
+        progress_ids = [item.get("progress_id") for item in payload["plan_progress_history"]]
+        if any(not isinstance(item, int) or item <= 0 for item in progress_ids):
+            raise SessionExportError("progress_id 无效")
+        unique(progress_ids, "progress")
+        if planning.get("active_revision_id") is not None and planning.get("active_revision_id") not in revision_set:
+            raise SessionExportError("active revision 引用不存在")
+        trigger_ids = [item.get("trigger_id") for item in payload["replan_triggers"]]
+        unique(trigger_ids, "trigger")
+        trigger_set = set(trigger_ids)
+        if planning.get("active_trigger_id") is not None and planning.get("active_trigger_id") not in trigger_set:
+            raise SessionExportError("active trigger 引用不存在")
+        if planning.get("phase") not in {"direct", "exploring", "awaiting_approval", "executing"}:
+            raise SessionExportError("planning phase 无效")
+        if planning.get("mode") not in {"auto", "plan_only"}:
+            raise SessionExportError("planning mode 无效")
+
+        attempts = payload["attempts"]
+        attempt_ids = [item.get("attempt_id") for item in attempts]
+        if any(not isinstance(item, str) or not item.startswith("a-") for item in attempt_ids):
+            raise SessionExportError("attempt_id 无效")
+        unique(attempt_ids, "attempt")
+        attempt_set = set(attempt_ids)
+        for attempt in attempts:
+            if attempt.get("pre_generation_id") not in generation_ids or attempt.get("generation_id") not in generation_ids:
+                raise SessionExportError("attempt 引用了不存在的 generation")
+            if attempt.get("caused_by_attempt_id") is not None and attempt["caused_by_attempt_id"] not in attempt_set:
+                raise SessionExportError("attempt caused_by_attempt_id 引用无效")
+        failure_ids = [item.get("failure_id") for item in payload["failures"]]
+        if any(not isinstance(item, str) or not item.startswith("f-") for item in failure_ids):
+            raise SessionExportError("failure_id 无效")
+        unique(failure_ids, "failure")
+        failure_set = set(failure_ids)
+        for failure in payload["failures"]:
+            if failure.get("generation_id") not in generation_ids or failure.get("caused_by_attempt_id") not in attempt_set:
+                raise SessionExportError("failure 引用无效")
+        recovery_ids = [item.get("recovery_id") for item in payload["recovery_actions"]]
+        if any(not isinstance(item, str) or not item.startswith("r-") for item in recovery_ids):
+            raise SessionExportError("recovery_id 无效")
+        unique(recovery_ids, "recovery")
+        recovery_set = set(recovery_ids)
+        for action in payload["recovery_actions"]:
+            if action.get("generation_id") not in generation_ids or action.get("caused_by_failure_id") not in failure_set:
+                raise SessionExportError("recovery action 引用无效")
+            if action.get("result_generation_id") is not None and action["result_generation_id"] not in generation_ids:
+                raise SessionExportError("recovery result generation 引用无效")
+            if action.get("result_attempt") is not None and action["result_attempt"] not in attempt_set:
+                raise SessionExportError("recovery result attempt 引用无效")
+        for decision in payload["user_plan_decisions"]:
+            if decision.get("revision_id") is not None and decision["revision_id"] not in revision_set:
+                raise SessionExportError("user plan decision 引用了不存在的 revision")
+            if decision.get("generation_id") not in generation_ids:
+                raise SessionExportError("user plan decision 引用了不存在的 generation")
+        decision_ids = [item.get("decision_id") for item in payload["user_plan_decisions"]]
+        if any(not isinstance(item, int) or item <= 0 for item in decision_ids):
+            raise SessionExportError("decision_id 无效")
+        unique(decision_ids, "decision")
+        for trigger in payload["replan_triggers"]:
+            if trigger.get("generation_id") not in generation_ids:
+                raise SessionExportError("replan trigger 引用了不存在的 generation")
+            for key, values in (("caused_by_failure_id", failure_set), ("caused_by_attempt_id", attempt_set), ("caused_by_decision_id", {item.get("decision_id") for item in payload["user_plan_decisions"]})):
+                if trigger.get(key) is not None and trigger.get(key) not in values:
+                    raise SessionExportError(f"replan trigger {key} 引用无效")
+            if trigger.get("result_revision_id") is not None and trigger["result_revision_id"] not in revision_set:
+                raise SessionExportError("replan trigger result revision 引用无效")
+
+        for evidence_name in ("verification_evidence", "verification_history"):
+            for evidence in payload[evidence_name]:
+                if evidence.get("generation_id") not in generation_ids:
+                    raise SessionExportError(f"{evidence_name} 引用了不存在的 generation")
+                if evidence.get("caused_by_attempt_id") is not None and evidence["caused_by_attempt_id"] not in attempt_set:
+                    raise SessionExportError(f"{evidence_name} 引用了不存在的 attempt")
+
+        process_ids = [item.get("process_id") for item in payload["process_records"]]
+        unique(process_ids, "process")
+        process_set = set(process_ids)
+        for process in payload["process_records"]:
+            if process.get("task_id") != task_id or process.get("start_attempt_id") not in attempt_set:
+                raise SessionExportError("process record 引用无效")
+            if process.get("start_generation_id") not in generation_ids:
+                raise SessionExportError("process record generation 引用无效")
+        event_ids = [item.get("event_id") for item in payload["process_events"]]
+        unique(event_ids, "process event")
+        for event in payload["process_events"]:
+            if event.get("process_id") not in process_set or event.get("task_id") != task_id:
+                raise SessionExportError("process event 引用无效")
+            if event.get("generation_id") not in generation_ids or event.get("start_attempt_id") not in attempt_set:
+                raise SessionExportError("process event 的 generation/attempt 引用无效")
+        awaiting = payload.get("awaiting_process")
+        if awaiting is not None:
+            if not isinstance(awaiting, dict) or any(item not in process_set for item in awaiting.get("process_ids", [])):
+                raise SessionExportError("awaiting_process 引用无效")
+
+        counters = (
+            "next_attempt", "next_failure", "next_plan_revision", "next_plan_progress",
+            "next_plan_decision", "next_plan_trigger", "next_recovery", "next_trace_sequence",
+            "next_task_id", "next_process_event", "repair_cycles", "reserved_repair_cycles",
+        )
+        for name in counters:
+            if (not isinstance(private.get(name), int) or isinstance(private[name], bool)
+                    or private[name] < 0):
+                raise SessionExportError(f"State 私有计数器 {name} 无效")
+        for name in (
+            "next_attempt", "next_failure", "next_plan_revision", "next_plan_progress",
+            "next_plan_decision", "next_plan_trigger", "next_recovery", "next_trace_sequence",
+            "next_task_id", "next_process_event",
+        ):
+            if private[name] < 1:
+                raise SessionExportError(f"State 私有计数器 {name} 必须为正整数")
+        if private["repair_cycles"] > MAX_REPAIR_CYCLES or private["reserved_repair_cycles"] > MAX_REPAIR_CYCLES:
+            raise SessionExportError("repair cycle 计数超过预算")
+        if private["reserved_repair_cycles"]:
+            raise SessionExportError("安全点不得包含未结算的 recovery 预算")
+        if len(payload["recovery_actions"]) > MAX_RECOVERY_ACTIONS:
+            raise SessionExportError("recovery action 计数超过预算")
+        if planning.get("replans_used", 0) > MAX_REPLAN_REVISIONS or planning.get("replans_remaining", 0) < 0:
+            raise SessionExportError("replan 预算无效")
+        if private["next_attempt"] <= max([int(str(item)[2:]) for item in attempt_ids] or [0]):
+            raise SessionExportError("next_attempt 未超过已有 attempt")
+        if private["next_failure"] <= max([int(str(item)[2:]) for item in failure_ids] or [0]):
+            raise SessionExportError("next_failure 未超过已有 failure")
+        if private["next_recovery"] <= max([int(str(item)[2:]) for item in recovery_ids] or [0]):
+            raise SessionExportError("next_recovery 未超过已有 recovery")
+        for item in private["fingerprint_counts"]:
+            if not isinstance(item, dict) or not isinstance(item.get("tool"), str) or not isinstance(item.get("arguments_hash"), str) or not isinstance(item.get("count"), int) or item["count"] <= 0:
+                raise SessionExportError("fingerprint_counts 无效")
+        fingerprint_keys = [
+            (item.get("tool"), item.get("arguments_hash"))
+            for item in private["fingerprint_counts"]
+        ]
+        unique(fingerprint_keys, "fingerprint")
+        original = private["original_attempt_arguments"]
+        original_ids = [item.get("attempt_id") for item in original]
+        unique(original_ids, "original attempt arguments")
+        if any(item not in attempt_set for item in original_ids):
+            raise SessionExportError("原始恢复参数引用不存在的 attempt")
+        attempt_by_id = {item["attempt_id"]: item for item in attempts}
+        for item in original:
+            if attempt_by_id[item["attempt_id"]].get("tool") == "write_process" and "input" in item.get("arguments", {}):
+                raise SessionExportError("write_process.input 不得进入 State session 导出")
+            if not isinstance(item.get("arguments"), dict):
+                raise SessionExportError("原始恢复参数必须是 JSON object")
+        for item in private["failure_retry_counts"]:
+            if (not isinstance(item, dict) or item.get("failure_id") not in failure_set
+                    or not isinstance(item.get("count"), int) or item["count"] < 0):
+                raise SessionExportError("failure_retry_counts 无效")
+        if len({item.get("failure_id") for item in private["failure_retry_counts"]}) != len(private["failure_retry_counts"]):
+            raise SessionExportError("failure_retry_counts 含重复 failure")
+        if private.get("pending_attempts"):
+            raise SessionExportError("安全点不得包含 pending attempt")
+        if private.get("pending_process_controls"):
+            raise SessionExportError("安全点不得包含 pending process control")
+        boundaries = private["revision_attempt_boundaries"]
+        if not isinstance(boundaries, list):
+            raise SessionExportError("revision_attempt_boundaries 类型无效")
+        for boundary in boundaries:
+            if boundary.get("revision_id") not in revision_set or not isinstance(boundary.get("attempt_count"), int) or boundary["attempt_count"] < 0 or boundary["attempt_count"] > len(attempts):
+                raise SessionExportError("revision attempt boundary 无效")
+        max_ids = {
+            "next_plan_revision": revision_ids,
+            "next_plan_progress": [item.get("progress_id") for item in payload["plan_progress_history"]],
+            "next_plan_decision": [item.get("decision_id") for item in payload["user_plan_decisions"]],
+            "next_plan_trigger": trigger_ids,
+            "next_trace_sequence": [item.get("sequence_id") for item in payload["trace_events"]],
+            "next_process_event": [int(str(item)[3:]) for item in event_ids if isinstance(item, str) and item.startswith("pe-")],
+        }
+        for counter_name, values in max_ids.items():
+            numeric_values = [value for value in values if isinstance(value, int)]
+            if numeric_values and private[counter_name] <= max(numeric_values):
+                raise SessionExportError(f"{counter_name} 未超过已有记录")
+        if isinstance(task_id, str) and task_id.startswith("task-"):
+            try:
+                task_number = int(task_id[5:])
+            except ValueError:
+                task_number = 0
+            if task_number and private["next_task_id"] <= task_number:
+                raise SessionExportError("next_task_id 未超过当前 task_id")
+        if not isinstance(stagnation, dict) or not isinstance(private.get("repair_phase"), str):
+            raise SessionExportError("修复/停滞状态无效")
+        if private["repair_phase"] not in {"idle", "diagnosis_required", "verification_required"}:
+            raise SessionExportError("repair_phase 无效")
+        if private.get("active_failure_id") is not None and private["active_failure_id"] not in failure_set:
+            raise SessionExportError("active failure 引用无效")
+        if private.get("active_recovery_id") is not None and private["active_recovery_id"] not in recovery_set:
+            raise SessionExportError("active recovery 引用无效")
+        for checkpoint in payload["checkpoint_metadata"]:
+            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("checkpoint_id"), str):
+                raise SessionExportError("checkpoint metadata 无效")
+            if checkpoint.get("attempt_id") not in attempt_set or checkpoint.get("generation_id") not in generation_ids:
+                raise SessionExportError("checkpoint metadata 引用无效")
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

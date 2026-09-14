@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
+import json
 from typing import Callable
 
 from mini_agent.config import CONTEXT_OBSERVABILITY, CONTEXT_WINDOW, OUTPUT_MODE
@@ -12,6 +14,7 @@ from mini_agent.tools.base import format_tool_result
 
 Message = dict[str, object]
 STRUCTURED_STATE_MAX_CHARS = 6000
+_REDACTED_WRITE_INPUT = "<redacted:write_process.input>"
 
 
 @dataclass(frozen=True)
@@ -291,6 +294,156 @@ class ContextManager:
         self.observer = observer or (_default_observer if observability else None)
         self.last_stats: ContextStats | None = None
         self._runtime_notice: str | None = None
+
+    def export_session(self) -> dict[str, object]:
+        """Export task history and compaction state, excluding protected prompts."""
+        history = json.loads(json.dumps(deepcopy(self.history), ensure_ascii=False))
+        if not isinstance(history, list):
+            raise ValueError("Context history 必须是列表")
+        write_inputs: list[str] = []
+        for message in self.history:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls", []) or []:
+                function = call.get("function", {}) if isinstance(call, dict) else {}
+                if not isinstance(function, dict) or function.get("name") != "write_process":
+                    continue
+                raw_arguments = function.get("arguments")
+                try:
+                    arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {}
+                if isinstance(arguments, dict) and isinstance(arguments.get("input"), str):
+                    write_inputs.append(arguments["input"])
+        for message in history:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls", []) or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if not isinstance(function, dict) or function.get("name") != "write_process":
+                    continue
+                raw_arguments = function.get("arguments")
+                if isinstance(raw_arguments, str):
+                    try:
+                        arguments = json.loads(raw_arguments)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(arguments, dict) and "input" in arguments:
+                        arguments["input"] = _REDACTED_WRITE_INPUT
+                        function["arguments"] = json.dumps(
+                            arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                        )
+                elif isinstance(raw_arguments, dict) and "input" in raw_arguments:
+                    raw_arguments["input"] = _REDACTED_WRITE_INPUT
+        # The tool argument is the only field whose provenance is known.  A
+        # blind replace would corrupt unrelated text (and replace("", ...) would
+        # expand every string).  If the same bytes also occur in ordinary
+        # history or the summary, fail closed instead of silently changing it.
+        probe_history = deepcopy(history)
+        for message in probe_history:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls", []) or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if isinstance(function, dict) and function.get("name") == "write_process":
+                    raw_arguments = function.get("arguments")
+                    if isinstance(raw_arguments, str):
+                        try:
+                            raw_arguments = json.loads(raw_arguments)
+                        except json.JSONDecodeError:
+                            continue
+                    if isinstance(raw_arguments, dict):
+                        raw_arguments.pop("input", None)
+                        function["arguments"] = raw_arguments
+
+        def contains_input(value: object, input_text: str) -> bool:
+            if isinstance(value, str):
+                return input_text in value
+            if isinstance(value, dict):
+                return any(contains_input(item, input_text) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_input(item, input_text) for item in value)
+            return False
+
+        summary = self._summary
+        runtime_notice = self._runtime_notice
+        for input_text in set(write_inputs):
+            if input_text and (contains_input(probe_history, input_text)
+                               or input_text in summary
+                               or (runtime_notice is not None and input_text in runtime_notice)):
+                raise ValueError("write_process.input 出现在其他会话文本中，拒绝保存")
+        payload = {
+            "format": "mini_agent.context",
+            "format_version": 1,
+            "history": history,
+            "summary": summary,
+            "compacted": self._compacted,
+            "summarized_rounds": self._summarized_rounds,
+            "runtime_notice": runtime_notice,
+        }
+        normalized = json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        self.validate_session_export(normalized)
+        return normalized
+
+    @staticmethod
+    def validate_session_export(payload: object) -> None:
+        """Check complete assistant tool-call/result pairing in an export."""
+        if not isinstance(payload, dict) or payload.get("format") != "mini_agent.context" or payload.get("format_version") != 1:
+            raise ValueError("未知或不支持的 Context 导出版本")
+        history = payload.get("history")
+        if not isinstance(history, list):
+            raise ValueError("Context history 必须是列表")
+        if not isinstance(payload.get("summary"), str) or not isinstance(payload.get("compacted"), bool):
+            raise ValueError("Context 摘要字段类型无效")
+        if not isinstance(payload.get("summarized_rounds"), int) or payload["summarized_rounds"] < 0:
+            raise ValueError("Context summarized_rounds 无效")
+        notice = payload.get("runtime_notice")
+        if notice is not None and not isinstance(notice, str):
+            raise ValueError("Context runtime_notice 类型无效")
+        expected: list[str] = []
+        seen_call_ids: set[str] = set()
+        for message in history:
+            if not isinstance(message, dict) or not isinstance(message.get("role"), str):
+                raise ValueError("Context history 含无效消息")
+            if expected:
+                if message.get("role") != "tool" or message.get("tool_call_id") != expected[0]:
+                    raise ValueError("assistant tool call 缺少按序对应的 tool 结果")
+                expected.pop(0)
+                continue
+            role = message["role"]
+            if role == "tool":
+                raise ValueError("孤立的 role=tool 结果")
+            calls = message.get("tool_calls")
+            if role != "assistant" or not calls:
+                continue
+            if not isinstance(calls, list):
+                raise ValueError("assistant tool_calls 形状无效")
+            for call in calls:
+                if not isinstance(call, dict) or not isinstance(call.get("id"), str) or not call["id"]:
+                    raise ValueError("tool_call_id 无效")
+                if call["id"] in seen_call_ids:
+                    raise ValueError("tool_call_id 重复")
+                seen_call_ids.add(call["id"])
+                function = call.get("function")
+                if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+                    raise ValueError("tool call function 无效")
+                raw_arguments = function.get("arguments")
+                if isinstance(raw_arguments, str):
+                    try:
+                        arguments = json.loads(raw_arguments)
+                    except (TypeError, json.JSONDecodeError) as error:
+                        raise ValueError("tool call arguments 不是合法 JSON") from error
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool call arguments 必须是 JSON object")
+                elif not isinstance(raw_arguments, dict):
+                    raise ValueError("tool call arguments 类型无效")
+                expected.append(call["id"])
+        if expected:
+            raise ValueError("assistant tool call 结果未完整回灌")
 
     def reset_task(self) -> None:
         """Discard task-local context while preserving protected messages."""

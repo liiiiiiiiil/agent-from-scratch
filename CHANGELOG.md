@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.30.0] - Session persistence and safe points
+
+- Added explicit `/save` opt-in session persistence with random session IDs and automatic active-point updates after complete agent turns.
+- Added JSON `schema_version=1` envelopes under `~/.mini_agent/sessions/`, private permissions, exclusive lock files, canonical SHA-256 integrity checks, bounded reads, and same-directory atomic replacement.
+- Added authoritative `AgentState.export_session()` and `ContextManager.export_session()` validation, including private counters, repair/recovery facts, checkpoint metadata, complete tool-call/result pairing, and pending Runtime Notice state.
+- Redacted `write_process.input` in saved assistant tool-call arguments while preserving the JSON shape and `tool_call_id`; saving fails if the input also appears in other persisted text. Runtime LLM configuration and checkpoint bytes are not serialized.
+- Normal exit, `/new`, and `/reset` commit `clean` only after bounded process cleanup. Cleanup errors, active processes, in-flight stdin, pending attempts, exceptions, corrupt files, and pre-replacement save failures retain or report an `active`/unsaved state; post-replacement failures report an uncertain commit with its session ID.
+- Added lesson 30 and documented that v0.30 validates sessions but does not provide cross-process resume; `--resume` remains planned for v0.31.
+
 ## [v0.29.0] - Bounded process stdin
 
 - Added optional pipe stdin to `start_process` and the task-owned `write_process` tool for bounded UTF-8 text input and explicit EOF, with a 4096-byte per-call limit and a two-second bounded writer wait.

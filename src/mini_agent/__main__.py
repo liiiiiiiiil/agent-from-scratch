@@ -21,6 +21,7 @@ from mini_agent.tools.base import ToolExecutor
 from mini_agent.output import TerminalOutput
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
 from mini_agent.processes import ProcessManager
+from mini_agent.session import SessionCommitUncertainError, SessionError, SessionStore
 
 
 def _single_line_notice(value, limit=240):
@@ -134,6 +135,9 @@ def main():
     tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
     input_session = InputSession()
     cli_output = TerminalOutput(OUTPUT_MODE)
+    session_store = None
+    session_id = None
+    clean_shutdown = False
     argv = sys.argv[1:]
     if argv and argv[0] == "--plan":
         if len(argv) != 2 or not argv[1].strip():
@@ -153,6 +157,12 @@ def main():
         cli_output.status_notice(message)
         cli_output.close()
 
+    def get_session_store():
+        nonlocal session_store
+        if session_store is None:
+            session_store = SessionStore()
+        return session_store
+
     def sync_processes():
         task_id = getattr(state, "task_id", "")
         if not task_id:
@@ -160,6 +170,40 @@ def main():
         if not hasattr(state, "sync_processes"):
             return
         state.sync_processes(process_manager.sync_processes(task_id))
+
+    def save_session(handoff_status="active", manual=False):
+        """Save only a complete safe point; failed saves leave State untouched."""
+        nonlocal session_id
+        if not getattr(state, "task", ""):
+            if manual:
+                cli_notice("用法: /save（当前没有活动任务）")
+            return False
+        sync_processes()
+        try:
+            envelope = get_session_store().save(
+                session_id,
+                state,
+                context,
+                workspace_root=os.getcwd(),
+                handoff_status=handoff_status,
+                save_kind="safe_point",
+            )
+        except SessionCommitUncertainError as error:
+            session_id = error.session_id
+            cli_notice(
+                f"会话提交状态未确认（session_id={session_id}）："
+                f"{_single_line_notice(error, 500)}；请检查磁盘文件和独占锁。"
+            )
+            return False
+        except SessionError as error:
+            cli_notice(f"会话保存失败：{_single_line_notice(error, 500)}")
+            return False
+        new_session = envelope["session_id"]
+        first_save = session_id is None
+        session_id = new_session
+        if manual:
+            cli_notice(("已保存会话：" if first_save else "已更新会话：") + new_session)
+        return True
 
     def cleanup_task_boundary():
         """Clean before State reset; an incomplete cleanup keeps the old task."""
@@ -171,6 +215,8 @@ def main():
             state.record_process_cleanup(report)
         if not report.complete:
             cli_notice(report.render())
+            return False
+        if session_id is not None and not save_session("clean"):
             return False
         return True
 
@@ -224,6 +270,8 @@ def main():
                 status_notice("仍在只读调查阶段，请继续调查并提交计划。")
         elif state.status == "running":
             state.status = "done"
+        if session_id is not None:
+            save_session("active")
 
     try:
         # 命令行首条任务（可选）：与交互循环走同一套路径，
@@ -251,6 +299,12 @@ def main():
                 except (ValueError, PlanRejected) as error:
                     cli_notice(f"任务恢复无效：{error}")
                 continue
+            if user_input == "/save":
+                save_session("active", manual=True)
+                continue
+            if user_input.startswith("/save "):
+                cli_notice("用法: /save")
+                continue
             if user_input.split(maxsplit=1)[0] in ("/approve", "/reject", "/continue", "/review"):
                 parts = user_input.split(maxsplit=2)
                 command = parts[0]
@@ -264,6 +318,8 @@ def main():
                     if command == "/review":
                         state.review_current_plan(revision_id)
                         cli_notice(_render_plan_for_approval(state))
+                        if session_id is not None:
+                            save_session("active")
                     else:
                         decision = {
                             "/approve": "approved", "/reject": "rejected",
@@ -325,6 +381,7 @@ def main():
                 else:
                     state.task = ""
                     state.status = "idle"
+                session_id = None
                 cli_notice("当前任务已清空。输入任务开始，或使用 /new <任务>。")
                 continue
             if user_input == "/new" or user_input.startswith("/new "):
@@ -340,10 +397,12 @@ def main():
                 else:
                     state.task = task
                     state.status = "running"
+                session_id = None
                 cli_notice("已开始新任务。")
                 run_task(task)
                 continue
             run_task(user_input)
+        clean_shutdown = True
     finally:
         if getattr(state, "task_id", ""):
             sync_processes()
@@ -352,6 +411,8 @@ def main():
                 state.record_process_cleanup(report)
             if not report.complete:
                 cli_notice(report.render())
+            elif clean_shutdown and session_id is not None:
+                save_session("clean")
 
 
 if __name__ == "__main__":

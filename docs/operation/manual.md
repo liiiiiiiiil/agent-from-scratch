@@ -1,6 +1,38 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.29**（后台进程有界文本输入；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.30**（会话持久化与安全点；含此前可靠执行能力）。
+
+## v0.30 会话持久化与安全点
+
+### 开启、更新和关闭会话
+
+`/save` 是明确的本地落盘选择。它只能在有活动任务时使用：第一次调用创建随机 `session_id` 并显示 ID，之后再次调用更新同一个文件。开启后，完整的 agent 回合返回 CLI、计划审批等状态决定完成时，Runtime 会自动保存一份 `active` 安全点；替换前保存失败不会覆盖旧文件，也不会显示“已保存”。文件已替换但最终同步或锁清理失败时，CLI 会单独报告提交状态未确认及 session ID，不能据此断言磁盘仍是旧版本或新版本已持久化。
+
+```text
+/save
+已保存会话：<session_id>
+```
+
+`/new <任务>`、`/reset`、EOF、`exit` 和正常结束会先执行现有的有界后台进程清理，再把旧会话写成 `clean`。清理失败、stdin 写入在途、仍有活动进程、未结算 attempt 或异常退出都不会提交 `clean`；CLI 会保留旧任务或报告具体原因。任务切换后不会把旧 session 身份自动带到新任务，新任务需要再次输入 `/save`。
+
+### 文件位置、格式和隐私边界
+
+默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。文件 envelope 固定为 `schema_version=1`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、`active/clean`、State、Context 和覆盖其他字段的 SHA-256 完整性值。
+
+State 导出的是权威计划、执行、失败、恢复、generation、预算私有计数、原始恢复参数和检查点**元数据**；不会写入锁、`ProcessManager`、`Popen`、线程或检查点前镜像字节。Context 导出普通任务历史、摘要、压缩标记、摘要轮数和待消费 Runtime Notice，但不导出受保护的 system prompt。assistant 工具调用必须与按序的 `role=tool` 结果一一配对。
+
+会话可能包含普通对话、文件内容和工具输出，应按本地敏感数据看待。`write_process` 的 assistant 参数会保留合法 JSON 形状和 `tool_call_id`，但将 `function.arguments.input` 替换为明确的脱敏占位。如果非空正文也出现在普通历史文本、摘要或 Runtime Notice 中，本次保存会拒绝，而不是把正文写入文件或盲目替换其他文字；空输入发送 EOF 不改写摘要。通用历史文本不会被笼统地宣称“无敏感信息”，API key、`BASE_URL`、`MODEL` 和 `config_local.py` 不会被 SessionStore 读取或序列化。
+
+### 读取校验与故障诊断
+
+v0.30 的 SessionStore 提供读取、大小检查、schema 检查、字段/引用检查、工具结果配对检查和 SHA-256 校验，但**不提供跨进程恢复任务**；本版没有 `--resume`。`active` 文件可以用于诊断最后一次完整安全点，不能在 v0.30 直接继续执行任务。
+
+- `session 文件不存在`：检查 `~/.mini_agent/sessions/` 和显示的 `session_id`，不要手工拼接其他路径。
+- `session SHA-256 校验失败`、`JSON` 或引用错误：文件可能损坏或被手工修改；保留原文件以便诊断，不能把它当作可继续任务。
+- `session 文件超过上限`：历史或工具输出过大；先保留旧提交，不删除或截断半个工具回合。
+- `session 已被其他写入者锁定`：另一个 CLI 可能正在写入，或存在需要人工检查的遗留锁；Runtime 不会自动抢锁。
+- `会话保存失败`：若失败发生在替换前，上一份文件保持不变；CLI 不会伪造成功提示。若是清理失败，先处理报告中的 `process_id`、PID 或 stdin 原因。
+- `会话提交状态未确认`：文件可能已经换成新内容，但目录同步或锁清理没有完成；用显示的 session ID 检查磁盘文件和独占锁，不要假定旧提交仍在。
 
 ## v0.29 后台进程有界文本输入
 
@@ -243,6 +275,7 @@ PYTHONPATH=src python -m mini_agent
 | `MAX_ITERATIONS` | `50` | agent loop 最大轮数 |
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
+| `MAX_SESSION_FILE_BYTES` | `16777216` | 单个 session JSON 文件上限；默认 16 MiB |
 
 进程运行参数是固定实现默认值，不需要写入配置：每任务最多 4 个活动进程；每进程 stdout、stderr 各保留最多 64 KiB；任务边界正常终止和强制结束各等待最多 2 秒。v0.27 的读取和等待额度见本手册开头。
 
@@ -265,11 +298,11 @@ python -m mini_agent
 启动后进入交互提示符。安装 `interactive` extra 后，Enter 提交、Shift+Enter 换行，粘贴多行文本后按 Enter 提交；未安装时使用标准库单行输入。输入 `exit` 或 `quit` 退出，或按 Ctrl+C/Ctrl+D。
 
 普通后续输入默认继续当前任务。使用 `/new <任务>` 清空旧任务并开始新任务，使用
-`/reset` 清空当前任务和任务级状态；两个命令会先清理该任务登记的后台进程，清理不完整时保留旧任务并报告原因。会话内已经授予的权限和项目级指令不受影响。
+`/reset` 清空当前任务和任务级状态；输入 `/save` 可显式开启本地 session 保存。两个任务边界命令会先清理该任务登记的后台进程，清理不完整时保留旧任务并报告原因。会话内已经授予的权限和项目级指令不受影响。
 
 ---
 
-## 3. 当前能力（v0.29，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.30，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -302,6 +335,8 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `repair_loop` | 当前修复阶段、活动 failure/recovery、已使用/剩余 repair cycle 和要求的下一动作 |
 | `checkpoints` / `rollback_checkpoints` | 单文件前后镜像元数据；后者只列出当前可回滚的 `ready` 检查点，不含文件内容 |
 | `budgets` / `recovery_notice` | replan、无进展、失败重试、参数指纹、恢复动作和 repair cycle 的剩余额度及当前恢复提示 |
+
+v0.30 另有一份独立的 session 导出，不改变上表的公开 `snapshot()` 或 Trace 投影；导出格式是保存协议，不是 Trace 回放视图。
 
 所有 LLM 请求都经 `ContextManager.prepare_messages()`。它按 `len(text) // 3` 估算 token，保留输出空间，并在超限时先截断最老的 tool result、再删除最老的完整历史轮次。工具执行结果通过 `ToolExecutor(on_result=state.record_tool)` 更新 State，agent loop 不直接维护第二份状态。
 

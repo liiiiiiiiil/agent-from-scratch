@@ -26,7 +26,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.29`（后台进程控制与有界管道 stdin）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.30`（会话持久化与安全点）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
 `progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、
@@ -37,6 +37,8 @@ State 保持一次提醒兼容行为。
 
 活动后台进程属于当前 `task_id`，必须阻止任务进入 `done`；stdin 写入在途时也必须阻止完成。模型无工具调用而进程仍运行或 stdin 写入未收束时使用 `awaiting_process` 交回 CLI；用户恢复前先同步进程。`/new`、`/reset`、EOF、`exit` 和异常退出必须先有界清理当前任务登记的进程及写入线程；清理不完整时保留旧任务并报告具体进程 ID、PID 和原因。管道 stdin 只有显式启用时可写，单次 UTF-8 输入最多 4096 字节，正文不得进入 State、Trace、工具结果、授权提示或终端输出；PTY 不属于当前能力。
 
+`/save` 只在完整安全点持久化当前任务的 State、Context 和会话元数据；未结算 attempt、活动进程或在途 stdin 不得保存。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。v0.30 只校验会话文件，不恢复执行。
+
 ## 架构索引
 
 - `src/mini_agent/agent.py`：LLM 调用与 agent loop。
@@ -44,6 +46,7 @@ State 保持一次提醒兼容行为。
 - `state.py`：独立于消息历史的任务、Plan Contract、工具和验证状态；`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读投影。
 - `permission.py`：按工具与参数模式匹配的 allow/deny/ask 权限闸门。
 - `processes.py`：CLI 生命周期内的后台进程句柄、进程组、双流排空、环形缓冲和有界清理；不可快照资源不进入 State。
+- `session.py`：v0.30 会话 schema、完整性校验和原子存取，不承担恢复执行。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。
 
