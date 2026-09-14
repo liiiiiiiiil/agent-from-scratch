@@ -369,7 +369,7 @@ def test_cleanup_cannot_succeed_when_wait_does_not_confirm_exit():
     _finish_manager(state, manager)
 
 
-def test_windows_direct_child_and_pipes_allow_boundary_cleanup():
+def test_windows_direct_child_and_pipes_do_not_claim_full_boundary_cleanup():
     state = AgentState()
     state.begin_task("windows cleanup")
     manager = ProcessManager(grace_seconds=0.1)
@@ -379,11 +379,30 @@ def test_windows_direct_child_and_pipes_allow_boundary_cleanup():
                        and next(iter(manager._processes.values())).proc.poll() is not None)
     with patch("mini_agent.processes.os.name", "nt"):
         report = manager.cleanup(state.task_id)
-    assert report.complete
+    assert not report.complete
     assert "无法确认任意 shell 派生进程树" in report.items[0].reason
+    assert "清理不完整" in report.render()
+    assert next(iter(manager._processes.values())).closed
     state.record_process_cleanup(report)
-    state.begin_task("next task")
-    assert state.task_id == "task-2"
+    assert state.task_id == "task-1"
+    assert manager.cleanup(state.task_id).complete
+
+
+def test_cleanup_never_signals_a_previously_confirmed_process_group():
+    if os.name != "posix":
+        return
+    state = AgentState()
+    state.begin_task("completed process")
+    manager = ProcessManager(grace_seconds=0.1)
+    _, executor = _runtime(state, manager)
+    result = _start(state, executor, _python("raise SystemExit(0)"))
+    process_id = json.loads(result.output)["process_id"]
+    managed = manager._processes[process_id]
+    assert _eventually(lambda: managed.refresh().status == "exited")
+    with patch.object(managed, "_signal_group", wraps=managed._signal_group) as signal_group:
+        report = manager.cleanup(state.task_id)
+    assert report.complete
+    signal_group.assert_not_called()
 
 
 def test_windows_unconfirmed_direct_child_retains_registration():

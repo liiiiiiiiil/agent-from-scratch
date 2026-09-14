@@ -184,6 +184,9 @@ class _ManagedProcess:
         self.ended_at: str | None = None
         self.exit_code: int | None = None
         self.exit_reported = False
+        # Once the original group disappears, its numeric ID can be reused.
+        # Never interpret a later occupant as one of our descendants.
+        self.group_gone_confirmed = False
         self.closed = False
         self.output_pipes_closed = False
         self.stdout_eof = False
@@ -311,9 +314,14 @@ class _ManagedProcess:
             return True
         if self.process_group_id is None:
             return False
+        with self.lock:
+            if self.group_gone_confirmed:
+                return True
         try:
             os.killpg(self.process_group_id, 0)
         except ProcessLookupError:
+            with self.lock:
+                self.group_gone_confirmed = True
             return True
         except OSError:
             # Permission or another OS error is not proof of disappearance.
@@ -338,6 +346,11 @@ class _ManagedProcess:
         return self._group_gone()
 
     def _signal_group(self, sig: int) -> tuple[bool, str]:
+        with self.lock:
+            already_exited = self.exit_code is not None
+            group_gone = self.group_gone_confirmed
+        if already_exited or (os.name == "posix" and group_gone):
+            return True, "受管进程组已确认退出，无需发送信号"
         try:
             if os.name == "posix" and self.process_group_id is not None:
                 # Use the group captured immediately after Popen.  The shell
@@ -358,8 +371,15 @@ class _ManagedProcess:
             return False, f"控制失败: {type(error).__name__}: {error}"
 
     def cleanup(self, grace_seconds: float) -> CleanupItem:
-        terminated, terminate_reason = self._signal_group(signal.SIGTERM)
-        waited = self._wait(grace_seconds) if terminated else False
+        # A previously confirmed exit must only release handles.  Sending a
+        # signal to its old PGID could hit an unrelated group after ID reuse.
+        fact_before = self.refresh()
+        if fact_before.status == "running":
+            terminated, terminate_reason = self._signal_group(signal.SIGTERM)
+            waited = self._wait(grace_seconds) if terminated else False
+        else:
+            terminated, terminate_reason = False, "进程已确认退出"
+            waited = True
         killed = False
         kill_reason = ""
         if not waited:
@@ -370,16 +390,21 @@ class _ManagedProcess:
         closed, close_reason = self.close(grace_seconds) if waited else (
             False, "子进程未确认结束，管道保持登记"
         )
-        complete = waited and closed
+        # Windows can confirm the direct child and inherited pipes, but the
+        # standard-library control path cannot prove its shell descendants
+        # have exited.  Keep the task registration rather than claim a full
+        # task-boundary cleanup.
+        scope_confirmed = os.name != "nt"
+        complete = waited and closed and scope_confirmed
         reason = "; ".join(part for part in (
             kill_reason if killed else terminate_reason,
             "直接子进程或受管进程组未确认结束" if not waited else "",
             close_reason if not closed else "",
         ) if part)
         if os.name == "nt":
-            limitation = "无法确认任意 shell 派生进程树"
             reason = "; ".join(part for part in (
-                reason, limitation, "已确认直接子进程及管道" if complete else "",
+                reason, "已确认直接子进程及管道" if waited and closed else "",
+                "无法确认任意 shell 派生进程树",
             ) if part)
         fact = self.refresh()
         return CleanupItem(
