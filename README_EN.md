@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: code and tutorials reach `v0.28` (lesson 28: controlling background processes). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: code and tutorials reach `v0.29` (lesson 29: driving background processes that wait for input). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -63,6 +63,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.26</strong></td><td><a href="./docs/tutorials/26-background-process-boundaries.md">Background process start and task boundaries</a></td><td>Start long-running commands, drain bounded output, synchronize exits by task, and clean up at handoff or task boundaries.</td></tr>
     <tr><td><strong>v0.27</strong></td><td><a href="./docs/tutorials/27-process-observation.md">Observing background processes</a></td><td>Query state across rounds, read incremental output, and wait with a bounded CLI handoff.</td></tr>
     <tr><td><strong>v0.28</strong></td><td><a href="./docs/tutorials/28-process-control.md">Controlling background processes</a></td><td>Authorize termination or forced exit by task, then verify after confirmed exit.</td></tr>
+    <tr><td><strong>v0.29</strong></td><td><a href="./docs/tutorials/29-interactive-process.md">Driving input waiting processes</a></td><td>Explicitly enable bounded pipe stdin, write small UTF-8 text, send EOF, and preserve authorization, redaction, cleanup, and independent verification boundaries.</td></tr>
     <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding memory, sandboxing, and related capabilities.</td></tr>
   </tbody>
 </table>

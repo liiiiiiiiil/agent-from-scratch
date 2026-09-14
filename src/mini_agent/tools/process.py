@@ -5,15 +5,17 @@ from dataclasses import asdict
 import json
 
 from mini_agent.processes import (DEFAULT_READ_CHARS, DEFAULT_WAIT_MS,
-                                  MAX_READ_CHARS, MAX_WAIT_MS, ProcessManager)
+                                  MAX_READ_CHARS, MAX_STDIN_BYTES, MAX_WAIT_MS,
+                                  ProcessManager)
 from mini_agent.state import AgentState
 from mini_agent.tools.base import Tool
 
 
 def make_start_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
-    def start_process(command: str, cwd: str | None = None):
+    def start_process(command: str, cwd: str | None = None,
+                      stdin_mode: str = "closed"):
         task_id = state.ensure_task_id()
-        started = manager.start(command, cwd, task_id)
+        started = manager.start(command, cwd, task_id, stdin_mode=stdin_mode)
         return {
             "process_id": started.process_id,
             "pid": started.pid,
@@ -22,6 +24,7 @@ def make_start_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
             "started_at": started.started_at,
             "command": started.command,
             "cwd": started.cwd,
+            "stdin_mode": started.stdin_mode,
         }
 
     return Tool(
@@ -41,6 +44,11 @@ def make_start_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
                 "cwd": {
                     "type": "string", "minLength": 1, "maxLength": 1000,
                     "description": "存在的工作目录；缺省为当前工作目录",
+                },
+                "stdin_mode": {
+                    "type": "string", "enum": ["closed", "pipe"],
+                    "default": "closed",
+                    "description": "stdin 能力；pipe 才允许后续 write_process，默认保持 EOF",
                 },
             },
             "required": ["command"],
@@ -125,6 +133,48 @@ def make_wait_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
                     "timeout_ms": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_MS,
                                    "default": DEFAULT_WAIT_MS},
                 }, "required": ["process_id"], "additionalProperties": False}, wait_process)
+
+
+def _validate_write_process_arguments(arguments: dict) -> None:
+    input_text = arguments.get("input")
+    close_stdin = arguments.get("close_stdin")
+    if not isinstance(input_text, str):
+        raise ValueError("input 必须是字符串")
+    if not isinstance(close_stdin, bool):
+        raise ValueError("close_stdin 必须是布尔值")
+    try:
+        encoded = input_text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("input 必须是有效的 UTF-8 文本") from error
+    if len(encoded) > MAX_STDIN_BYTES:
+        raise ValueError(f"input UTF-8 编码后不能超过 {MAX_STDIN_BYTES} 字节")
+    if not encoded and not close_stdin:
+        raise ValueError("input 为空时必须设置 close_stdin=true")
+
+
+def make_write_process_tool(state: AgentState, manager: ProcessManager) -> Tool:
+    def write_process(process_id: str, input: str, close_stdin: bool = False):
+        # Ownership and capability are checked again in the manager after the
+        # executor's preflight, because the process may change between gates.
+        if manager.get_owned(state.task_id, process_id) is None:
+            return _error(process_id)
+        result = manager.write_process(state.task_id, process_id, input, close_stdin)
+        state.sync_processes(manager.sync_processes(state.task_id))
+        return json.dumps(result, ensure_ascii=False)
+
+    return Tool(
+        "write_process",
+        "向显式启用 stdin pipe 的当前任务进程写入至多 4096 字节 UTF-8 文本；可用 close_stdin=true 发送 EOF。",
+        {"type": "object", "properties": {
+            "process_id": _process_id_schema(),
+            "input": {"type": "string", "maxLength": MAX_STDIN_BYTES,
+                       "description": "一次写入的 UTF-8 文本；正文不会进入状态、Trace 或终端摘要"},
+            "close_stdin": {"type": "boolean", "default": False,
+                            "description": "写入后关闭 stdin；空 input 只能配合 true 单独发送 EOF"},
+        }, "required": ["process_id", "input"], "additionalProperties": False},
+        write_process, effect_class="possible",
+        argument_validator=_validate_write_process_arguments,
+    )
 
 
 def make_control_process_tool(state: AgentState, manager: ProcessManager, *, kill: bool) -> Tool:

@@ -752,7 +752,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                     and hasattr(state, "active_process_records")
                     and state.active_process_records()):
                 state.enter_awaiting_process("still_running")
-                return _finish("后台进程仍在运行；可在 CLI 继续当前任务。")
+                return _finish("后台进程或 stdin 写入仍未收束；可在 CLI 继续当前任务。")
 
         # Observe only after every call has been executed or rejected, its
         # State fact has been committed in model order, and its tool result is

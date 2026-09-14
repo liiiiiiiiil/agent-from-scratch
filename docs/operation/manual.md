@@ -1,6 +1,14 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.28**（后台进程控制与任务收口；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.29**（后台进程有界文本输入；含此前可靠执行能力）。
+
+## v0.29 后台进程有界文本输入
+
+`start_process(command, cwd?, stdin_mode?)` 的 `stdin_mode` 默认是 `closed`，保持 v0.28 及以前的 EOF 行为；只有显式设为 `pipe` 的进程才接受 `write_process(process_id, input, close_stdin?)`。输入必须是 UTF-8 文本，单次编码后最多 4096 字节；空输入只允许配合 `close_stdin=true`，用于单独发送 EOF。
+
+`write_process` 的写入与关闭共用一次独立权限检查，默认 `ask`，作用类别为 `possible`。授权提示只显示 `process_id`、编码后的字节数和关闭标志，不显示正文；未知或跨任务 ID 在授权及 generation 预留前拒绝，参数错误也不进入授权。已启用但已经关闭、提前退出或已有在途写入的进程会在授权后、generation 预留前返回明确状态。每个进程串行处理写入，专用线程最多等待 2 秒；前一次写入仍在途时返回 `write_pending`，不能据此重试或把它当作已写入。成功结果的 `written_bytes` 是完成写入与 flush 后的字节数；管道错误时该字段为 0，`delivery_uncertain=true` 表示可能已投递部分字节，不能自动重试。结果只包含进程 ID、写入字节数、`stdin_state`、`closed` 及有界状态原因，不回灌正文。
+
+成功写入不构成 verification。继续用 `read_process` 或 `wait_process` 观察响应；进程退出、控制和 `/new`、`/reset`、EOF、`exit` 或异常清理时都会有界回收写入线程和 stdin 管道。活动进程或在途写入都阻止任务进入 `done`；清理无法确认时保留旧任务登记并报告进程 ID、PID 和原因。此版只支持管道字节流，不支持 PTY、终端回显、控制字符、终端尺寸或交互式 shell 语义。
 
 ## v0.28 后台进程控制与任务收口
 
@@ -22,7 +30,7 @@
 
 长命令会让同步执行器一直等到命令退出；开发服务器、文件监听器或持续构建因此无法在同一个 Agent 任务中继续工作。v0.26 增加 `start_process(command, cwd?)`：它沿用 `run_shell` 的 shell 字符串语义，但创建进程后立即返回任务专属的 `process_id`。`run_shell` 仍保持同步执行、30 秒超时和原有 `[exit=N]` 返回格式。
 
-后台进程的运行态由 CLI 生命周期内的 `ProcessManager` 持有。State 只保存可快照的 `ProcessRecord` 和 append-only `ProcessEvent`：任务 ID、启动 attempt、generation、PID、状态、时间、退出码、stdout/stderr 累计字节位置和最终事件 ID；不保存 `Popen`、管道、线程或完整日志。每个任务最多有 4 个活动进程，每条输出流最多保留 64 KiB；启动时立即排空两条管道，stdin 连接 `DEVNULL`。
+后台进程的运行态由 CLI 生命周期内的 `ProcessManager` 持有。State 只保存可快照的 `ProcessRecord` 和 append-only `ProcessEvent`：任务 ID、启动 attempt、generation、PID、状态、时间、退出码、stdout/stderr 累计字节位置和最终事件 ID；不保存 `Popen`、管道、线程、完整日志或输入正文。每个任务最多有 4 个活动进程，每条输出流最多保留 64 KiB；v0.29 以前启动时 stdin 连接 `DEVNULL`，v0.29 只有显式 `stdin_mode="pipe"` 才建立 stdin 管道。
 
 成功结果是有界 JSON，例如：
 
@@ -261,7 +269,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.28，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.29，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -281,8 +289,8 @@ v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受�
 | `errors` | 权限拒绝或工具失败记录 |
 | `status` | `running` / `awaiting_process` / `done` / `blocked` / `failed` |
 | `task_id` | 每次 `begin_task` 分配且不复用的任务 ID |
-| `processes` / `process_events` | 当前任务的后台进程投影与 append-only 生命周期事件 |
-| `awaiting_process` | 进程仍运行时的非终态 CLI 交接信息 |
+| `processes` / `process_events` | 当前任务的后台进程投影与 append-only 生命周期事件，含 stdin 能力、状态和在途标记 |
+| `awaiting_process` | 进程仍运行或 stdin 写入未收束时的非终态 CLI 交接信息 |
 | `todos` | active Plan Contract 的只读兼容投影 |
 | `plan_revisions` / `plan_progress_history` | 不可变计划结构历史与独立步骤进度事件；完整历史不直接注入 LLM 上下文 |
 | `planning_state` / `active_plan` | 当前计划阶段、active revision 和应用进度事件后的执行视图 |
@@ -350,16 +358,17 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `list_dir` | `path?: str` | allow | 列出目录内容，目录加 `/` 后缀，上限 200 条 |
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
-| `start_process` | `command: str, cwd?: str` | **独立按命令模式 ASK** | 启动后台 shell 命令，立即返回 `process_id`；每任务最多 4 个活动进程 |
+| `start_process` | `command: str, cwd?: str, stdin_mode?: "closed" / "pipe"` | **独立按命令模式 ASK** | 启动后台 shell 命令，立即返回 `process_id`；默认 stdin 关闭，每任务最多 4 个活动进程 |
 | `get_process` | `process_id: str` | allow | 查询本任务进程的状态、退出码与两流累计位置 |
 | `read_process` | `process_id: str, max_chars?: int` | allow | 读取两流新增输出、下一字节位置与缓冲缺口 |
 | `list_processes` | 无 | allow | 列出本任务登记的有界进程元数据 |
 | `wait_process` | `process_id: str, timeout_ms?: int` | allow | 独占回合，有界等待未读输出或退出；超时交回 CLI |
+| `write_process` | `process_id: str, input: str, close_stdin?: bool` | **ASK** | 向显式开启管道的进程写入最多 4096 字节 UTF-8 文本；可单独发送 EOF；单次最多等待 2 秒 |
 | `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件检查点 |
 
 ### 3.6 权限交互
 
-v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 和 `start_process` 各自提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。`start_process` 有自己的规则表，不继承 `run_shell` 已放行的命令。
+v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 和 `start_process` 各自提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。`start_process` 有自己的规则表，不继承 `run_shell` 已放行的命令。`write_process` 使用自己的 `ask` 规则，不继承启动命令或其他工具的授权。
 
 **规则格式**（`permission.py` 的 `PERMISSION_RULES`）：
 
@@ -394,6 +403,14 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 
 `start_process` 默认对所有命令 ASK。用户选择 `always` 后只保存 `start_process` 对应的命令 pattern；它不会改变同一命令在 `run_shell` 中的授权。
 
+`write_process` 的授权提示只显示安全元数据，例如：
+
+```
+允许执行 write_process(process_id=proc-1, bytes=7, close_stdin=True)? [once/always/reject]
+```
+
+输入正文不会出现在提示中。`write_pending` 表示两秒内尚不能确认投递完成；等待下一次 `get_process` 或 `wait_process` 的状态，不要重复投递同一输入。
+
 `write_file`/`edit_file` 执行前会提示：
 ```
 允许执行 write_file({...})? [once/always/reject]
@@ -410,7 +427,7 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
 
-`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型可用 v0.27 的观察工具查询状态和新增日志；重复空结果不算新事实。模型在仍有活动进程时只回复文本，或 `wait_process` 超时，都会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.28 提供模型可调用的 terminate_process/kill_process；任务边界清理仍由 Runtime 执行。
+`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型可用 v0.27 的观察工具查询状态和新增日志；重复空结果不算新事实。模型在仍有活动进程或 stdin 写入在途时只回复文本，或 `wait_process` 超时，都会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.28 提供模型可调用的 terminate_process/kill_process；v0.29 增加显式管道的 write_process；任务边界清理仍由 Runtime 执行。写入成功后必须继续观察，不能替代独立 verification。
 
 如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
@@ -462,7 +479,7 @@ $env:PYTHONPATH="src"; python tests/test_executor.py   # Executor 结果回调
 ### 4.2 快速验证 import 链路
 ```bash
 PYTHONPATH=src python -c "from mini_agent.state import AgentState; from mini_agent.tools import create_registry; print([t.name for t in create_registry(AgentState()).list_tools()])"
-# 期望输出包含: calculate, read_file, write_file, edit_file, list_dir, grep, run_shell, start_process
+# 期望输出包含: calculate, read_file, write_file, edit_file, list_dir, grep, run_shell, start_process, write_process
 ```
 
 ---
@@ -486,4 +503,4 @@ agent loop 不对 LLM 或 CLI 顶层异常做兜底；这是为了保持核心�
 `__main__.py` 已对 win32 设 `sys.stdout.reconfigure(encoding="utf-8")`。若仍乱码，PowerShell 执行 `chcp 65001` 切到 UTF-8。
 
 ### Q6：后台进程显示 awaiting_process
-这是非终态交接，表示模型已经暂停回复或 `wait_process` 超时，但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。可用 `read_process` 读取日志；可用 terminate_process 或 kill_process 控制当前任务的进程；`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。
+这是非终态交接，表示模型已经暂停回复、`wait_process` 超时，或 stdin 写入仍在途，但任务登记的进程尚未完全收束。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。可用 `read_process` 读取日志、`get_process` 查看 stdin 状态；可用 terminate_process 或 kill_process 控制当前任务的进程；`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程及写入线程。

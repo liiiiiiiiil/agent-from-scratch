@@ -40,6 +40,7 @@ class Tool:
     handler: Callable[..., Any]
     effect_class: EffectClass = "none"
     internal: bool = False
+    argument_validator: Callable[[dict[str, Any]], None] | None = None
 
     def to_llm_schema(self):
         return {"type": "function", "function": {
@@ -304,6 +305,8 @@ class ToolExecutor:
                 )
         try:
             normalized = validate_arguments(tool.parameters, arguments)
+            if tool.argument_validator is not None:
+                tool.argument_validator(normalized)
         except (TypeError, ValueError) as error:
             if is_plan_tool:
                 return plan_rejected(error)
@@ -323,7 +326,7 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
-        if name in {"terminate_process", "kill_process"} and state is not None:
+        if name in {"terminate_process", "kill_process", "write_process"} and state is not None:
             manager = getattr(state, "_process_manager", None)
             if manager is None or manager.get_owned(state.task_id, normalized["process_id"]) is None:
                 output = json.dumps({"status": "error", "process_id": normalized["process_id"],
@@ -377,6 +380,23 @@ class ToolExecutor:
                                      denied, _brief(denied), error_kind="permission_denied")
             if notify: self._notify_result(result)
             return result
+        # Ownership is checked before permission above.  Capability and
+        # in-flight state are checked after permission but before reserving a
+        # possible-effect generation, so rejected writes never reserve or
+        # deliver bytes.
+        if name == "write_process" and state is not None and hasattr(manager, "write_preflight"):
+            preflight = manager.write_preflight(state.task_id, normalized["process_id"])
+            if preflight is not None:
+                output = json.dumps(preflight, ensure_ascii=False)
+                pending = preflight.get("status") == "write_pending"
+                return ExecutionResult(
+                    name, normalized, "allowed", False,
+                    "succeeded" if pending else "invalid", 0,
+                    effect_class, output, _brief(output),
+                    error_kind="write_pending" if pending else str(
+                        preflight.get("error_kind", "process_error")
+                    ),
+                )
         # Plan tools mutate only the plan state itself.  Run their atomic
         # state-bound handler before reserving an execution attempt so a
         # rejected submission cannot consume a fingerprint, attempt number,
@@ -470,7 +490,7 @@ class ToolExecutor:
         if name == "start_process" and isinstance(output, dict):
             process_metadata = deepcopy(output)
             public = {
-                key: output[key] for key in ("process_id", "pid", "status")
+                key: output[key] for key in ("process_id", "pid", "status", "stdin_mode")
                 if key in output
             }
             if reservation is not None:
@@ -485,14 +505,20 @@ class ToolExecutor:
         if isinstance(output, str) and output.startswith("[timeout]"):
             outcome, error_kind = "timeout", "timeout"
         elif name in {"get_process", "read_process", "list_processes", "wait_process",
-                      "terminate_process", "kill_process"}:
+                      "terminate_process", "kill_process", "write_process"}:
             try:
                 process_result = json.loads(output) if isinstance(output, str) else {}
             except ValueError:
                 process_result = {}
             if isinstance(process_result, dict) and process_result.get("status") == "error":
-                outcome, error_kind = ("failed" if name in {"terminate_process", "kill_process"}
-                                       and process_result.get("error_kind") == "control_failed" else "invalid"), str(process_result.get("error_kind", "process_error"))
+                error_kind = str(process_result.get("error_kind", "process_error"))
+                io_error = name == "write_process" and error_kind in {
+                    "broken_pipe", "stdin_pipe_error", "stdin_write_error",
+                    "stdin_write_thread_error",
+                }
+                control_error = (name in {"terminate_process", "kill_process"}
+                                 and error_kind == "control_failed")
+                outcome = "failed" if io_error or control_error else "invalid"
         elif name == "run_shell" and isinstance(output, str):
             match = re.match(r"\[exit=(-?\d+)\]", output)
             if match:

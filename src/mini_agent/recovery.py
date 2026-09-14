@@ -50,7 +50,7 @@ class RecoveryRuntime:
         if action == "adjust":
             if requested_tool in (
                     "begin_plan", "cancel_planning", "recover", "commit_plan",
-                    "update_plan_progress", "request_replan"):
+                    "update_plan_progress", "request_replan", "write_process"):
                 return self._reject(action, caused_by_failure_id, reason, "control/plan 工具不能作为恢复目标",
                                     requested_attempt, requested_tool, requested_arguments)
             try:
@@ -75,7 +75,7 @@ class RecoveryRuntime:
                     source_tool = None
                 if (source_attempt.tool in (
                             "begin_plan", "cancel_planning", "commit_plan",
-                            "update_plan_progress", "request_replan") or
+                            "update_plan_progress", "request_replan", "write_process") or
                         (source_tool is not None and source_tool.internal)):
                     return self._reject(action, caused_by_failure_id, reason,
                                         "control/plan 工具不能作为恢复目标",

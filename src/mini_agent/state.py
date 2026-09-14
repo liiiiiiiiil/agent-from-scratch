@@ -23,6 +23,8 @@ PlanStepStatus = Literal["pending", "in_progress", "completed"]
 PlanningPhase = Literal["direct", "exploring", "awaiting_approval", "executing"]
 ProcessStatus = Literal["running", "exited", "failed", "terminated"]
 ProcessEventKind = Literal["started", "exited", "failed", "terminated", "killed", "cleanup_failed"]
+StdinMode = Literal["closed", "pipe"]
+StdinState = Literal["disabled", "open", "write_pending", "closed", "error"]
 
 _STEP_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PLAN_STEP_LIMIT = 50
@@ -85,13 +87,21 @@ def redacted_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         value = arguments[key]
         if any(word in key.lower() for word in sensitive):
             summary[key] = "<redacted>"
-        elif key in ("content", "old_string", "new_string", "command"):
+        elif key in ("content", "old_string", "new_string", "command", "input"):
             summary[key] = f"<{type(value).__name__}:{len(value) if isinstance(value, str) else '?'}>"
         elif isinstance(value, (str, int, float, bool)) or value is None:
             summary[key] = value[:80] if isinstance(value, str) else value
         else:
             summary[key] = f"<{type(value).__name__}>"
     return summary
+
+
+def stored_attempt_arguments(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep replay-ineligible stdin bodies out of the original-argument store."""
+    result = deepcopy(arguments)
+    if tool == "write_process":
+        result.pop("input", None)
+    return result
 
 
 @dataclass(frozen=True)
@@ -206,6 +216,10 @@ class ProcessRecord:
     stdout_offset: int = 0
     stderr_offset: int = 0
     terminal_event_id: str | None = None
+    stdin_mode: StdinMode = "closed"
+    stdin_state: StdinState = "disabled"
+    write_pending: bool = False
+    stdin_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -471,7 +485,8 @@ class AgentState:
             "verification_required": self._verification_required,
             "verification_conclusion": latest_verification,
             "processes": tuple(
-                (item.process_id, item.status, item.stdout_offset, item.stderr_offset)
+                (item.process_id, item.status, item.stdout_offset, item.stderr_offset,
+                 item.stdin_mode, item.stdin_state, item.write_pending, item.stdin_error)
                 for item in self.process_records
             ),
         }
@@ -1660,10 +1675,15 @@ class AgentState:
         if any(item.process_id == process_id for item in self.process_records):
             return
         started_at = str(metadata.get("started_at") or "")
+        stdin_mode = metadata.get("stdin_mode", "closed")
+        if stdin_mode not in ("closed", "pipe"):
+            stdin_mode = "closed"
         record = ProcessRecord(
             process_id, task_id, attempt.attempt_id, attempt.generation_id,
             str(metadata.get("command") or "")[:240],
             str(metadata.get("cwd") or "")[:400], pid, "running", started_at,
+            stdin_mode=stdin_mode,
+            stdin_state="open" if stdin_mode == "pipe" else "disabled",
         )
         event_id = f"pe-{self._next_process_event}"
         self._next_process_event += 1
@@ -1704,10 +1724,27 @@ class AgentState:
                 record = self.process_records[index]
                 stdout_offset = max(record.stdout_offset, int(getattr(fact, "stdout_offset", 0) or 0))
                 stderr_offset = max(record.stderr_offset, int(getattr(fact, "stderr_offset", 0) or 0))
+                stdin_mode = getattr(fact, "stdin_mode", record.stdin_mode)
+                if stdin_mode not in ("closed", "pipe"):
+                    stdin_mode = record.stdin_mode
+                stdin_state = getattr(fact, "stdin_state", record.stdin_state)
+                if stdin_state not in ("disabled", "open", "write_pending", "closed", "error"):
+                    stdin_state = record.stdin_state
+                write_pending = bool(getattr(fact, "write_pending", record.write_pending))
+                stdin_error = getattr(fact, "stdin_error", record.stdin_error)
                 if record.terminal_event_id is not None:
-                    if (stdout_offset != record.stdout_offset or stderr_offset != record.stderr_offset):
+                    if (
+                        stdout_offset != record.stdout_offset
+                        or stderr_offset != record.stderr_offset
+                        or stdin_mode != record.stdin_mode
+                        or stdin_state != record.stdin_state
+                        or write_pending != record.write_pending
+                        or stdin_error != record.stdin_error
+                    ):
                         self.process_records[index] = replace(
                             record, stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                            stdin_mode=stdin_mode, stdin_state=stdin_state,
+                            write_pending=write_pending, stdin_error=stdin_error,
                         )
                     continue
                 status = str(getattr(fact, "status", "running"))
@@ -1716,6 +1753,8 @@ class AgentState:
                 if not bool(getattr(fact, "newly_exited", False)):
                     self.process_records[index] = replace(
                         record, stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                        stdin_mode=stdin_mode, stdin_state=stdin_state,
+                        write_pending=write_pending, stdin_error=stdin_error,
                     )
                     continue
                 event_id = f"pe-{self._next_process_event}"
@@ -1737,6 +1776,8 @@ class AgentState:
                     ended_at=getattr(fact, "ended_at", None),
                     exit_code=getattr(fact, "exit_code", None),
                     stdout_offset=stdout_offset, stderr_offset=stderr_offset,
+                    stdin_mode=stdin_mode, stdin_state=stdin_state,
+                    write_pending=write_pending, stdin_error=stdin_error,
                     terminal_event_id=event_id,
                 )
                 self._append_trace_event_locked(
@@ -1797,11 +1838,13 @@ class AgentState:
 
     def active_process_records(self) -> list[ProcessRecord]:
         with self._lock:
-            return [item for item in self.process_records if item.status == "running"]
+            return [item for item in self.process_records
+                    if item.status == "running" or item.write_pending]
 
     def enter_awaiting_process(self, reason: str = "still_running") -> ProcessWaitState | None:
         with self._lock:
-            active = [item for item in self.process_records if item.status == "running"]
+            active = [item for item in self.process_records
+                      if item.status == "running" or item.write_pending]
             if not active or self.status in ("blocked", "failed"):
                 return None
             wait = ProcessWaitState(
@@ -1831,6 +1874,19 @@ class AgentState:
                 if index is None:
                     continue
                 record = self.process_records[index]
+                stdin_mode = getattr(item, "stdin_mode", record.stdin_mode)
+                if stdin_mode not in ("closed", "pipe"):
+                    stdin_mode = record.stdin_mode
+                stdin_state = getattr(item, "stdin_state", record.stdin_state)
+                if stdin_state not in ("disabled", "open", "write_pending", "closed", "error"):
+                    stdin_state = record.stdin_state
+                write_pending = bool(getattr(item, "write_pending", record.write_pending))
+                stdin_error = getattr(item, "stdin_error", record.stdin_error)
+                record = replace(
+                    record, stdin_mode=stdin_mode, stdin_state=stdin_state,
+                    write_pending=write_pending, stdin_error=stdin_error,
+                )
+                self.process_records[index] = record
                 if getattr(item, "complete", False):
                     if record.terminal_event_id is not None:
                         continue
@@ -1979,7 +2035,7 @@ class AgentState:
                 if source_attempt.tool in (
                     "begin_plan", "cancel_planning", "recover", "rollback_checkpoint",
                     "commit_plan", "update_plan_progress",
-                    "request_replan",
+                    "request_replan", "write_process",
                 ):
                     return None, "control/plan 工具不能作为恢复目标"
                 target = (
@@ -1994,7 +2050,7 @@ class AgentState:
                 if requested_tool in (
                     "begin_plan", "cancel_planning", "recover", "rollback_checkpoint",
                     "commit_plan", "update_plan_progress",
-                    "request_replan",
+                    "request_replan", "write_process",
                 ):
                     return None, "control/plan 工具不能作为恢复目标"
                 target = (requested_tool, deepcopy(requested_arguments))
@@ -2065,7 +2121,7 @@ class AgentState:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "failure retry 预算已耗尽") + (None,)
                 if source_attempt.tool in ("begin_plan", "cancel_planning", "recover",
                                            "rollback_checkpoint", "commit_plan",
-                                           "update_plan_progress", "request_replan"):
+                                           "update_plan_progress", "request_replan", "write_process"):
                     return self._reject_recovery(action, caused_by_failure_id, reason,
                                                  "internal/recover 工具不能作为恢复目标") + (None,)
                 requested_tool = source_attempt.tool
@@ -2077,7 +2133,7 @@ class AgentState:
                     return self._reject_recovery(action, caused_by_failure_id, reason, "adjust 需要目标工具和参数") + (None,)
                 if requested_tool in ("begin_plan", "cancel_planning", "recover",
                                       "rollback_checkpoint", "commit_plan",
-                                      "update_plan_progress", "request_replan"):
+                                      "update_plan_progress", "request_replan", "write_process"):
                     return self._reject_recovery(action, caused_by_failure_id, reason,
                                                  "internal/recover 工具不能作为恢复目标") + (None,)
             elif requested_attempt or requested_tool or requested_arguments is not None:
@@ -2280,7 +2336,7 @@ class AgentState:
                     error_kind=result.error_kind,
                 )
                 self.attempts.append(attempt)
-                self._original_attempt_arguments[attempt_id] = deepcopy(args)
+                self._original_attempt_arguments[attempt_id] = stored_attempt_arguments(result.tool, args)
                 self._append_trace_event_locked(
                     "execution_result",
                     generation_id=generation_id,
@@ -2327,6 +2383,10 @@ class AgentState:
                     category = "deterministic"
                 elif result.error_kind in ("rollback_conflict", "rollback_restore_failed"):
                     category = "unknown"
+                elif result.tool == "write_process" and result.error_kind in (
+                    "stdin_pipe_error", "stdin_write_error", "stdin_write_thread_error",
+                ):
+                    category = "unknown"
                 elif result.effect_class == "possible" and result.error_kind == "handler_exception":
                     category = "unknown"
                 else: category = "deterministic"
@@ -2341,7 +2401,7 @@ class AgentState:
                 recovery_id=getattr(reservation, "recovery_id", None),
                 checkpoint_id=getattr(result, "checkpoint_id", None))
             self.attempts.append(attempt)
-            self._original_attempt_arguments[attempt_id] = deepcopy(args)
+            self._original_attempt_arguments[attempt_id] = stored_attempt_arguments(result.tool, args)
             attempt_revision_id = self.planning_state.active_revision_id
             self._append_trace_event_locked(
                 "execution_result",
@@ -2507,7 +2567,7 @@ class AgentState:
         """Compatibility API for older callback-based integrations."""
         if name in ("begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
                     "request_replan"): return
-        args_copy = deepcopy(args)
+        args_copy = stored_attempt_arguments(name, args)
         with self._lock:
             self.tool_history.append({"tool": name, "args": args_copy, "ok": ok, "brief": brief})
             self._append_trace_event_locked(
@@ -2519,6 +2579,8 @@ class AgentState:
             if ok and name in ("write_file", "edit_file"):
                 path = args_copy.get("path")
                 if isinstance(path, str) and path not in self.files_changed: self.files_changed.append(path)
+                self._invalidate_verification()
+            if ok and name == "write_process":
                 self._invalidate_verification()
             if name == "run_shell" and "权限拒绝" not in brief:
                 self._invalidate_verification()
@@ -2624,7 +2686,8 @@ class AgentState:
             if self.status == "awaiting_process": return None
             if self.planning_state.phase == "awaiting_approval": return None
             active_processes = [
-                item for item in self.process_records if item.status == "running"
+                item for item in self.process_records
+                if item.status == "running" or item.write_pending
             ]
             if active_processes:
                 return {
@@ -2644,11 +2707,17 @@ class AgentState:
                     "process_ids": [item.process_id for item in active_processes],
                     "progress_marker": (
                         "awaiting_process",
-                        tuple(item.process_id for item in active_processes),
+                        tuple(
+                            (item.process_id, item.status, item.stdout_offset,
+                             item.stderr_offset, item.stdin_mode,
+                             item.stdin_state, item.write_pending,
+                             item.stdin_error)
+                            for item in active_processes
+                        ),
                         self._verification_generation,
                     ),
                     "message": (
-                        "后台进程仍在运行。请交回 CLI，显示 process_id 后等待用户继续输入；"
+                        "后台进程或 stdin 写入仍未收束。请交回 CLI，显示 process_id 后等待用户继续输入；"
                         "进程退出后必须重新独立 verification。"
                     ),
                 }

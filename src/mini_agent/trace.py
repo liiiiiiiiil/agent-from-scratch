@@ -81,7 +81,8 @@ _PROCESS_FIELDS = (
     "process_id", "task_id", "start_attempt_id", "start_generation_id",
     "command_summary", "cwd_summary", "pid", "status", "started_at",
     "ended_at", "exit_code", "stdout_offset", "stderr_offset",
-    "terminal_event_id",
+    "terminal_event_id", "stdin_mode", "stdin_state", "write_pending",
+    "stdin_error",
 )
 _PROCESS_EVENT_FIELDS = (
     "event_id", "process_id", "task_id", "kind", "generation_id",
@@ -153,11 +154,14 @@ def _safe_redacted_arguments(value: Any) -> dict[str, Any] | Any:
         lower = name.lower()
         if any(word in lower for word in sensitive):
             result[name] = "<redacted>"
-        elif name in {"content", "old_string", "new_string", "command"}:
+        elif name in {"content", "old_string", "new_string", "command", "input"}:
             # Keep the normal State marker (for example ``<str:18>``), but do
             # not trust arbitrary values supplied by a damaged snapshot.
             marker = str(raw)
-            result[name] = marker if re.fullmatch(r"<[A-Za-z_][A-Za-z0-9_]*:\d+>", marker) else "<value omitted>"
+            if name == "input" and marker == "<redacted>":
+                result[name] = marker
+            else:
+                result[name] = marker if re.fullmatch(r"<[A-Za-z_][A-Za-z0-9_]*:\d+>", marker) else "<value omitted>"
         elif name in {"path", "file", "filename"}:
             result[name] = _safe_path(raw)
         elif isinstance(raw, str):
@@ -1211,12 +1215,40 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             process_ids.add(process_id)
         if process.get("status") not in {"running", "exited", "failed", "terminated"}:
             _add_issue(issues, f"{owner}.status 非法: {process.get('status')}")
+        if process.get("stdin_mode", "closed") not in {"closed", "pipe"}:
+            _add_issue(issues, f"{owner}.stdin_mode 非法: {process.get('stdin_mode')}")
+        if process.get("stdin_state", "disabled") not in {
+            "disabled", "open", "write_pending", "closed", "error",
+        }:
+            _add_issue(issues, f"{owner}.stdin_state 非法: {process.get('stdin_state')}")
+        if "write_pending" in process and not isinstance(process.get("write_pending"), bool):
+            _add_issue(issues, f"{owner}.write_pending 必须是布尔值")
         for field in ("start_generation_id",):
             value = process.get(field)
             if not _valid_generation(value) or value not in generation_map:
                 _add_issue(issues, f"{owner}.{field} 引用不存在或非法: {value}")
         _ref_issue(issues, owner, "start_attempt_id", process.get("start_attempt_id"), attempt_map)
         _ref_issue(issues, owner, "terminal_event_id", process.get("terminal_event_id"), process_event_map)
+    process_map = {item.get("process_id"): item for item in processes_list}
+    for attempt_id, attempt in attempt_map.items():
+        if (attempt.get("tool") != "write_process"
+                or not attempt.get("handler_admitted")
+                or attempt.get("permission") != "allowed"
+                or attempt.get("error_kind") == "unknown_process_id"):
+            continue
+        arguments = attempt.get("redacted_arguments", {})
+        process_id = arguments.get("process_id") if isinstance(arguments, Mapping) else None
+        process = process_map.get(process_id)
+        if process is None:
+            _add_issue(issues, f"write_process attempt {attempt_id} 未引用当前任务进程")
+            continue
+        if snapshot.get("task_id") and process.get("task_id") != snapshot.get("task_id"):
+            _add_issue(issues, f"write_process attempt {attempt_id} 引用了其他任务进程")
+        pre_generation = attempt.get("pre_generation_id")
+        start_generation = process.get("start_generation_id")
+        if (_valid_generation(pre_generation) and _valid_generation(start_generation)
+                and pre_generation < start_generation):
+            _add_issue(issues, f"write_process attempt {attempt_id} 早于进程启动 generation")
     process_event_ids: set[str] = set()
     terminal_events: dict[str, int] = {}
     started_events: dict[str, int] = {}

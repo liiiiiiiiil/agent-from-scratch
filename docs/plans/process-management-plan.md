@@ -1,8 +1,8 @@
 # 阶段八：进程管理（Process Management）实施计划
 
-> 状态：`v0.26`–`v0.28` 已完成（后台启动、观察、控制与任务收口）；`v0.29` 为可选后续版本
+> 状态：`v0.26`–`v0.29` 已完成（后台启动、观察、控制、管道 stdin 与任务收口）
 > 前置阶段：阶段六可靠执行（`v0.17`–`v0.21`）与阶段七结构化计划（`v0.22`–`v0.25`）
-> 建议版本范围：`v0.26`–`v0.29`；`v0.26`–`v0.28` 为核心，`v0.29` 为可选增强
+> 建议版本范围：`v0.26`–`v0.29`；PTY 仍是后续独立评估项
 
 ## 1. 目标与定位
 
@@ -15,7 +15,7 @@ start_process → 返回任务内 process_id → Agent 继续执行
                     ↓
              get/read_process → 状态、增量输出、退出码
                     ↓
-             terminate/kill → 确认退出 → 独立验证或任务收口
+             write_process → read/wait → terminate/kill → 确认退出 → 独立验证或任务收口
 ```
 
 保留 `run_shell` 处理有限时间命令；后台进程使用独立工具和 `ProcessManager`。核心运行时只用 Python 标准库。
@@ -29,21 +29,21 @@ start_process → 返回任务内 process_id → Agent 继续执行
 - 仅对本任务登记的进程执行 terminate、kill 和任务边界清理；在平台支持的范围内清理 shell 派生子进程。
 - 把进程元数据、生命周期事件及其因果引用接入 State、Failure Model、Trace 和完成判定。
 - 为没有新输出的长时间等待提供有界等待与非终态交接，避免反复轮询触发停滞护栏或耗尽轮次。
-- `v0.29` 可选增加管道 stdin 输入，并在具备可靠跨平台方案时评估 PTY。
+- `v0.29` 增加显式启用的管道 stdin 输入；PTY 单独评估后暂不纳入当前核心能力。
 
 ### 2.2 本阶段不做
 
 - 不做跨进程持久化或重连；CLI 退出后不提供 session resume。
 - 不做定时任务、Docker/通用沙箱、远程进程管理或多 Agent 共享进程。
 - 不提供任意 PID 操作、shell 副作用回滚或“终止进程即可撤销它做过的修改”的承诺。
-- 不把 PTY、交互式 shell、tmux 或持续自动调度作为核心版本的完成条件。
+- 不做 PTY、交互式 shell、tmux 或持续自动调度；管道 stdin 不提供终端回显、控制字符或终端尺寸语义。
 - 不引入第三方核心运行时依赖，也不让进程声明改变现有工具的授权语义。
 
 ## 3. 先确定的设计边界
 
 ### D1：进程归 `ProcessManager` 管，State 保存可解释的事实
 
-建议增加 `src/mini_agent/processes.py`：`ProcessManager` 持有 `Popen` 句柄、输出缓冲区和读取位置；工具层只负责参数、权限和结果转换。Runtime 在 `begin_task` 分配不复用的任务标识，不能只用可能相同的任务文本区分归属。State 保存任务内 `process_id`、所属任务、启动 attempt、generation、状态、启动/结束时间、退出码及有界命令摘要；不把 `Popen`、文件描述符或线程放进可快照 State。History 仍只承载工具调用协议，裁剪后进程事实依然可见。
+建议增加 `src/mini_agent/processes.py`：`ProcessManager` 持有 `Popen` 句柄、输出缓冲区、读取位置和 stdin 写入线程；工具层只负责参数、权限和结果转换。Runtime 在 `begin_task` 分配不复用的任务标识，不能只用可能相同的任务文本区分归属。State 保存任务内 `process_id`、所属任务、启动 attempt、generation、状态、启动/结束时间、退出码、有界命令摘要和 stdin 能力/状态；不把 `Popen`、文件描述符、线程或输入正文放进可快照 State。History 仍只承载工具调用协议，裁剪后进程事实依然可见。
 
 `process_id` 由 Runtime 分配，不能让模型传入系统 PID 控制任意进程。只接受当前任务注册且仍有效的 ID；未知、过期或跨任务 ID 返回结构化工具错误。状态先保持 `running`、`exited`、`terminated`、`failed` 四类：自然零退出为 `exited`，非预期非零退出为 `failed`，确认主动停止后为 `terminated`。启动失败没有可运行进程，必须记录为启动尝试失败；进程 ID 不复用。
 
@@ -55,15 +55,15 @@ start_process → 返回任务内 process_id → Agent 继续执行
 
 ### D3：进程生命周期有独立事实，不能借启动结果宣称完成
 
-`start_process` 经过 PermissionGate 后、调用 handler 前按 `effect_class=possible` 预留 generation。启动成功只证明进程已创建，不证明命令成功；随后观察到的退出码必须作为引用启动 attempt 的独立生命周期事实，且同一次退出只记录一次。非预期的非零退出生成 FailureEvent；失败归属观察时的当前 generation，同时引用启动 attempt，不追溯修改已关闭 generation 的状态。进程随后退出的事实不能伪装成原 `start_process` 工具调用的第二个返回值或第二次 `role=tool` 消息。日志里的 traceback 或 `read_process` 本身不自动构成失败。主动终止与异常退出应区分，进程控制失败不能假装已经清理。
+`start_process` 经过 PermissionGate 后、调用 handler 前按 `effect_class=possible` 预留 generation。启动成功只证明进程已创建，不证明命令成功；随后观察到的退出码必须作为引用启动 attempt 的独立生命周期事实，且同一次退出只记录一次。非预期的非零退出生成 FailureEvent；失败归属观察时的当前 generation，同时引用启动 attempt，不追溯修改已关闭 generation 的状态。进程随后退出的事实不能伪装成原 `start_process` 工具调用的第二个返回值或第二次 `role=tool` 消息。日志里的 traceback 或 `read_process` 本身不自动构成失败。主动终止与异常退出应区分，进程控制失败不能假装已经清理。启用管道的进程才接受 `write_process`；每次只编码一次 UTF-8 文本且最多 4096 字节，关闭 stdin 使用同一次可能副作用授权。写入最多等待 2 秒，`write_pending` 不能当作已投递，也不能自动重试。
 
 运行中的进程仍可能改变环境。启动时使旧验证失效；从 `v0.26` 起，仍有活动后台进程时不能凭现有证据判定任务完成。进程退出或被终止后，不能复用启动前或运行期间的验证证据完成任务。开发服务器运行期间可以做连通性检查，但检查结果不能单独证明最终环境稳定。观察到最终退出时，Runtime 为退出前仍可能发生的写入开启后继 generation；若先调用 terminate/kill，这些获准的控制动作本身也按 `possible` 预留 generation，不能合并或回退已预留的代。随后需在稳定边界上独立验证。进程状态或日志不充当 verification。
 
-`v0.26` 就实行活动进程的保守完成护栏，并在自然退出被同步时开启后继 generation；`v0.27` 补齐可查询的退出事件和失败记录；`v0.28` 补齐控制动作与最终完成准入。开启 generation 的是已登记进程的异步生命周期事实，不是把 `get/read_process` 的 `effect_class=none` 偷偷改成 `possible`。已有的 `run_shell(purpose="verification")` 仍是验证入口，不能与副作用工具同轮，也不能借“进程已启动”绕过 Repair Loop。已观察到的退出事件若与另一活动失败或 `verification_required` 发生冲突，不替换其 active failure、不悄悄清除验证义务；先保留两个来源并有界阻塞，等待用户决定新的任务路径。这里采用保守规则，不尝试自动合并两个修复流程。
+`v0.26` 就实行活动进程的保守完成护栏，并在自然退出被同步时开启后继 generation；`v0.27` 补齐可查询的退出事件和失败记录；`v0.28` 补齐控制动作与最终完成准入；`v0.29` 增加 stdin 写入收束与脱敏边界。开启 generation 的是已登记进程的异步生命周期事实，不是把 `get/read_process` 的 `effect_class=none` 偷偷改成 `possible`。已有的 `run_shell(purpose="verification")` 仍是验证入口，不能与副作用工具同轮，也不能借“进程已启动”或“写入成功”绕过 Repair Loop。已观察到的退出事件若与另一活动失败或 `verification_required` 发生冲突，不替换其 active failure、不悄悄清除验证义务；先保留两个来源并有界阻塞，等待用户决定新的任务路径。这里采用保守规则，不尝试自动合并两个修复流程。
 
 ### D4：权限与只读规划边界贯穿所有版本
 
-`start_process` 按命令模式独立授权，不能因为同一命令获准用于 `run_shell` 就自动获准后台运行；终止、强制杀死和写入 stdin 各有工具准入。`get/read/list` 只观察本任务已登记进程；`start/terminate/kill/write` 均为可能有副作用的动作，经过现有计划阶段与执行器双层准入。`exploring` 和 `--plan` 的只读边界不能被后台启动绕过；计划批准也不代替工具授权。
+`start_process` 按命令模式独立授权，不能因为同一命令获准用于 `run_shell` 就自动获准后台运行；终止、强制杀死和写入 stdin 各有工具准入。`get/read/list` 只观察本任务已登记进程；`start/terminate/kill/write` 均为可能有副作用的动作，经过现有计划阶段与执行器双层准入。`exploring` 和 `--plan` 的只读边界不能被后台启动或 stdin 写入绕过；计划批准也不代替工具授权。写入授权提示只显示进程 ID、字节数和关闭标志，不显示正文。
 
 现有 PermissionGate 只对 `run_shell` 提取命令模式，新增 `start_process` 时必须显式提取其 `command` 并配置独立规则；遗漏规则会退回默认 `ask`，不能继承 `run_shell` 的 `allow`。`cwd` 在启动前解析和校验；它只是工作目录，不提供文件系统隔离。内部 `cleanup()` 是已授权启动动作的资源收尾，只能作用于本任务登记的进程，不是模型可用的权限捷径。任何被拒绝的 tool call 仍需收到对应结果，且不启动进程、不预留 generation。
 
@@ -71,11 +71,11 @@ start_process → 返回任务内 process_id → Agent 继续执行
 
 从 `v0.26` 起就提供内部 `cleanup()`：退出 CLI、`/new`、`/reset` 或异常离开任务时，对本任务仍运行的进程先请求正常终止，有界等待后强制结束，并记录清理结果。正常工具调用只控制 `ProcessManager` 登记的进程；POSIX 平台优先使用进程组清理 shell 子进程。Windows 标准库对任意子进程树的控制能力有限，应明确实际支持的清理范围；无法确认子进程已结束时报告清理不完整，不能宣称完全清理。进程崩溃或断电后的自动清理不在本阶段保证内。
 
-清理必须先于 `AgentState.begin_task/reset_task` 清空旧任务事实；否则会丢失 process ID 与任务归属。清理失败应在旧任务留下可见结果，CLI 也应提示用户，不能静默宣称无遗留。输出收集线程、管道与 `Popen` 句柄都要在退出后有界回收。
+清理必须先于 `AgentState.begin_task/reset_task` 清空旧任务事实；否则会丢失 process ID 与任务归属。清理失败应在旧任务留下可见结果，CLI 也应提示用户，不能静默宣称无遗留。输出收集线程、stdin 写入线程、管道与 `Popen` 句柄都要在退出后有界回收；写入仍在途且无法确认回收时保留旧任务和登记信息。
 
 ### D6：长时间无输出是等待，不是进展
 
-`get_process` 和 `read_process` 反复得到相同状态或空日志，不产生新的调查事实，也不能靠时间流逝清零阶段七的停滞计数。`v0.26` 起，当模型在有活动进程的任务中暂停并输出无工具调用文本时，Runtime 可用 `awaiting_process` 非终态交回 CLI，显示进程 ID 和继续方式，不把它判成 `done` 或立刻耗尽完成提醒。其他未满足的计划/修复义务仍需在交接中说明，不能由这个状态消除。`v0.27` 增加有上限的 `wait_process(process_id, timeout_ms)`，在退出或出现新输出时返回；达到等待上限而进程仍运行时，也进入同一交接。下一次用户输入可恢复原任务并再次观察；这不算 `blocked` 或 `FailureEvent`，也不自动调用 LLM。等待时长有单次上限，不能无限占住一轮工具调用。
+`get_process` 和 `read_process` 反复得到相同状态或空日志，不产生新的调查事实，也不能靠时间流逝清零阶段七的停滞计数。`v0.26` 起，当模型在有活动进程的任务中暂停并输出无工具调用文本时，Runtime 可用 `awaiting_process` 非终态交回 CLI，显示进程 ID 和继续方式，不把它判成 `done` 或立刻耗尽完成提醒。其他未满足的计划/修复义务仍需在交接中说明，不能由这个状态消除。`v0.27` 增加有上限的 `wait_process(process_id, timeout_ms)`，在退出或出现新输出时返回；达到等待上限而进程仍运行时，也进入同一交接。`v0.29` 中写入仍在途时同样不能完成任务，必须先用状态查询观察写入最终收束。下一次用户输入可恢复原任务并再次观察；这不算 `blocked` 或 `FailureEvent`，也不自动调用 LLM。等待时长有单次上限，不能无限占住一轮工具调用。
 
 等待交接必须是显式 Runtime 状态，而非模型凭一段“还在运行”文本绕过 completion reminder。进程运行期间不自动重启 LLM；如果进程在用户回来前退出，下一次进入任务时先同步其状态并记录一次退出事实。`MAX_ITERATIONS` 继续保护单次 agent loop，不作为后台进程的运行时长上限。
 
@@ -91,14 +91,14 @@ start_process → 返回任务内 process_id → Agent 继续执行
 
 | 工具 | 首次版本 | 关键参数 | 结果与副作用 |
 |---|---|---|---|
-| `start_process` | `v0.26` | `command: str`, `cwd?: str` | 通过授权后启动；返回 `process_id`、诊断用 PID、状态和启动 attempt；`possible`。 |
+| `start_process` | `v0.26`（`stdin_mode` 于 `v0.29` 增加） | `command: str`, `cwd?: str`, `stdin_mode?: "closed" / "pipe"` | 通过授权后启动；返回 `process_id`、诊断用 PID、状态、stdin 能力和启动 attempt；`possible`。 |
 | `get_process` | `v0.27` | `process_id: str` | 返回当前状态、退出码和输出位置，不消费日志；`none`。 |
 | `read_process` | `v0.27` | `process_id: str`, `max_chars?: int` | 分别返回 stdout/stderr 新增片段、下一位置及缺口；`none`。 |
 | `list_processes` | `v0.27` | 无 | 仅列当前任务登记的有界元数据，不含日志正文；`none`。 |
 | `wait_process` | `v0.27` | `process_id: str`, `timeout_ms?: int` | 有界等待新输出或退出；超时返回 `still_running`，可交回 CLI；`none`。 |
 | `terminate_process` | `v0.28` | `process_id: str` | 请求正常退出并有界确认；未退出则明确报告仍在运行；`possible`。 |
 | `kill_process` | `v0.28` | `process_id: str` | 强制结束并确认结果；`possible`。 |
-| `write_process` | `v0.29`，可选 | `process_id: str`, `input: str` | 向仍运行的进程写有界 stdin；`possible`，不得用来提交 verification。 |
+| `write_process` | `v0.29` | `process_id: str`, `input: str`, `close_stdin?: bool` | 向显式开启管道的进程写入最多 4096 字节 UTF-8 文本；可单独发送 EOF；`possible`，默认 `ask`，不得用来提交 verification。 |
 
 模型只获得已发布版本的工具 schema。工具结果使用结构化、长度受限的 JSON；非零进程退出不能靠解析日志文字或沿用 `run_shell` 的 `[exit=N]` 字符串规则判断。示例：
 
@@ -110,7 +110,7 @@ start_process → 返回任务内 process_id → Agent 继续执行
 {"process_id":"proc-1","status":"running","stdout":"ready\n","stderr":"","next_stdout_offset":6,"next_stderr_offset":0,"output_gap":false}
 ```
 
-`pid` 仅供诊断显示，不作为任何控制工具的参数。启动使用与当前 `run_shell` 一致的命令字符串语义；`v0.26`–`v0.28` 的 stdin 默认关闭，避免程序等待输入却表现为无输出卡住。`wait_process` 只报告有新输出可读或进程已退出，不消费读取游标；单次等待建议不超过 30 秒，超时不是工具失败或进程失败。
+`pid` 仅供诊断显示，不作为任何控制工具的参数。启动使用与当前 `run_shell` 一致的命令字符串语义；`stdin_mode` 默认是 `closed`，只有显式设为 `pipe` 的进程可写入。`write_process` 的单次文本先编码为 UTF-8，再检查 4096 字节上限；空输入只在 `close_stdin=true` 时允许，写入线程最多在工具回合等待 2 秒，`write_pending` 必须通过后续 `get_process` 或 `wait_process` 观察。管道只提供文本字节流，不提供 PTY 的回显、控制字符或终端尺寸语义。`wait_process` 只报告有新输出可读或进程已退出，不消费读取游标；单次等待建议不超过 30 秒，超时不是工具失败或进程失败。
 
 ### 4.2 Runtime 记录
 
@@ -122,6 +122,7 @@ ProcessRecord                         # State 中可快照的当前投影
 - status: running | exited | terminated | failed
 - started_at, ended_at?, exit_code?
 - stdout_offset, stderr_offset        # 只保存位置，不保存日志全文
+- stdin_mode, stdin_state, write_pending, stdin_error
 - terminal_event_id?
 
 ProcessEvent                          # append-only 生命周期事实
@@ -136,11 +137,12 @@ ProcessWaitState                      # 仅在等待交接期间存在
 ProcessManager 私有运行态
 - process_id -> Popen / 进程组标识 / 收集器
 - stdout/stderr 有界缓冲、总字节位置、读取游标和同步锁
+- stdin 状态、串行写入锁、至多一个在途写入和有界回收线程
 ```
 
 State 只允许 Runtime 写入 `ProcessRecord`、`ProcessEvent` 和等待状态；模型不能提供状态、退出码、FailureEvent 或 generation。启动 attempt 继续由 Executor 记录；进程退出是新的 Runtime 事实，不创建伪造的工具调用。Trace 只消费 State 的 append-only 事件和公开快照，不能在回放时重新 `poll()`、读管道、发信号或调用 PermissionGate。
 
-不变量：同一任务的 `process_id` 唯一；每个成功启动恰有一个 `started` 事件，每个进程至多一个最终退出事件；最终退出必须引用存在的启动 attempt；`running` 之外不得接受 stdin；只有确认退出后才能标记 `terminated`；读游标单调递增，日志缺口不能隐去；旧任务 ID 不可用于新任务；有活动进程或待验证 generation 时不得判定 `done`。
+不变量：同一任务的 `process_id` 唯一；每个成功启动恰有一个 `started` 事件，每个进程至多一个最终退出事件；最终退出必须引用存在的启动 attempt；只有 `stdin_mode=pipe` 且进程仍可写时才接受 stdin；只有确认退出后才能标记 `terminated`；读游标单调递增，日志缺口不能隐去；旧任务 ID 不可用于新任务；有活动进程、在途 stdin 写入或待验证 generation 时不得判定 `done`。输入正文不进入 State、Trace、工具结果、授权提示或终端输出。
 
 ## 5. 版本切片
 
@@ -187,17 +189,18 @@ State 只允许 Runtime 写入 `ProcessRecord`、`ProcessEvent` 和等待状态�
 
 验收重点：正常退出、拒绝终止、终止后仍运行、强制结束和控制失败都有可区分结果；清理后再独立验证才能完成，旧证据不会跨代复用。
 
-### 5.4 `v0.29` Interactive Process（可选增强）
+### 5.4 `v0.29` Interactive Process（已完成）
 
-目标：支持需要少量 stdin 的命令，而不把阶段八变成完整终端模拟器。
+目标：支持需要少量 stdin 的命令，同时保持阶段八的任务归属、授权、脱敏、清理和独立验证边界。
 
 主要工作：
 
-1. 新增管道 stdin 的 `write_process`；限制单次写入大小和可写状态，明确关闭 stdin、进程提前退出和写入失败的结果。
-2. 输入经单独权限检查和 `possible` generation；写入内容不进入 State、Trace 或普通终端摘要。输入之后仍由 `read_process` 观察输出。
-3. 评估 PTY 是否值得单独发布：终端尺寸、回显、控制字符、Windows 行为、退出清理和验证证据均需有可运行测试。若无法保持教学切片清晰，停在管道 stdin，并把 PTY 移到后续阶段。
+1. `start_process(command, cwd?, stdin_mode?)` 默认使用 `closed`；只有显式选择 `pipe` 的进程才保留可写 stdin。新增 `write_process(process_id, input, close_stdin?)`，输入只接受 UTF-8 文本，单次编码后最多 4096 字节；空输入只能配合 `close_stdin=true` 发送 EOF。
+2. 写入与关闭共用默认 `ask` 的 `possible` 权限检查。每个进程有串行写入锁和至多一个在途写入，专用线程最多等待 2 秒；`written`、`closed`、`write_pending` 和管道错误均返回结构化状态，输入正文不进入 State、Trace、工具结果、授权提示或终端输出。
+3. 写入后继续用 `read_process` 或 `wait_process` 观察输出；写入不构成 verification。进程退出、控制和任务边界清理都会有界回收写入线程；无法确认回收时保留旧任务登记，且活动或在途写入阻止 `done`。
+4. 评估 PTY 后暂不实现。管道不能表达终端回显、控制字符、终端尺寸、交互式 shell 语义，也不承诺跨平台终端行为；这些能力需要独立协议、清理和测试后再决定。
 
-验收重点：一个等待文本输入的简单子进程可被驱动并正常结束；输入不会意外回显到审计摘要；不支持的交互式 CLI 返回明确能力边界。
+验收重点：等待一行文本的简单子进程可被驱动并在 EOF 后正常退出；输入不会出现在审计摘要；不支持的 PTY 场景有明确能力边界。
 
 ## 6. 与现有状态机的组合
 
@@ -239,7 +242,7 @@ State 只允许 Runtime 写入 `ProcessRecord`、`ProcessEvent` 和等待状态�
 
 ### 7.3 阶段完成定义
 
-- [x] `v0.26`–`v0.28` 有独立教程、变更记录和可运行测试；`v0.29` 是否发布按管道 stdin 验收结果决定。
+- [x] `v0.26`–`v0.29` 有独立教程、变更记录和可运行测试；v0.29 管道 stdin 已完成验收，PTY 保持后续评估。
 - [ ] 保留现有 `run_shell` 短命令行为，后台命令可跨 Agent 轮次启动、观察、控制。
 - [ ] 所有后台进程受任务归属、资源上限、独立权限和任务边界清理约束。
 - [ ] 进程退出、失败、控制和最终验证有可回放的因果关系；运行中和退出后的旧证据不能错误完成任务。
@@ -257,10 +260,10 @@ v0.27 增量观察、退出事实、等待交接
   ↓
 v0.28 显式控制、完整清理、验证与 Trace 闭环
   ↓
-v0.29 可选管道 stdin；PTY 另行决策
+v0.29 管道 stdin；PTY 评估后暂不实现
 ```
 
-`v0.26` 不要求实现完整观察 UI，但不能推迟输出排空、清理和完成护栏；`v0.27` 不开放任意 PID 控制；`v0.28` 不把信号发送成功当作进程已退出。每版保留一个可教学的主题和可独立验收的行为。
+`v0.26` 不要求实现完整观察 UI，但不能推迟输出排空、清理和完成护栏；`v0.27` 不开放任意 PID 控制；`v0.28` 不把信号发送成功当作进程已退出；`v0.29` 不把写入确认或 EOF 发送当作进程退出，且不把管道输入当作 PTY。每版保留一个可教学的主题和可独立验收的行为。
 
 ## 9. 文档与发布同步
 

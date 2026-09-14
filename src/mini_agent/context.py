@@ -492,6 +492,9 @@ class ContextManager:
                     f"pid={process.get('pid', '?')} "
                     f"stdout_offset={process.get('stdout_offset', 0)} "
                     f"stderr_offset={process.get('stderr_offset', 0)} "
+                    f"stdin={process.get('stdin_mode', 'closed')}/"
+                    f"{process.get('stdin_state', 'disabled')} "
+                    f"write_pending={str(bool(process.get('write_pending', False))).lower()} "
                     f"command={bounded(process.get('command_summary', ''), 240)}"
                 )
         if snapshot.get("awaiting_process"):
@@ -610,6 +613,8 @@ class ContextManager:
                     "Background processes: " + bounded("; ".join(
                         f"{item.get('process_id', '?')}={item.get('status', '?')}"
                         f"/pid:{item.get('pid', '?')}"
+                        f"/stdin:{item.get('stdin_mode', 'closed')}/{item.get('stdin_state', 'disabled')}"
+                        f"/pending:{str(bool(item.get('write_pending', False))).lower()}"
                         f"/out:{item.get('stdout_offset', 0)},{item.get('stderr_offset', 0)}"
                         for item in process_records[-8:] if isinstance(item, dict)
                     ), 1200)
@@ -684,6 +689,8 @@ class ContextManager:
                     "Background processes: " + bounded("; ".join(
                         f"{item.get('process_id', '?')}={item.get('status', '?')}"
                         f"/pid:{item.get('pid', '?')}"
+                        f"/stdin:{item.get('stdin_mode', 'closed')}/{item.get('stdin_state', 'disabled')}"
+                        f"/pending:{str(bool(item.get('write_pending', False))).lower()}"
                         f"/out:{item.get('stdout_offset', 0)},{item.get('stderr_offset', 0)}"
                         for item in process_records[-8:] if isinstance(item, dict)
                     ), 1200)

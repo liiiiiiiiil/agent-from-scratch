@@ -84,13 +84,15 @@ def _render_plan_for_approval(state):
 def _render_process_wait(state):
     """Explain the non-terminal CLI handoff without exposing log bodies."""
     snapshot = state.snapshot()
-    lines = ["后台进程仍在运行，任务暂不完成。"]
+    lines = ["后台进程或 stdin 写入仍未收束，任务暂不完成。"]
     lines.append(f"任务 ID：{snapshot.get('task_id') or '-'}")
     for process in snapshot.get("processes", []):
-        if process.get("status") != "running":
+        if process.get("status") != "running" and not process.get("write_pending"):
             continue
         lines.append(
             f"process_id={process.get('process_id')} pid={process.get('pid')} "
+            f"stdin={process.get('stdin_mode', 'closed')}/{process.get('stdin_state', 'disabled')} "
+            f"write_pending={str(bool(process.get('write_pending', False))).lower()} "
             f"stdout_offset={process.get('stdout_offset', 0)} "
             f"stderr_offset={process.get('stderr_offset', 0)}"
         )
@@ -105,7 +107,7 @@ def _render_process_wait(state):
         lines.append("验证义务：进程退出后必须在新 generation 中独立运行 verification。")
     if snapshot.get("repair_loop", {}).get("phase") != "idle":
         lines.append("修复义务：" + str(snapshot["repair_loop"].get("required_next_action", "继续处理")))
-    lines.append("继续输入以观察任务；任务会先同步进程再恢复。")
+    lines.append("继续输入以观察任务；任务会先同步进程和 stdin 状态再恢复。")
     return "\n".join(lines)
 
 

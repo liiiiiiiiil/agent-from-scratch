@@ -13,7 +13,7 @@ import json
 import os
 import signal
 import subprocess
-from threading import Condition, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any
 
@@ -26,6 +26,8 @@ MAX_READ_CHARS = 4000
 MAX_PROCESS_RESULT_CHARS = 8000
 DEFAULT_WAIT_MS = 1000
 MAX_WAIT_MS = 30000
+MAX_STDIN_BYTES = 4096
+STDIN_WRITE_TIMEOUT_SECONDS = 2.0
 COMMAND_SUMMARY_MAX = 240
 CWD_SUMMARY_MAX = 400
 
@@ -91,6 +93,7 @@ class ProcessStart:
     cwd: str
     started_at: str
     status: str = "running"
+    stdin_mode: str = "closed"
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,10 @@ class ProcessSyncFact:
     command: str
     cwd: str
     newly_exited: bool = False
+    stdin_mode: str = "closed"
+    stdin_state: str = "disabled"
+    write_pending: bool = False
+    stdin_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,10 @@ class CleanupItem:
     exit_code: int | None = None
     stdout_offset: int = 0
     stderr_offset: int = 0
+    stdin_mode: str = "closed"
+    stdin_state: str = "disabled"
+    write_pending: bool = False
+    stdin_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,12 +161,13 @@ class CleanupReport:
 class _ManagedProcess:
     def __init__(self, process_id: str, task_id: str, command: str,
                  cwd: str, proc: subprocess.Popen[bytes], started_at: str,
-                 max_stream_bytes: int) -> None:
+                 max_stream_bytes: int, stdin_mode: str = "closed") -> None:
         self.process_id = process_id
         self.task_id = task_id
         self.command = command
         self.cwd = cwd
         self.proc = proc
+        self.stdin_mode = stdin_mode
         # start_new_session=True makes the child the group leader.  Capture
         # its PID even if a very short command has already exited.
         self.process_group_id = proc.pid if os.name == "posix" else None
@@ -165,6 +177,7 @@ class _ManagedProcess:
         self.lock = Lock()
         self.read_lock = Lock()
         self.control_lock = Lock()
+        self.stdin_write_lock = Lock()
         self.output_changed = Condition()
         self.stdout_cursor = 0
         self.stderr_cursor = 0
@@ -175,6 +188,12 @@ class _ManagedProcess:
         self.output_pipes_closed = False
         self.stdout_eof = False
         self.stderr_eof = False
+        self.stdin_state = "open" if stdin_mode == "pipe" else "disabled"
+        self.stdin_error: str | None = None
+        self.stdin_pipe_closed = stdin_mode != "pipe" or proc.stdin is None
+        self.stdin_write_pending = False
+        self.stdin_write_thread: Thread | None = None
+        self._stdin_write_result: dict[str, Any] | None = None
         self.started_collectors: list[Thread] = []
         self.stdout_thread = Thread(
             target=self._collect, args=(proc.stdout, self.stdout_ring, "stdout"),
@@ -218,8 +237,52 @@ class _ManagedProcess:
             except (OSError, ValueError):
                 pass
 
+    def _close_stdin_pipe(self, *, force: bool = False) -> None:
+        """Close stdin once; callers must already have bounded the wait."""
+        with self.stdin_write_lock:
+            if self.stdin_pipe_closed:
+                return
+            self.stdin_pipe_closed = True
+            stream = self.proc.stdin
+        if force:
+            # Do not call BufferedWriter.close() while its writer thread may
+            # be inside a blocking flush.  Closing the descriptor is a
+            # non-blocking escape hatch; the worker will report the resulting
+            # pipe error and the normal close path can finish later.
+            try:
+                if stream is not None:
+                    os.close(stream.fileno())
+            except (OSError, ValueError):
+                pass
+            return
+        try:
+            if stream is not None:
+                stream.close()
+        except (OSError, ValueError):
+            pass
+
+    def _close_idle_stdin_after_exit(self) -> None:
+        if self.stdin_mode != "pipe":
+            return
+        with self.stdin_write_lock:
+            if self.stdin_write_pending or self.stdin_state != "open":
+                return
+            self.stdin_state = "closed"
+        self._close_stdin_pipe()
+
+    def _stdin_snapshot(self) -> tuple[str, str, bool, str | None]:
+        with self.stdin_write_lock:
+            return (
+                self.stdin_mode,
+                self.stdin_state,
+                self.stdin_write_pending,
+                self.stdin_error,
+            )
+
     def refresh(self) -> ProcessSyncFact:
         code = self.proc.poll()
+        if code is not None:
+            self._close_idle_stdin_after_exit()
         group_gone = self._group_gone()
         with self.lock:
             stable_exit = (code is not None and group_gone
@@ -235,10 +298,12 @@ class _ManagedProcess:
         status = "running" if exit_code is None else (
             "exited" if exit_code == 0 else "failed"
         )
+        stdin_mode, stdin_state, write_pending, stdin_error = self._stdin_snapshot()
         return ProcessSyncFact(
             self.process_id, self.task_id, status, self.proc.pid,
             self.started_at, ended_at, exit_code, stdout_offset,
             stderr_offset, self.command, self.cwd, newly_exited,
+            stdin_mode, stdin_state, write_pending, stdin_error,
         )
 
     def _group_gone(self) -> bool:
@@ -320,11 +385,15 @@ class _ManagedProcess:
         return CleanupItem(
             self.process_id, self.task_id, self.proc.pid,
             terminated, killed, complete, reason, fact.ended_at, fact.exit_code,
-            fact.stdout_offset, fact.stderr_offset,
+            fact.stdout_offset, fact.stderr_offset, fact.stdin_mode,
+            fact.stdin_state, fact.write_pending, fact.stdin_error,
         )
 
     def close(self, timeout: float) -> tuple[bool, str]:
         deadline = time.monotonic() + max(0.0, timeout)
+        stdin_closed, stdin_reason = self._reap_stdin(max(0.0, deadline - time.monotonic()))
+        if not stdin_closed:
+            return False, stdin_reason
         for thread in tuple(self.started_collectors):
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         if any(thread.is_alive() for thread in self.started_collectors):
@@ -336,14 +405,241 @@ class _ManagedProcess:
         # Unstarted collectors have no reader.  Their pipes can be closed
         # after the child/group is gone; started readers have already stopped.
         self._close_output_pipes()
-        for stream in (self.proc.stdin,):
-            try:
-                if stream is not None:
-                    stream.close()
-            except (OSError, ValueError):
-                pass
+        self._close_stdin_pipe()
         with self.lock:
             self.closed = True
+        return True, ""
+
+    def _write_stdin_worker(self, data: bytes, close_stdin: bool, done: Event) -> None:
+        written = 0
+        result: dict[str, Any]
+        try:
+            stream = self.proc.stdin
+            if stream is None:
+                raise OSError("stdin 管道不可用")
+            if data:
+                count = stream.write(data)
+                written = len(data) if count is None else int(count)
+                stream.flush()
+            if close_stdin:
+                stream.close()
+                with self.stdin_write_lock:
+                    self.stdin_pipe_closed = True
+                    self.stdin_state = "closed"
+                result = {
+                    "status": "closed", "process_id": self.process_id,
+                    "written_bytes": written, "closed": True,
+                    "stdin_state": "closed", "write_pending": False,
+                }
+            else:
+                with self.stdin_write_lock:
+                    self.stdin_state = "open"
+                result = {
+                    "status": "written", "process_id": self.process_id,
+                    "written_bytes": written, "closed": False,
+                    "stdin_state": "open", "write_pending": False,
+                }
+        except BrokenPipeError as error:
+            self._close_stdin_pipe()
+            detail = _summary(f"{type(error).__name__}: {error}", 240)
+            with self.stdin_write_lock:
+                self.stdin_state = "error"
+                self.stdin_error = detail
+            result = {
+                "status": "error", "process_id": self.process_id,
+                "written_bytes": 0, "delivery_uncertain": bool(data), "closed": False,
+                "stdin_state": "error", "write_pending": False,
+                "error_kind": "broken_pipe", "message": detail,
+            }
+        except (OSError, ValueError) as error:
+            self._close_stdin_pipe()
+            detail = _summary(f"{type(error).__name__}: {error}", 240)
+            with self.stdin_write_lock:
+                self.stdin_state = "error"
+                self.stdin_error = detail
+            result = {
+                "status": "error", "process_id": self.process_id,
+                "written_bytes": 0, "delivery_uncertain": bool(data), "closed": False,
+                "stdin_state": "error", "write_pending": False,
+                "error_kind": "stdin_pipe_error", "message": detail,
+            }
+        except Exception as error:
+            self._close_stdin_pipe()
+            detail = _summary(f"{type(error).__name__}: {error}", 240)
+            with self.stdin_write_lock:
+                self.stdin_state = "error"
+                self.stdin_error = detail
+            result = {
+                "status": "error", "process_id": self.process_id,
+                "written_bytes": 0, "delivery_uncertain": bool(data), "closed": False,
+                "stdin_state": "error", "write_pending": False,
+                "error_kind": "stdin_write_error", "message": detail,
+            }
+        finally:
+            with self.stdin_write_lock:
+                self.stdin_write_pending = False
+                self.stdin_write_thread = None
+                self._stdin_write_result = result
+            done.set()
+
+    def write_stdin(self, input_text: str, close_stdin: bool = False) -> dict[str, Any]:
+        if not isinstance(input_text, str):
+            raise ValueError("input 必须是字符串")
+        if not isinstance(close_stdin, bool):
+            raise ValueError("close_stdin 必须是布尔值")
+        try:
+            data = input_text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("input 必须是有效的 UTF-8 文本") from error
+        if len(data) > MAX_STDIN_BYTES:
+            raise ValueError(f"input UTF-8 编码后不能超过 {MAX_STDIN_BYTES} 字节")
+        if not data and not close_stdin:
+            raise ValueError("input 为空时必须设置 close_stdin=true")
+
+        with self.stdin_write_lock:
+            if self.stdin_mode != "pipe":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "disabled", "write_pending": False,
+                    "error_kind": "stdin_not_enabled",
+                    "message": "该进程未启用 stdin pipe",
+                }
+            if self.stdin_write_pending:
+                return {
+                    "status": "write_pending", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "write_pending", "write_pending": True,
+                    "error_kind": "write_pending",
+                    "message": "上一笔 stdin 写入仍在途，不能重复投递",
+                }
+            if self.proc.poll() is not None:
+                self.stdin_state = "closed"
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": True,
+                    "stdin_state": "closed", "write_pending": False,
+                    "error_kind": "process_exited", "message": "进程已提前退出",
+                }
+            if self.stdin_state == "closed":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": True,
+                    "stdin_state": "closed", "write_pending": False,
+                    "error_kind": "stdin_closed", "message": "stdin 已关闭",
+                }
+            if self.stdin_state == "error":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "error", "write_pending": False,
+                    "error_kind": "stdin_error",
+                    "message": self.stdin_error or "stdin 管道已出错",
+                }
+            done = Event()
+            self.stdin_write_pending = True
+            self.stdin_state = "write_pending"
+            self._stdin_write_result = None
+            thread = Thread(
+                target=self._write_stdin_worker,
+                args=(data, close_stdin, done),
+                name=f"mini-agent-{self.process_id}-stdin-write",
+                daemon=True,
+            )
+            self.stdin_write_thread = thread
+        try:
+            thread.start()
+        except Exception as error:
+            detail = _summary(f"{type(error).__name__}: {error}", 240)
+            with self.stdin_write_lock:
+                self.stdin_write_pending = False
+                self.stdin_write_thread = None
+                self.stdin_state = "error"
+                self.stdin_error = detail
+            return {
+                "status": "error", "process_id": self.process_id,
+                "written_bytes": 0, "closed": False,
+                "stdin_state": "error", "write_pending": False,
+                "error_kind": "stdin_write_thread_error", "message": detail,
+            }
+        if not done.wait(STDIN_WRITE_TIMEOUT_SECONDS):
+            return {
+                "status": "write_pending", "process_id": self.process_id,
+                "written_bytes": 0, "closed": False,
+                "stdin_state": "write_pending", "write_pending": True,
+                "error_kind": "write_pending",
+                "message": "stdin 写入超过 2 秒仍未确认完成",
+            }
+        with self.stdin_write_lock:
+            return dict(self._stdin_write_result or {
+                "status": "error", "process_id": self.process_id,
+                "written_bytes": 0, "closed": False,
+                "stdin_state": "error", "write_pending": False,
+                "error_kind": "stdin_write_error", "message": "stdin 写入结果不可用",
+            })
+
+    def write_preflight(self) -> dict[str, Any] | None:
+        """Return a non-mutating rejection for a write that cannot start."""
+        with self.stdin_write_lock:
+            if self.stdin_mode != "pipe":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "disabled", "write_pending": False,
+                    "error_kind": "stdin_not_enabled",
+                    "message": "该进程未启用 stdin pipe",
+                }
+            if self.stdin_write_pending:
+                return {
+                    "status": "write_pending", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "write_pending", "write_pending": True,
+                    "error_kind": "write_pending",
+                    "message": "上一笔 stdin 写入仍在途，不能重复投递",
+                }
+            if self.proc.poll() is not None:
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": True,
+                    "stdin_state": "closed", "write_pending": False,
+                    "error_kind": "process_exited", "message": "进程已提前退出",
+                }
+            if self.stdin_state == "closed":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": True,
+                    "stdin_state": "closed", "write_pending": False,
+                    "error_kind": "stdin_closed", "message": "stdin 已关闭",
+                }
+            if self.stdin_state == "error":
+                return {
+                    "status": "error", "process_id": self.process_id,
+                    "written_bytes": 0, "closed": False,
+                    "stdin_state": "error", "write_pending": False,
+                    "error_kind": "stdin_error",
+                    "message": self.stdin_error or "stdin 管道已出错",
+                }
+        return None
+
+    def _reap_stdin(self, timeout: float) -> tuple[bool, str]:
+        if self.stdin_mode != "pipe":
+            return True, ""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self.stdin_write_lock:
+            thread = self.stdin_write_thread
+        if thread is not None and thread.is_alive():
+            # Closing the read end is what releases a writer blocked in flush;
+            # the bounded join below decides whether cleanup can be confirmed.
+            self._close_stdin_pipe(force=True)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread is not None and thread.is_alive():
+            return False, "stdin 写入线程尚未结束，管道保持登记"
+        self._close_stdin_pipe()
+        with self.stdin_write_lock:
+            if self.stdin_write_pending:
+                return False, "stdin 写入状态仍在途，管道保持登记"
+            if self.stdin_state == "open":
+                self.stdin_state = "closed"
         return True, ""
 
 
@@ -373,11 +669,14 @@ class ProcessManager:
             self._next_process += 1
             return process_id
 
-    def start(self, command: str, cwd: str | None, task_id: str) -> ProcessStart:
+    def start(self, command: str, cwd: str | None, task_id: str,
+              stdin_mode: str = "closed") -> ProcessStart:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("command 必须是非空字符串")
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("task_id 必须是非空字符串")
+        if stdin_mode not in ("closed", "pipe"):
+            raise ValueError("stdin_mode 必须是 closed 或 pipe")
         resolved_cwd = os.getcwd() if cwd is None else os.path.abspath(os.path.expanduser(cwd))
         if not os.path.isdir(resolved_cwd):
             raise ValueError(f"cwd 不是存在的目录: {cwd}")
@@ -395,7 +694,7 @@ class ProcessManager:
         kwargs: dict[str, Any] = {
             "shell": True,
             "cwd": resolved_cwd,
-            "stdin": subprocess.DEVNULL,
+            "stdin": subprocess.PIPE if stdin_mode == "pipe" else subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
         }
@@ -416,7 +715,7 @@ class ProcessManager:
         managed = _ManagedProcess(
             process_id, task_id, _summary(command, COMMAND_SUMMARY_MAX),
             _summary(resolved_cwd, CWD_SUMMARY_MAX), proc, _timestamp(),
-            self.max_stream_bytes,
+            self.max_stream_bytes, stdin_mode,
         )
         with self._lock:
             self._processes[process_id] = managed
@@ -440,7 +739,7 @@ class ProcessManager:
             ) from error
         return ProcessStart(
             process_id, task_id, proc.pid, managed.command, managed.cwd,
-            managed.started_at,
+            managed.started_at, stdin_mode=stdin_mode,
         )
 
     def sync_processes(self, task_id: str) -> list[ProcessSyncFact]:
@@ -475,8 +774,13 @@ class ProcessManager:
         with managed.control_lock:
             fact = managed.refresh()
             if fact.status != "running":
-                return {"process_id": process_id, "status": "already_exited",
-                        "exit_code": fact.exit_code}
+                stdin_closed, stdin_reason = managed._reap_stdin(self.grace_seconds)
+                result = {"process_id": process_id, "status": "already_exited",
+                          "exit_code": fact.exit_code}
+                if not stdin_closed:
+                    result["stdin_cleanup"] = "incomplete"
+                    result["stdin_cleanup_reason"] = stdin_reason
+                return result
             sent, reason = managed._signal_group(
                 getattr(signal, "SIGKILL", signal.SIGTERM) if kill else signal.SIGTERM
             )
@@ -487,15 +791,41 @@ class ProcessManager:
             while True:
                 fact = managed.refresh()
                 if fact.status != "running":
-                    return {"process_id": process_id,
-                            "status": "killed" if kill else "terminated",
-                            "exit_code": fact.exit_code,
-                            "reason": reason + ("; 无法确认任意 shell 派生进程树"
-                                               if os.name == "nt" else "")}
+                    stdin_closed, stdin_reason = managed._reap_stdin(self.grace_seconds)
+                    result = {
+                        "process_id": process_id,
+                        "status": "killed" if kill else "terminated",
+                        "exit_code": fact.exit_code,
+                        "reason": reason + ("; 无法确认任意 shell 派生进程树"
+                                           if os.name == "nt" else ""),
+                    }
+                    if not stdin_closed:
+                        result["stdin_cleanup"] = "incomplete"
+                        result["stdin_cleanup_reason"] = stdin_reason
+                    return result
                 if time.monotonic() >= deadline:
                     return {"process_id": process_id, "status": "still_running",
                             "reason": reason}
                 time.sleep(min(0.01, deadline - time.monotonic()))
+
+    def write_process(self, task_id: str, process_id: str, input_text: str,
+                      close_stdin: bool = False) -> dict[str, Any]:
+        """Write one bounded UTF-8 text payload to a task-owned stdin pipe."""
+        managed = self.get_owned(task_id, process_id)
+        if managed is None:
+            raise ValueError("未知、过期或跨任务 process_id")
+        result = managed.write_stdin(input_text, close_stdin)
+        if result.get("error_kind") == "process_exited":
+            # write_stdin discovers this race under its lock. Close outside
+            # that lock so cleanup cannot mistake an open pipe for a closed one.
+            managed._close_stdin_pipe()
+        return result
+
+    def write_preflight(self, task_id: str, process_id: str) -> dict[str, Any] | None:
+        managed = self.get_owned(task_id, process_id)
+        if managed is None:
+            raise ValueError("未知、过期或跨任务 process_id")
+        return managed.write_preflight()
 
     @staticmethod
     def _stream_fragment(ring: _ByteRing, cursor: int, char_limit: int,

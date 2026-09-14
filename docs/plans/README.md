@@ -9,7 +9,7 @@
 - [`project-task-orchestration-plan.md`](project-task-orchestration-plan.md) — 阶段五项目感知与任务编排实施计划（v0.14 项目级指令 / v0.15 任务清单与状态 / v0.16 计划驱动执行；英文标识分别为 Project Instructions、Todo / Task State、Plan-driven Execution）。
 - [`reliable-execution-plan.md`](reliable-execution-plan.md) — 阶段六可靠执行实施计划（v0.17 Failure Model / v0.18 Recovery Policy / v0.19 检查点与回滚（Checkpoint / Rollback）/ v0.20 Repair Loop / v0.21 Trace & Replay）。
 - [`adaptive-planning-plan.md`](adaptive-planning-plan.md) — 阶段七自适应规划与重规划实施计划（v0.22 Plan Contract / v0.23 Plan Mode & Handoff / v0.24 Replanning Policy / v0.25 Plan Trace & Evaluation）。
-- [`process-management-plan.md`](process-management-plan.md) — 阶段八进程管理实施计划（v0.26 后台进程 / v0.27 进程观察 / v0.28 进程控制；v0.29 交互式输入为可选增强）。
+- [`process-management-plan.md`](process-management-plan.md) — 阶段八进程管理实施计划（v0.26 后台进程 / v0.27 进程观察 / v0.28 进程控制 / v0.29 有界管道 stdin；PTY 后续评估）。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

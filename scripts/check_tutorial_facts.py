@@ -39,6 +39,7 @@ EXPECTED = {
     "25-plan-trace-evaluation.md": ("v0.25", "v0.24..v0.25"),
     "26-background-process-boundaries.md": ("v0.26", "v0.25..v0.26"),
     "27-process-observation.md": ("v0.27", "v0.26..v0.27"),
+    "29-interactive-process.md": ("v0.29", "v0.28..v0.29"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

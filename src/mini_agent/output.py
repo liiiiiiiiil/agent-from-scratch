@@ -111,7 +111,20 @@ def _argument_summary(name: str, arguments: Any) -> str:
     return ""
 
 
-def _debug_arguments(arguments: Any) -> str:
+def _debug_arguments(arguments: Any, tool_name: str | None = None) -> str:
+    if tool_name == "write_process":
+        values = _argument_dict(arguments)
+        input_text = values.get("input")
+        try:
+            byte_count = len(input_text.encode("utf-8")) if isinstance(input_text, str) else 0
+        except UnicodeEncodeError:
+            byte_count = 0
+        safe = {
+            "process_id": values.get("process_id", "<missing>"),
+            "input_bytes": byte_count,
+            "close_stdin": bool(values.get("close_stdin", False)),
+        }
+        return _clip(_single_line(_json_or_text(safe)), _MAX_DEBUG_RESULT)
     return _clip(_single_line(_json_or_text(arguments)), _MAX_DEBUG_RESULT)
 
 
@@ -230,7 +243,11 @@ class TerminalOutput:
         self._line(f"执行中 · {summary}", flush=True)
         if self.mode == "debug":
             for call in calls:
-                self._line(f"  工具: {_call_name(call)} {_debug_arguments(_call_arguments(call))}")
+                call_name = _call_name(call)
+                self._line(
+                    f"  工具: {call_name} "
+                    f"{_debug_arguments(_call_arguments(call), call_name)}"
+                )
 
     def tool_result(
         self,

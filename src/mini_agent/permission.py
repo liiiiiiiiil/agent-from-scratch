@@ -58,6 +58,7 @@ PERMISSION_RULES = {
     "read_process": ALLOW,
     "list_processes": ALLOW,
     "wait_process": ALLOW,
+    "write_process": ASK,
     "terminate_process": ASK,
     "kill_process": ASK,
 }
@@ -159,8 +160,9 @@ class PermissionGate:
         if action == ASK:
             with self._ask_lock:
                 try:
+                    prompt_args = self._prompt_arguments(tool_name, args)
                     choice = input(
-                        f"\n授权确认\n允许执行 {tool_name}({args})? [once/always/reject] "
+                        f"\n授权确认\n允许执行 {tool_name}({prompt_args})? [once/always/reject] "
                     ).strip().lower()
                 finally:
                     try:
@@ -173,6 +175,21 @@ class PermissionGate:
                     return f"权限拒绝: 用户拒绝执行 {tool_name}"
 
         return None
+
+    @staticmethod
+    def _prompt_arguments(tool_name: str, args: dict) -> str:
+        """Render only non-sensitive authorization facts for stdin writes."""
+        if tool_name == "write_process":
+            input_text = args.get("input") if isinstance(args, dict) else ""
+            try:
+                byte_count = len(input_text.encode("utf-8")) if isinstance(input_text, str) else 0
+            except UnicodeEncodeError:
+                byte_count = 0
+            return (
+                f"process_id={args.get('process_id', '<missing>')}, "
+                f"bytes={byte_count}, close_stdin={bool(args.get('close_stdin', False))}"
+            )
+        return str(args)
 
     @staticmethod
     def _extract_pattern(tool_name: str, args: dict) -> str:

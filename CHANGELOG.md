@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.29.0] - Bounded process stdin
+
+- Added optional pipe stdin to `start_process` and the task-owned `write_process` tool for bounded UTF-8 text input and explicit EOF, with a 4096-byte per-call limit and a two-second bounded writer wait.
+- Added separate write authorization, ownership and planning prechecks, in-flight write state, bounded cleanup, and process completion guards that wait for stdin writes to settle.
+- Confirmed stdin pipe closure after an exit races with write admission; classify Broken Pipe as an execution failure, report uncertain delivery without claiming written bytes, and keep rejected unknown IDs from breaking Trace integrity.
+- Kept input bodies out of State, Trace, tool results, authorization prompts, compatibility history, and terminal/debug output; writes still require later process observation and independent verification.
+- Added lesson 29 and synchronized the runbook, navigation, process-management plan, and package version. PTY support remains deferred after evaluating terminal echo, control characters, sizing, and cross-platform cleanup boundaries.
+
 ## [v0.28.0] - Background process control and task closure
 
 - Added task-owned `terminate_process` and `kill_process` with separate default-ask permissions, pre-permission ownership checks, bounded exit confirmation, and explicit still-running/already-exited results.
