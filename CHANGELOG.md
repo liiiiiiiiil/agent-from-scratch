@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.27.0] - Process observation and bounded waiting
+
+- Added task-scoped `get_process`, `read_process`, `list_processes`, and `wait_process` tools. Reads use separate byte cursors for stdout and stderr, report buffer gaps, preserve UTF-8 boundaries, and return bounded JSON.
+- Added asynchronous `FailureEvent` records for natural nonzero exits, linked to the unique terminal process event and launch attempt without rewriting the launch result. Trace validates this cross-generation cause using State snapshots only.
+- Made process observations serial within a tool round. A `wait_process` timeout hands the current task to the CLI as `awaiting_process` after its tool result is recorded.
+- Added lesson 27 and synchronized the runbook, navigation, package version, and process-management plan.
+
 ## [v0.26.0] - Background process start and task boundaries
 
 - Added the standard-library `ProcessManager` and the model-visible `start_process(command, cwd?)` tool. It returns immediately with a task-owned `process_id`, keeps stdin closed, drains both output streams, and bounds each stream at 64 KiB.

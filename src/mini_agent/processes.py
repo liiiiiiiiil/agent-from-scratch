@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import codecs
+import json
 import os
 import signal
 import subprocess
-from threading import Lock, Thread
+from threading import Condition, Lock, Thread
 import time
 from typing import Any
 
@@ -19,6 +21,11 @@ from typing import Any
 DEFAULT_MAX_ACTIVE_PROCESSES = 4
 DEFAULT_MAX_STREAM_BYTES = 64 * 1024
 DEFAULT_GRACE_SECONDS = 2.0
+DEFAULT_READ_CHARS = 2000
+MAX_READ_CHARS = 4000
+MAX_PROCESS_RESULT_CHARS = 8000
+DEFAULT_WAIT_MS = 1000
+MAX_WAIT_MS = 30000
 COMMAND_SUMMARY_MAX = 240
 CWD_SUMMARY_MAX = 400
 
@@ -156,6 +163,10 @@ class _ManagedProcess:
         self.stdout_ring = _ByteRing(max_stream_bytes)
         self.stderr_ring = _ByteRing(max_stream_bytes)
         self.lock = Lock()
+        self.read_lock = Lock()
+        self.output_changed = Condition()
+        self.stdout_cursor = 0
+        self.stderr_cursor = 0
         self.ended_at: str | None = None
         self.exit_code: int | None = None
         self.exit_reported = False
@@ -188,6 +199,8 @@ class _ManagedProcess:
                         setattr(self, f"{name}_eof", True)
                     break
                 ring.append(chunk)
+                with self.output_changed:
+                    self.output_changed.notify_all()
         except (OSError, ValueError):
             # An I/O error does not establish EOF; retain the process record.
             pass
@@ -447,6 +460,112 @@ class ProcessManager:
             fact.process_id for fact in self.sync_processes(task_id)
             if fact.status == "running"
         )
+
+    def get_owned(self, task_id: str, process_id: str) -> _ManagedProcess | None:
+        with self._lock:
+            managed = self._processes.get(process_id)
+        return managed if managed is not None and managed.task_id == task_id else None
+
+    @staticmethod
+    def _stream_fragment(ring: _ByteRing, cursor: int, char_limit: int,
+                         json_budget: int, final: bool) -> tuple[str, int, bool, int, int]:
+        total, base, data = ring.snapshot()
+        gap = cursor < base
+        lost = max(0, base - cursor)
+        start = max(cursor, base)
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        chars: list[str] = []
+        next_offset = start
+        spent = 0
+        for index, byte in enumerate(data[start - base:], start=start):
+            produced = decoder.decode(bytes((byte,)), final=False)
+            if not produced:
+                continue
+            cost = sum(len(json.dumps(char, ensure_ascii=False)) - 2 for char in produced)
+            if len(chars) + len(produced) > char_limit or spent + cost > json_budget:
+                break
+            chars.extend(produced)
+            spent += cost
+            next_offset = index + 1
+        else:
+            if final and next_offset < total:
+                produced = decoder.decode(b"", final=True)
+                cost = sum(len(json.dumps(char, ensure_ascii=False)) - 2 for char in produced)
+                if produced and len(chars) + len(produced) <= char_limit and spent + cost <= json_budget:
+                    chars.extend(produced)
+                    spent += cost
+                    next_offset = total
+        return "".join(chars), next_offset, gap, lost, spent
+
+    def read_process(self, task_id: str, process_id: str,
+                     max_chars: int = DEFAULT_READ_CHARS) -> dict[str, Any]:
+        managed = self.get_owned(task_id, process_id)
+        if managed is None:
+            raise ValueError("未知、过期或跨任务 process_id")
+        if not 1 <= max_chars <= MAX_READ_CHARS:
+            raise ValueError(f"max_chars 必须在 1..{MAX_READ_CHARS} 之间")
+        with managed.read_lock:
+            fact = managed.refresh()
+            # Reserve room for metadata and escaping; both streams share one
+            # response budget.  Reserve half the first pass for stderr so a
+            # chatty stdout cannot indefinitely hide its errors.
+            budget = MAX_PROCESS_RESULT_CHARS - 1000
+            stdout, out_next, out_gap, out_lost, cost = self._stream_fragment(
+                managed.stdout_ring, managed.stdout_cursor, (max_chars + 1) // 2,
+                budget // 2, fact.status != "running",
+            )
+            stderr, err_next, err_gap, err_lost, _ = self._stream_fragment(
+                managed.stderr_ring, managed.stderr_cursor, max_chars - len(stdout),
+                budget - cost, fact.status != "running",
+            )
+            result = {
+                "process_id": process_id, "status": fact.status,
+                "exit_code": fact.exit_code, "stdout": stdout, "stderr": stderr,
+                "next_stdout_offset": out_next, "next_stderr_offset": err_next,
+                "output_gap": out_gap or err_gap,
+                "stdout_output_gap": out_gap, "stderr_output_gap": err_gap,
+                "stdout_lost_bytes": out_lost, "stderr_lost_bytes": err_lost,
+            }
+            if len(json.dumps(result, ensure_ascii=False)) > MAX_PROCESS_RESULT_CHARS:
+                raise RuntimeError("进程读取结果超过协议长度上限")
+            managed.stdout_cursor = out_next
+            managed.stderr_cursor = err_next
+            return result
+
+    def wait_process(self, task_id: str, process_id: str,
+                     timeout_ms: int = DEFAULT_WAIT_MS) -> dict[str, Any]:
+        managed = self.get_owned(task_id, process_id)
+        if managed is None:
+            raise ValueError("未知、过期或跨任务 process_id")
+        if not 0 <= timeout_ms <= MAX_WAIT_MS:
+            raise ValueError(f"timeout_ms 必须在 0..{MAX_WAIT_MS} 之间")
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            fact = managed.refresh()
+            with managed.read_lock:
+                stdout, _, stdout_gap, _, _ = self._stream_fragment(
+                    managed.stdout_ring, managed.stdout_cursor, 1, 10, False,
+                )
+                stderr, _, stderr_gap, _, _ = self._stream_fragment(
+                    managed.stderr_ring, managed.stderr_cursor, 1, 10, False,
+                )
+                output_available = bool(stdout or stderr or stdout_gap or stderr_gap)
+            if fact.status != "running":
+                reason = "exited"
+            elif output_available:
+                reason = "output_available"
+            elif time.monotonic() >= deadline:
+                reason = "still_running"
+            else:
+                with managed.output_changed:
+                    managed.output_changed.wait(timeout=min(0.05, max(0, deadline - time.monotonic())))
+                continue
+            return {
+                "process_id": process_id, "reason": reason,
+                "status": fact.status, "exit_code": fact.exit_code,
+                "stdout_offset": fact.stdout_offset,
+                "stderr_offset": fact.stderr_offset,
+            }
 
     def read_output(self, process_id: str, stdout_offset: int = 0,
                     stderr_offset: int = 0, max_bytes: int = 8000) -> dict[str, Any]:

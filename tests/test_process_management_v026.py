@@ -124,7 +124,8 @@ def test_exit_sync_is_idempotent_and_opens_one_successor_generation():
     assert len(second["process_events"]) == 2
     assert second["process_events"][-1]["start_attempt_id"] == result.reservation.attempt_id
     assert second["processes"][0]["exit_code"] == 3
-    assert second["failures"] == []
+    assert len(second["failures"]) == 1
+    assert second["failures"][0]["caused_by_process_event_id"] == second["process_events"][-1]["event_id"]
     _finish_manager(state, manager)
 
 

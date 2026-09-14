@@ -35,6 +35,7 @@ _ATTEMPT_FIELDS = (
 _FAILURE_FIELDS = (
     "failure_id", "generation_id", "phase", "category", "retryable",
     "caused_by_attempt_id", "affected_files", "cause_hint",
+    "caused_by_process_event_id",
 )
 _RECOVERY_FIELDS = (
     "recovery_id", "generation_id", "action", "reason",
@@ -587,21 +588,37 @@ def _build_edges(
     for failure_id, failure in failures.items():
         attempt_id = failure.get("caused_by_attempt_id")
         attempt = _mapping_get(attempts, attempt_id)
+        process_event_id = failure.get("caused_by_process_event_id")
+        process_event = _mapping_get(process_events, process_event_id) if process_event_id else None
         resolved = attempt is not None
         detail = None
         if attempt is None:
             _add_issue(issues, f"failure {failure_id}.caused_by_attempt_id 引用不存在: {attempt_id}")
             detail = "触发 attempt 不存在"
-        elif attempt.get("generation_id") != failure.get("generation_id"):
+        elif process_event_id and (
+            process_event is None or process_event.get("kind") != "failed"
+            or process_event.get("start_attempt_id") != attempt_id
+            or process_event.get("generation_id") != failure.get("generation_id")
+        ):
+            _add_issue(issues, f"failure {failure_id} 的进程退出事件因果引用不一致")
+            resolved = False
+            detail = "进程退出事件引用不一致"
+        elif not process_event_id and attempt.get("generation_id") != failure.get("generation_id"):
             _add_issue(issues, f"failure {failure_id} 与触发 attempt 不属于同一 generation")
             resolved = False
             detail = "failure 与 attempt generation 不一致"
-        elif attempt.get("failure_id") != failure_id:
+        elif not process_event_id and attempt.get("failure_id") != failure_id:
             _add_issue(issues, f"failure {failure_id} 与触发 attempt 的反向引用不一致")
             resolved = False
             detail = "attempt.failure_id 未回链该 failure"
         edges.append(_edge("attempt_failure", _node("attempt", attempt_id), _node("failure", failure_id),
                            failure.get("generation_id"), resolved, detail))
+        if process_event_id:
+            edges.append(_edge(
+                "process_exit_failure", _node("process_event", process_event_id),
+                _node("failure", failure_id), failure.get("generation_id"),
+                process_event is not None and resolved, detail,
+            ))
 
     for recovery_id, recovery in recoveries.items():
         failure_id = recovery.get("caused_by_failure_id")
@@ -1098,7 +1115,17 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             _add_issue(issues, f"{owner}.generation_id 引用不存在或非法: {value}")
         _ref_issue(issues, owner, "caused_by_attempt_id", record.get("caused_by_attempt_id"), attempt_map)
         attempt = attempt_map.get(record.get("caused_by_attempt_id"))
-        if attempt is not None and attempt.get("failure_id") != record.get("failure_id"):
+        process_event_id = record.get("caused_by_process_event_id")
+        if process_event_id is not None:
+            event = process_event_map.get(process_event_id)
+            process = next((item for item in processes_list
+                            if event is not None and item.get("process_id") == event.get("process_id")), None)
+            if (event is None or event.get("kind") != "failed"
+                    or event.get("start_attempt_id") != record.get("caused_by_attempt_id")
+                    or event.get("generation_id") != record.get("generation_id")
+                    or process is None or process.get("terminal_event_id") != process_event_id):
+                _add_issue(issues, f"{owner}.caused_by_process_event_id 引用不一致")
+        elif attempt is not None and attempt.get("failure_id") != record.get("failure_id"):
             _add_issue(issues, f"{owner} 与触发 attempt 的 failure_id 反向引用不一致")
     for index, record in enumerate(recoveries_list):
         owner = f"recovery {record.get('recovery_id', index)}"

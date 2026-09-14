@@ -350,7 +350,11 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         return _finish("计划等待用户决定")
 
     for i in range(MAX_ITERATIONS):
+        status_before_sync = getattr(getattr(context_manager, "state", None), "status", None)
         _sync_processes()
+        terminal_result = _terminal_state_result(getattr(context_manager, "state", None))
+        if status_before_sync not in ("blocked", "failed") and terminal_result is not None:
+            return _finish(terminal_result)
         prepared_messages = context_manager.prepare_messages()
         if not internal_retry:
             output.round_start(i + 1)
@@ -515,6 +519,18 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         has_serial_plan_write = any(
             name in _PLAN_CONTROL_TOOLS for name, _ in parsed_calls
         )
+        process_observation_tools = {
+            "get_process", "read_process", "list_processes", "wait_process",
+        }
+        has_serial_process_observation = any(
+            name in process_observation_tools for name, _ in parsed_calls
+        )
+        wait_batch_errors = {}
+        if len(parsed_calls) != 1 and any(name == "wait_process" for name, _ in parsed_calls):
+            wait_batch_errors = {
+                index: "工具调用拒绝: wait_process 必须独占一个工具回合"
+                for index in range(len(parsed_calls))
+            }
         planning_batch_errors = {}
         planning_phase = getattr(getattr(state, "planning_state", None), "phase", "direct")
         plan_controls = {"begin_plan", "cancel_planning"}
@@ -582,6 +598,14 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 return tool_call_id, text, invalid, invalid
 
             name, args = parsed_calls[index]
+            if index in wait_batch_errors:
+                text = json.dumps({"status": "error", "error_kind": "wait_batch_gate",
+                                   "message": wait_batch_errors[index]}, ensure_ascii=False)
+                invalid = ExecutionResult(
+                    name, args, "not_checked", False, "invalid", 0, "none",
+                    text, text[:200], error_kind="wait_batch_gate",
+                ) if structured else None
+                return tool_call_id, text, None, invalid
             if index in planning_batch_errors:
                 text = planning_batch_errors[index]
                 is_plan = name in _PLAN_CONTROL_TOOLS
@@ -673,7 +697,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         indexed_calls = list(enumerate(tool_calls))
         output.tools_start(tool_calls)
-        if has_possible or has_serial_plan_write:
+        if has_possible or has_serial_plan_write or has_serial_process_observation:
             results = []
             for item in indexed_calls:
                 result = _run(item)
@@ -718,6 +742,17 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         terminal_result = _terminal_state_result(state)
         if terminal_result is not None:
             return _finish(terminal_result)
+        if (len(parsed_calls) == 1 and parsed_calls[0][0] == "wait_process"
+                and results[0][2] is not None and results[0][2].outcome == "succeeded"):
+            try:
+                wait_result = json.loads(results[0][2].output)
+            except (TypeError, ValueError):
+                wait_result = {}
+            if (wait_result.get("reason") == "still_running" and state is not None
+                    and hasattr(state, "active_process_records")
+                    and state.active_process_records()):
+                state.enter_awaiting_process("still_running")
+                return _finish("后台进程仍在运行；可在 CLI 继续当前任务。")
 
         # Observe only after every call has been executed or rejected, its
         # State fact has been committed in model order, and its tool result is

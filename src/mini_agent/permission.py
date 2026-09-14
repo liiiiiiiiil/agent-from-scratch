@@ -54,6 +54,10 @@ PERMISSION_RULES = {
     "start_process": {
         "*": ASK,
     },
+    "get_process": ALLOW,
+    "read_process": ALLOW,
+    "list_processes": ALLOW,
+    "wait_process": ALLOW,
 }
 
 

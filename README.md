@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程到 `v0.26`（第 26 课：后台进程启动与任务边界）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程到 `v0.27`（第 27 课：观察后台进程）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -61,6 +61,7 @@
     <tr><td><strong>v0.25</strong></td><td><a href="./docs/tutorials/25-plan-trace-evaluation.md">计划轨迹回放与验收</a></td><td>按顺序事件连接 generation、revision、触发事实、用户决定、执行与独立验证。</td></tr>
     <tr><th colspan="3"><a id="stage-8"></a>阶段八 · 后台进程与任务边界</th></tr>
     <tr><td><strong>v0.26</strong></td><td><a href="./docs/tutorials/26-background-process-boundaries.md">后台进程启动与任务边界</a></td><td>启动长期命令后继续工作，排空有界输出，按任务归属同步退出，并在交接和任务切换时清理进程。</td></tr>
+    <tr><td><strong>v0.27</strong></td><td><a href="./docs/tutorials/27-process-observation.md">观察后台进程</a></td><td>跨轮次查询状态、读取新增输出，并在没有新消息时有界等待和交接。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>

@@ -278,6 +278,7 @@ class FailureEvent:
     caused_by_attempt_id: str
     affected_files: tuple[str, ...] = ()
     cause_hint: str | None = None
+    caused_by_process_event_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1759,6 +1760,30 @@ class AgentState:
                             f"active_failure={active_failure or '-'}; "
                             f"strict_verification={str(strict_verification).lower()}"
                         )
+                if event_kind == "failed":
+                    failure_id = f"f-{self._next_failure}"
+                    self._next_failure += 1
+                    failure = FailureEvent(
+                        failure_id, generation_id, "execute", "deterministic",
+                        False, record.start_attempt_id,
+                        cause_hint=f"process_id={process_id}; exit_code={event.exit_code}",
+                        caused_by_process_event_id=event_id,
+                    )
+                    self.failures.append(failure)
+                    previous_repair_phase = self._repair_phase
+                    if not (active_failure or strict_verification):
+                        self._enter_diagnosis(failure_id)
+                        self.recovery_notice = (
+                            f"Failure {failure_id} requires diagnosis; "
+                            f"process {process_id} exited with code {event.exit_code}."
+                        )
+                    self._append_trace_event_locked(
+                        "failure_recorded", generation_id=generation_id,
+                        revision_id=self.planning_state.active_revision_id,
+                        record_type="failure", record_id=failure_id,
+                        repair_phase_before=previous_repair_phase,
+                        repair_phase_after=self._repair_phase,
+                    )
                 if self._process_manager is not None and hasattr(self._process_manager, "acknowledge_exit"):
                     self._process_manager.acknowledge_exit(process_id)
                 committed.append(event)

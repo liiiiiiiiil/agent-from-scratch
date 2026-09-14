@@ -83,6 +83,8 @@ class ExecutionResult:
         return self.outcome == "timeout"
 
     def tool_content(self) -> str:
+        if self.tool in {"get_process", "read_process", "list_processes", "wait_process"}:
+            return format_tool_result(self.output, max_chars=8000)
         return format_tool_result(self.output)
 
 
@@ -160,6 +162,11 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
                 raise ValueError(f"参数 {key} 格式非法")
         if isinstance(value, list) and "maxItems" in prop and len(value) > prop["maxItems"]:
             raise ValueError(f"参数 {key} 超过数量上限")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in prop and value < prop["minimum"]:
+                raise ValueError(f"参数 {key} 小于允许下限")
+            if "maximum" in prop and value > prop["maximum"]:
+                raise ValueError(f"参数 {key} 超过允许上限")
     return normalized
 
 
@@ -468,6 +475,13 @@ class ToolExecutor:
         error_kind = None
         if isinstance(output, str) and output.startswith("[timeout]"):
             outcome, error_kind = "timeout", "timeout"
+        elif name in {"get_process", "read_process", "list_processes", "wait_process"}:
+            try:
+                process_result = json.loads(output) if isinstance(output, str) else {}
+            except ValueError:
+                process_result = {}
+            if isinstance(process_result, dict) and process_result.get("status") == "error":
+                outcome, error_kind = "invalid", str(process_result.get("error_kind", "process_error"))
         elif name == "run_shell" and isinstance(output, str):
             match = re.match(r"\[exit=(-?\d+)\]", output)
             if match:

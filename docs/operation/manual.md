@@ -1,6 +1,14 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.26**（后台进程启动与任务边界；含 v0.25 计划轨迹回放、v0.24 证据驱动重规划、v0.23 只读规划与用户交接及此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.27**（后台进程观察与有界等待；含 v0.26 后台启动与任务边界及此前可靠执行能力）。
+
+## v0.27 后台进程观察与有界等待
+
+`start_process` 返回的 `process_id` 可在同一任务的后续轮次使用。`get_process(process_id)` 查询状态、最终退出码和 stdout/stderr 的累计**字节**位置，不消费日志；`list_processes()` 列出本任务登记的进程元数据，结果过长时从最早记录开始省略并报告 `omitted_count`。未知、过期和跨任务 ID 返回 `unknown_process_id`，不能用系统 PID 查询其他进程。
+
+`read_process(process_id, max_chars?)` 分别读取 stdout 和 stderr 自上次成功读取以来的新内容。默认合计最多 2000 字符，参数范围 1–4000；完整 JSON 最多 8000 字符。返回 `next_stdout_offset`、`next_stderr_offset`、逐流 `*_output_gap` 和 `*_lost_bytes`。位置按原始字节计，UTF-8 字符跨收集块时不会重复或丢失；非法字节显示为替代字符。每条流只保留最近 64 KiB，读取太晚时须检查缺口标记。日志正文只在本次工具结果中出现，不进入长期 State 或 Trace。
+
+`wait_process(process_id, timeout_ms?)` 必须独占一个工具回合。默认等待 1000 毫秒，可设 0–30000 毫秒；遇到未读输出返回 `output_available`，确认退出返回 `exited`，二者都不消费日志。超时返回 `still_running`，完整工具结果回灌后任务进入 `awaiting_process` 交回 CLI；再次输入会先同步进程事实，再继续原任务。超时不是进程失败、验证证据或完成状态。自然非零退出单独记录一次 `FailureEvent`，引用启动 attempt 和退出事件，并进入现有诊断流程；退出还会使运行期间的旧验证失效。
 
 ## v0.26 后台进程启动与任务边界
 
@@ -220,7 +228,7 @@ PYTHONPATH=src python -m mini_agent
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
 
-进程运行参数是 v0.26 的固定实现默认值，不需要写入配置：每任务最多 4 个活动进程；每进程 stdout、stderr 各保留最多 64 KiB；任务边界正常终止和强制结束各等待最多 2 秒。
+进程运行参数是固定实现默认值，不需要写入配置：每任务最多 4 个活动进程；每进程 stdout、stderr 各保留最多 64 KiB；任务边界正常终止和强制结束各等待最多 2 秒。v0.27 的读取和等待额度见本手册开头。
 
 > 真实配置写进 `config_local.py`（不进 git）；无 `config_local.py` 时回退到 `config.py` 占位值。
 
@@ -245,7 +253,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.26，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.27，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -335,6 +343,10 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
 | `start_process` | `command: str, cwd?: str` | **独立按命令模式 ASK** | 启动后台 shell 命令，立即返回 `process_id`；每任务最多 4 个活动进程 |
+| `get_process` | `process_id: str` | allow | 查询本任务进程的状态、退出码与两流累计位置 |
+| `read_process` | `process_id: str, max_chars?: int` | allow | 读取两流新增输出、下一字节位置与缓冲缺口 |
+| `list_processes` | 无 | allow | 列出本任务登记的有界进程元数据 |
+| `wait_process` | `process_id: str, timeout_ms?: int` | allow | 独占回合，有界等待未读输出或退出；超时交回 CLI |
 | `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件检查点 |
 
 ### 3.6 权限交互
@@ -390,7 +402,7 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
 4. 结果作为 `role=tool` 消息回灌，进入下一轮；Executor 回调同时更新 AgentState
 
-`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型在仍有活动进程时只回复文本，会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.26 不提供模型可调用的状态读取、日志读取或 terminate/kill 工具；这些能力分别属于后续版本，任务边界清理仍由 Runtime 执行。
+`start_process` 的成功结果只证明句柄已创建。Runtime 在每轮上下文、完整工具结果回灌、完成判断和用户恢复前同步进程；自然退出会记录最终事件并使旧 verification 失效。模型可用 v0.27 的观察工具查询状态和新增日志；重复空结果不算新事实。模型在仍有活动进程时只回复文本，或 `wait_process` 超时，都会进入 `awaiting_process`，CLI 显示继续方式而不把任务标为完成。v0.27 不提供模型可调用的 terminate/kill 工具；任务边界清理仍由 Runtime 执行。
 
 如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
@@ -466,4 +478,4 @@ agent loop 不对 LLM 或 CLI 顶层异常做兜底；这是为了保持核心�
 `__main__.py` 已对 win32 设 `sys.stdout.reconfigure(encoding="utf-8")`。若仍乱码，PowerShell 执行 `chcp 65001` 切到 UTF-8。
 
 ### Q6：后台进程显示 awaiting_process
-这是非终态交接，表示模型已经暂停回复但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。v0.26 没有模型可调用的日志读取或主动终止工具，`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。
+这是非终态交接，表示模型已经暂停回复或 `wait_process` 超时，但任务登记的进程仍在运行。继续输入即可恢复原任务；恢复前 Runtime 会先同步进程。可用 `read_process` 读取日志；v0.27 尚无模型可调用的主动终止工具，`/new`、`/reset` 和退出 CLI 时会清理当前任务的进程。

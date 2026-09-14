@@ -1,6 +1,6 @@
 # 第 26 课：后台进程启动与任务边界
 
-上一课：[计划轨迹回放与验收](25-plan-trace-evaluation.md) · [教程总览](README.md) · 下一课：后续版本课程（待规划）
+上一课：[计划轨迹回放与验收](25-plan-trace-evaluation.md) · [教程总览](README.md) · 下一课：[观察后台进程](27-process-observation.md)
 
 代码快照：`v0.26` · 相邻差异：`v0.25..v0.26` · 示例命令环境：Bash/zsh
 
