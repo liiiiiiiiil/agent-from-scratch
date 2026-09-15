@@ -34,6 +34,7 @@ _MANIFEST_FORMAT = "mini_agent.workspace_manifest"
 _MANIFEST_FORMAT_VERSION = 1
 _MAX_MANIFEST_ENTRIES = 4096
 _MAX_MANIFEST_DIRECTORY_ENTRIES = 2048
+_MAX_CRASH_CLAIM_BYTES = 128 * 1024
 _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS = {
     "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress", "request_replan",
     "recover",
@@ -923,7 +924,7 @@ class SessionStore:
             raise SessionError(f"无法读取 crash recovery claim: {type(error).__name__}") from error
         if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
             raise SessionValidationError("crash recovery claim 文件权限或类型无效")
-        if info.st_size > 128 * 1024:
+        if info.st_size > _MAX_CRASH_CLAIM_BYTES:
             raise SessionSizeError("crash recovery claim 文件超过大小上限")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -981,6 +982,8 @@ class SessionStore:
             "sha256": hashlib.sha256(_canonical_bytes(payload)).hexdigest(),
         }
         encoded = _canonical_bytes(payload)
+        if len(encoded) > _MAX_CRASH_CLAIM_BYTES:
+            raise SessionSizeError("crash recovery claim 文件超过大小上限")
         temporary: str | None = None
         replaced = False
         try:
@@ -1070,14 +1073,12 @@ class SessionStore:
                 elif derived_path.exists():
                     # The previous writer may have replaced the derived file
                     # but failed while committing the final sidecar state.
-                    # Validate it and finish the same claim; never mint a new
-                    # session ID.
-                    envelope = self.load(derived_id)
-                    updated = [
-                        dict(item, status=("committed" if item is existing else item.get("status", "committed")))
-                        for item in claims
-                    ]
-                    self._write_crash_claims(updated, selected_id)
+                    # Validate the unpublished intermediate, then rewrite the
+                    # same ID from this freshly checked candidate.  Reusing
+                    # the old envelope would let workspace drift observed by
+                    # this retry exist only in memory while disk kept stale
+                    # State and Context.
+                    self.load(derived_id)
                 else:
                     # A durable preparing record is intentionally resumable.
                     # Continue writing the predetermined derived ID.

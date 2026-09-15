@@ -19,7 +19,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mini_agent.context import ContextManager
 from mini_agent.resume import prepare_resume
-from mini_agent.session import DurableToolBoundary, SessionStore, SessionValidationError
+from mini_agent.session import (
+    DurableToolBoundary,
+    SessionError,
+    SessionSizeError,
+    SessionStore,
+    SessionValidationError,
+)
 from mini_agent.state import AgentState, PlanRejected
 from mini_agent.tools.base import ExecutionResult
 from mini_agent.trace import build_trace
@@ -332,6 +338,102 @@ def test_claim_preparing_record_retries_same_derived_id_after_branch_failure(tmp
     runtime = prepare_resume(store, envelope["session_id"], workspace).claim()
     assert runtime.session_id == derived_id
     assert store._read_crash_claims()[0]["status"] == "committed"
+
+
+def test_claim_retry_rewrites_unpublished_branch_from_fresh_workspace_observation(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    watched = workspace / "watched.txt"
+    watched.write_text("v1", encoding="utf-8")
+    store = SessionStore(tmp_path / "sessions")
+    state = AgentState()
+    state.begin_task("recover after claim publication failure")
+    observed = state.reserve_attempt("none", "read_file", {"path": "watched.txt"})
+    state.record_execution_result(ExecutionResult(
+        "read_file", {"path": "watched.txt"}, "allowed", True, "succeeded", 0,
+        "none", "v1", "v1", reservation=observed,
+    ))
+    context = ContextManager(state, [{"role": "user", "content": "continue"}], observability=False)
+    envelope = store.save(None, state, context, workspace_root=workspace)
+    boundary = DurableToolBoundary(store, envelope["session_id"], workspace)
+    arguments = {"path": "other.txt", "content": "x"}
+    assistant = {
+        "role": "assistant", "content": None, "tool_calls": [{
+            "id": "call-1", "type": "function", "function": {
+                "name": "write_file", "arguments": json.dumps(arguments),
+            },
+        }],
+    }
+    context.history.append(assistant)
+    boundary.start_round(1, assistant, [{
+        "invocation_id": "inv-1", "tool_call_id": "call-1", "tool": "write_file",
+        "arguments": arguments, "effect_class": "possible",
+    }], state, context)
+    reservation = state.reserve_attempt("possible", "write_file", arguments)
+    boundary.record_admission(
+        "inv-1", SimpleNamespace(effect_class="possible", reservation=reservation),
+        state, context,
+    )
+
+    candidate = prepare_resume(store, envelope["session_id"], workspace)
+    original_write_claims = store._write_crash_claims
+    writes = {"count": 0}
+
+    def fail_final_publication(claims, source_session_id):
+        writes["count"] += 1
+        if writes["count"] == 2:
+            raise SessionError("injected final claim publication failure")
+        return original_write_claims(claims, source_session_id)
+
+    store._write_crash_claims = fail_final_publication
+    with pytest.raises(SessionError, match="final claim publication"):
+        candidate.claim()
+    store._write_crash_claims = original_write_claims
+    preparing = store._read_crash_claims()[0]
+    assert preparing["status"] == "preparing"
+    derived_id = preparing["derived_session_id"]
+    assert store.path_for(derived_id).exists()
+
+    watched.write_text("v2", encoding="utf-8")
+    runtime = prepare_resume(store, envelope["session_id"], workspace).claim()
+    derived = store.load(runtime.session_id)
+
+    assert runtime.session_id == derived_id
+    assert {issue.classification for issue in runtime.state.crash_issues} == {
+        "workspace_drift", "uncertain_side_effect",
+    }
+    assert runtime.state.export_session(allow_pending=True) == derived["state"]
+    assert runtime.context.export_session() == derived["context"]
+    assert store._read_crash_claims()[0]["status"] == "committed"
+
+
+def test_crash_claim_size_limit_preserves_previous_readable_sidecar(tmp_path: Path):
+    store = SessionStore(tmp_path / "sessions")
+    first = {
+        "source_session_id": "a" * 32,
+        "source_integrity": "b" * 64,
+        "derived_session_id": "c" * 32,
+        "recovery_id": "cr-1",
+        "status": "committed",
+    }
+    store._write_crash_claims([first], first["source_session_id"])
+    before = store._crash_claim_path().read_bytes()
+    oversized = [
+        {
+            "source_session_id": f"{index:032x}",
+            "source_integrity": f"{index:064x}",
+            "derived_session_id": f"{index + 10000:032x}",
+            "recovery_id": f"cr-{index + 1}",
+            "status": "committed",
+        }
+        for index in range(700)
+    ]
+
+    with pytest.raises(SessionSizeError, match="超过大小上限"):
+        store._write_crash_claims(oversized, first["source_session_id"])
+
+    assert store._crash_claim_path().read_bytes() == before
+    assert store._read_crash_claims() == [first]
 
 
 def test_control_boundary_does_not_create_fake_uncertain_attempt(tmp_path: Path):

@@ -1,6 +1,6 @@
 # 第 30 课：会话持久化与安全点（v0.30）
 
-上一课：[驱动等待输入的后台进程](29-interactive-process.md) · [教程总览](README.md) · 下一课：v0.31 安全恢复（规划中）
+上一课：[驱动等待输入的后台进程](29-interactive-process.md) · [教程总览](README.md) · 下一课：[v0.31 安全恢复](31-safe-resume.md)
 
 > 代码快照：`v0.30` · 相邻差异：`v0.29..v0.30` · 命令环境：Bash/zsh
 

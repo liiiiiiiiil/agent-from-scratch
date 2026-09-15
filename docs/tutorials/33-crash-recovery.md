@@ -101,7 +101,7 @@ v0.33 在 pending 边界之后插入恢复分支。`[+]` 是新增节点，`[~]`
 
 ### 2. 派生新的 session
 
-claim 在源 session 锁内再次校验完整性，并把 `source_session_id + source_integrity` 写进私有 `crash_recovery_claims.json`。sidecar 使用规范化 JSON、私有权限、`fsync` 和同目录原子替换，按 `preparing → committed` 两阶段提交；派生文件写入失败时，下一次恢复会沿用同一个 derived ID 重试，只有派生文件验证成功后才发布 `committed`。已完成的 claim 仍直接报告已有分支，拒绝重复派生。
+claim 在源 session 锁内再次校验完整性，并把 `source_session_id + source_integrity` 写进私有 `crash_recovery_claims.json`。sidecar 使用规范化 JSON、私有权限、`fsync` 和同目录原子替换，按 `preparing → committed` 两阶段提交；中途失败时，下一次恢复会沿用同一个 derived ID，并用重新检查后的 State、Context 和工作区事实原子重写尚未发布的派生文件。只有派生文件验证成功后才发布 `committed`。已完成的 claim 仍直接报告已有分支，拒绝重复派生。
 
 派生文件包含恢复后的 State、Context 和合成的 `role=tool` 结果；源文件字节不变。这样即使之后的运行时判断有误，也仍有一份原始 durable boundary 可供诊断。
 
