@@ -1,179 +1,212 @@
-# 第 33 课：崩溃恢复与不确定副作用交接（v0.33）
+# 第 33 课：崩溃后的调用交接（v0.33）
 
-上一课：[持久化工具执行边界](32-durable-tool-boundaries.md) · [教程总览](README.md) · 下一课：按需追加
+上一课：[把工具调用的关键边界写下来](32-durable-tool-boundaries.md) · [教程总览](README.md) · 下一课：[第 34 课：最小受控子代理委派](34-minimal-delegation.md)
 
 > 代码快照：`v0.33` · 相邻差异：`v0.32..v0.33` · 命令环境：Bash/zsh
 
-> 运行要求：Python 3.10+。本课的 `v0.33` tag 由仓库维护者在交付后手动创建；助手不创建、移动或推送 tag。
+> 运行要求：Python 3.10+。本课处理 `active + schema 3 + pending tool_boundary`；它不承诺自动恢复外部副作用。
 
 ## 本课目标
 
-上一课已经把工具调用写成 durable boundary：磁盘能知道调用停在 pending、准入还是 committed。但 pending 只说明“结果没有完整落盘”，并不能回答 handler 有没有开始。比如文件可能已经写完，shell 可能已经启动子进程，管道 stdin 可能只写入了一部分。
+上一课让磁盘知道工具调用停在什么边界，但一个 pending call 仍然可能有两种完全不同的含义：程序可能还没进入 handler，也可能已经开始写文件、启动 shell 或向 stdin 写了一部分内容。
 
-本课建立一个保守的交接流程。新的 CLI 读取 `active + schema 3 + pending tool_boundary` 时，不覆盖源 session，也不重放调用；它派生新的 session，把调用分类为“未执行”或“不确定”，再让用户逐项决定是否调查、继续还是阻塞。
+崩溃后最危险的做法，是把“没有结果”当成“没有执行”，然后自动再做一次。这样可能重复写文件、重复启动进程或重复发送输入。本课建立一条保守的交接流程。读完本课，你应该能解释：
 
-## 前置条件
-
-需要理解第 32 课的 `tool_boundary`、`handler_admitted` 和 schema 3。先核对本课相对上一课的真实差异，再阅读代码：
-
-```bash
-git diff --stat v0.32..v0.33
-git diff v0.32..v0.33 -- src/mini_agent/state.py src/mini_agent/session.py src/mini_agent/resume.py
-git checkout v0.32
-git checkout v0.33
-PYTHONPATH=src python -m pytest -q tests/test_crash_recovery_v033.py
-```
-
-这些命令的重点不是切换分支本身，而是确认本课的行为来自固定快照。测试完成后回到自己的工作分支继续学习。
-
-## 新增与改动文件
-
-| 文件 | 变化 | 作用 |
-|---|---|---|
-| `state.py` | 增加 State format 2、恢复记录、issue、用户决定和 crash gate | 保存不确定事实，阻止错误的副作用调用和完成收口 |
-| `resume.py` | 分流 clean safe point 与 pending crash recovery | 重建新运行时、生成恢复结果，并在 claim 前再次检查源提交和工作区 |
-| `session.py` | 增加 claim sidecar 与派生 session 原子提交 | 保留源文件，确保同一源完整性只派生一次 |
-| `context.py`、`prompt.py` | 增加受保护的恢复摘要和模型规则 | 让模型知道 issue 和下一步，但看不到原始敏感参数 |
-| `__main__.py`、`tools/base.py` | 增加 `/resolve` 与执行前 gate | 用户决定只由 CLI 记录，调查阶段只放行真正的无副作用观察 |
-| `trace.py` | 校验恢复因果链 | 只读回放 recovery → issue → decision → trigger |
-
-## 版本变更定位
-
-先看上一版的边界。图中 `[旧]` 表示 v0.32 已有节点，`[B]` 表示本课仍然拒绝自动继续的边界：
-
-```text
-[旧] assistant tool_calls
-          │
-          ▼
-[旧] pending tool_boundary ──► [旧] handler admission
-          │                              │
-          │ 进程中断                       ▼
-          └──────────────────────► [B] v0.32 只诊断，不恢复半轮
-```
-
-v0.33 在 pending 边界之后插入恢复分支。`[+]` 是新增节点，`[~]` 是重新接线的消费者，`[C]` 是主要消费者：
-
-```text
-[旧] active schema 3 pending boundary
-          │
-          ▼
-[+] prepare_resume 分类 pending calls
-          │
-          ├── handler_admitted=false ──► [+] not_executed
-          │                                  │
-          │                                  └──► [+] interrupted_before_handler tool result
-          │
-          └── handler_admitted=true ─────► [+] uncertain_* issue
-                                             │
-                                             ▼
-[+] 新 session claim + 新 generation + 清除当前 verification
-          │
-          ▼
-[C] Structured State / Context 显示 issue
-          │
-          ├── [C] 只读调查 ──► /resolve issue investigate
-          ├── [C] 用户决定 ──► /resolve issue continue
-          └── [B] 阻塞任务 ──► /resolve issue block
-                                      │
-                                      ▼
-[+] 所有 issue 结算 ──► crash_recovery replan trigger ──► 重新授权和独立 verification
-```
-
-这张图强调一个顺序：恢复分类不是 handler 的返回值，用户的 `continue` 也不是模型可以伪造的批准。没有独立 verification，恢复 generation 不能完成任务。
+- `not_executed` 和 `uncertain_side_effect` 的区别；
+- 为什么源 session 保持不变，并且要派生新的 session；
+- 为什么不确定调用不能自动 replay；
+- `/resolve ... investigate|continue|block` 各自做什么；
+- 为什么恢复后还要重新规划、重新授权和独立验证。
 
 ## 上一版的问题：没有结果不等于没有执行
 
-“session 里没有 tool result”只是一个存储事实。它可能对应三种不同情形：
+v0.32 已经记录了 `handler_admitted`。但如果进程在 handler 运行期间崩溃，session 可能只有“准入已提交”，没有成功或失败结果。对于 `write_file`、`run_shell`、启动/控制进程和 `write_process`，外部世界可能已经改变；即使文件表面没变、旧 PID 看起来消失，也不能从这些现象推出“肯定没有执行”。
 
-1. 进程在 handler 前就退出，调用确实没有进入 handler。
-2. handler 已经开始，但它是读取或 State 操作，结果可能已经改变了当前任务状态。
-3. handler 已经开始，文件、shell、进程或 stdin 可能产生外部副作用。
+因此 v0.33 不尝试猜测过去发生了什么，而是把不确定性写成任务事实，交给新的 CLI 和用户逐项处理。只有明确知道 handler 在崩溃前没有被准入，才能生成确定的“未执行”结果。
 
-文件表面没有变化、旧 PID 不见了、命令超时，都不能把第 2 或第 3 种情况改写成“肯定没执行”。因此 v0.33 只对 `handler_admitted=false` 生成确定的未执行结果；其余调用成为一等不确定事实。
+## 前置条件与版本切换
 
-## 关键流程
+需要基础 Python、命令行和第 32 课的 `tool_boundary`、`handler_admitted`、`effect_class` 概念。命令使用 Bash/zsh。
 
-### 1. 先保留源，再准备恢复候选
-
-`--resume` 自动检查 session 类型。clean session 仍走第 31 课的安全恢复；只有 schema 3 的 active pending boundary 进入 crash recovery。准备阶段不会调用 LLM、PermissionGate 或 handler。
-
-候选会记录源 session ID、完整性摘要、工作区观察结果和待处理调用。工作区变化报告只是调查线索，不会证明某个 handler 执行或未执行。
-
-### 2. 派生新的 session
-
-claim 在源 session 锁内再次校验完整性，并把 `source_session_id + source_integrity` 写进私有 `crash_recovery_claims.json`。sidecar 使用规范化 JSON、私有权限、`fsync` 和同目录原子替换，按 `preparing → committed` 两阶段提交；中途失败时，下一次恢复会沿用同一个 derived ID，并用重新检查后的 State、Context 和工作区事实原子重写尚未发布的派生文件。只有派生文件验证成功后才发布 `committed`。已完成的 claim 仍直接报告已有分支，拒绝重复派生。
-
-派生文件包含恢复后的 State、Context 和合成的 `role=tool` 结果；源文件字节不变。这样即使之后的运行时判断有误，也仍有一份原始 durable boundary 可供诊断。
-
-### 3. 分类并回灌结果
-
-分类只使用耐久边界里的准入事实和 effect class：
-
-| 条件 | 分类 | 回灌内容 |
-|---|---|---|
-| `handler_admitted=false` | `not_executed` | `interrupted_before_handler`，自动结算 |
-| `handler_admitted=true, effect_class=none` | `uncertain_state_or_result` | 不声称 State 或观察结果可用 |
-| `handler_admitted=true, effect_class=possible` | `uncertain_side_effect` | 不声称成功，也不重放 |
-
-每个原始 call 仍有且只有一个按模型顺序排列的 `role=tool` 结果。恢复结果不是旧 handler 的成功返回值；`uncertain` 只在恢复结算旧 attempt 时出现。
-
-### 4. 逐项调查和决定
-
-恢复期间，普通输入、副作用工具、verification、计划提交和任务完成都被 gate 拦截。只读调查必须先通过：
-
-```text
-/resolve issue-1 investigate 读取相关文件，确认当前工作区事实
-... 只读模型回合 ...
-/resolve issue-1 continue 调查完成，允许进入新的规划
+```bash
+git checkout v0.32
+git diff --stat v0.32..v0.33
+git diff v0.32..v0.33 -- src/mini_agent/state.py src/mini_agent/session.py src/mini_agent/resume.py src/mini_agent/context.py src/mini_agent/prompt.py src/mini_agent/tools/base.py src/mini_agent/trace.py src/mini_agent/__main__.py
+git checkout v0.33
 ```
 
-`continue` 要求当前恢复 generation 已有一次成功、获准且 `effect_class=none` 的调查 attempt。所有 issue 都 continue 后，State 创建 `crash_recovery` replan trigger；模型必须提交或复核新计划，之后仍须重新授权和独立 verification。任何一个 issue 使用 `block` 都会把任务留在不可恢复的终态。
+## 新增与改动文件
 
-## 实现拆解
+本版增加的不是一个“重试按钮”，而是一套识别、分支、交接和重新验证的流程。
 
-`AgentState` 把恢复 ID、issue、用户决定和新 generation 作为权威事实导出为 State format 2；旧 format 1 读取时把新增集合视为空。`resume.py` 只负责从源边界构造恢复候选，`SessionStore.claim_crash_recovery()` 负责锁、claim、派生 envelope 和耐久提交，两层都在返回运行时之前拒绝不确定的存储结果。
+| 文件 | 变化 | 作用 |
+|---|---|---|
+| `src/mini_agent/state.py` | 增加 State format 2、recovery、issue 和决定 | 保存不确定事实，并阻止错误的完成收口 |
+| `src/mini_agent/resume.py` | 分流 clean resume 和 crash recovery | 生成恢复候选、分类调用并派生 session |
+| `src/mini_agent/session.py` | 增加 claim sidecar 和派生提交 | 保留源文件，并确保同一源只派生一次 |
+| `src/mini_agent/context.py`、`prompt.py` | 增加恢复摘要和模型规则 | 说明 issue 与下一动作，但不泄露敏感参数 |
+| `src/mini_agent/__main__.py`、`tools/base.py` | 增加 `/resolve` 和 crash gate | 用户决定只由 CLI 记录，调查阶段只允许无副作用观察 |
+| `src/mini_agent/trace.py` | 增加恢复因果校验 | 只读检查 recovery → issue → decision → trigger 链 |
 
-`ContextManager` 把 issue ID、工具名、分类、准入状态、公开原因和合法下一动作放入 Structured State。原始参数、shell 命令正文和 stdin 正文不会因为恢复摘要而进入持久化事实。`tools/base.py` 在 planning、repair 和 permission 之前执行 crash gate，避免“先授权再发现恢复状态”的窗口。
+## 版本变更定位
 
-`Trace` 仍只接收当前任务的 `snapshot()`。它不读取源 session、派生 session 或 claim sidecar，也不调用 LLM、工具或权限闸门。恢复事实之间的边通过源恢复记录、issue、decision 和 trigger 的 ID 逐一校验；断链时结论保持 incomplete。
+图例：`[旧]` v0.32 已有，`[+]` v0.33 新增，`[~]` v0.33 修改，`[C]` 主要消费者，`[B]` 本课边界。
+
+v0.32 遇到半轮时只能停在这里：
+
+```text
+[旧] assistant tool_calls
+  -> [旧] pending tool_boundary
+  -> [旧] handler admission（可能已经发生）
+  -> [B] 只记录中断，不知道能否安全交接
+```
+
+v0.33 在 pending 边界后加入不覆盖源文件的恢复分支：
+
+```text
+[旧] active schema 3 + pending boundary
+  -> [+] prepare_resume 分类 pending calls
+       |
+       +-- handler_admitted=false
+       |      -> [+] not_executed
+       |      -> [+] interrupted_before_handler tool result
+       |
+       +-- handler_admitted=true
+              -> [+] uncertain_state_or_result / uncertain_side_effect issue
+  -> [+] 保留源 session，claim 一次并派生新 session
+  -> [+] 新 generation，清除当前 verification
+  -> [C] Structured State / Context 显示待处理 issue
+       |
+       +-- [C] 只读调查
+       +-- [C] 用户 continue / block
+  -> [+] 全部 issue 结算后触发 crash_recovery replan
+  -> [C] 重新授权和独立 verification
+
+[B] 不重放旧 handler，不把用户普通文本当作 continue，不用旧 PID 控制进程
+```
+
+## 核心概念与数据结构
+
+### 1. 先区分“确定没进 handler”和“不知道发生了什么”
+
+恢复分类只使用 durable boundary 中已经写下的准入事实和 effect class：
+
+| 条件 | 分类 | 新 session 中的结果 |
+|---|---|---|
+| `handler_admitted=false` | `not_executed` | `interrupted_before_handler`，明确记为未执行 |
+| `handler_admitted=true` 且 `effect_class=none` | `uncertain_state_or_result` | 不声称结果或 State 变化可用 |
+| `handler_admitted=true` 且 `effect_class=possible` | `uncertain_side_effect` | 不声称成功，也不重放 |
+
+这里的 issue 是“必须被处理的未决事实”。例如 `write_file` 已准入但没有结果，就形成一个不确定副作用 issue；`read_file` 已准入但结果没提交，也不能直接把读到的内容猜回来。
+
+未进入 handler 的调用可以安全地合成一条工具结果：
+
+```json
+{
+  "status": "interrupted_before_handler",
+  "message": "调用在崩溃前未进入 handler，恢复时明确记为未执行。"
+}
+```
+
+不确定调用的结果则明确写成 `status: "uncertain"`，它不是旧 handler 的成功返回值。
+
+### 2. 恢复时保留源 session，派生一个新分支
+
+`--resume` 先判断 session 类型：完整 `clean` 安全点走 v0.31 的 safe resume；只有 schema 3 的 active pending boundary 进入 crash recovery。准备阶段不调用 LLM、PermissionGate 或 handler。
+
+恢复不会覆盖事故现场。源 session 保持只读，新的 session 保存恢复后的 State、Context、合成的 tool result 和恢复记录。`source_session_id` 与 `source_integrity` 会写入恢复事实；私有的 claim sidecar 记录 `preparing` / `committed` 阶段，防止同一个源完整性被重复派生。
+
+如果恢复前发现工作区清单发生变化，或 session 记录了旧后台进程、未完成的 stdin 写入，也会把这些事实纳入恢复交接；它们是待调查线索，不是“已经退出”或“没有副作用”的证明。
+
+代码层面，候选和正式派生仍是两个动作：
+
+```python
+candidate = prepare_resume(store, source_session_id, workspace_root)
+runtime = candidate.claim()
+```
+
+如果派生文件写入中途失败，下一次尝试沿用同一个 derived ID 继续；如果 claim 已经 `committed`，再次处理同一个源会报告已经存在的派生分支，而不是再创建一套事件。
+
+### 3. `/resolve` 把风险判断交给用户
+
+恢复有未结算 issue 时，普通输入、副作用工具、verification 和计划提交都会被 gate 拦截。CLI 提供三种明确决定：
+
+```text
+/resolve <issue_id> investigate <反馈>
+/resolve <issue_id> continue <反馈>
+/resolve <issue_id> block <反馈>
+```
+
+`investigate` 只记录用户决定，然后允许一次受限的只读调查；调查可以读取文件、列目录、搜索或计算，但不能写文件、运行 shell、控制进程或做 verification。`continue` 不是“重放旧调用”，而是用户在调查后接受继续处理该 issue；它要求当前恢复 generation 已有成功、获准、`effect_class=none` 的调查 attempt。`block` 则把任务保留在用户决定的阻塞终态。
+
+用户的 `continue` 必须由 CLI 记录，模型不能通过普通文本伪造。所有 issue 都 continue 后，任务仍不能沿着旧工具回合直接跑，而是进入 `crash_recovery` replan：先提交或复核新计划，再重新走 PermissionGate 和独立 verification。
+
+### 4. 恢复后的验证必须重新开始
+
+恢复会开启新的 generation，清除当前 `verification_evidence`；旧的 `verification_history`、FailureEvent、RecoveryAction 和计划历史仍保留供审计。这样 Trace 可以回答“崩溃前发生过什么”，而完成判定只使用恢复后的新证据。
+
+恢复摘要会显示 issue ID、工具、分类、准入状态、公开原因和合法下一步，但不会把原始工具参数、shell 命令正文或 stdin 正文重新放进 State、Trace 或提示词。
 
 ## 为什么这样设计
 
-派生 session 的代价是同一个任务会留下源文件、claim 和新分支三份可审计对象，用户需要理解源 ID 与新 ID 的关系；收益是恢复流程不会覆盖唯一的事故证据，重复执行也不会悄悄产生第二组不确定事件。
+“没有结果就重试”看起来简单，却无法区分 handler 尚未开始和副作用已经发生。尤其是写文件、shell、进程和 stdin，重复一次可能比漏做一次更危险。保守分类会增加一次调查和用户决定，但不会伪造成功，也不会悄悄重复外部动作。
 
-把“继续”设计成用户逐 issue 决定，而不是模型输出一个普通文本，是因为模型看不到崩溃时刻的外部世界，也不能把文件变化猜成因果。只读调查先建立当前事实，再把用户的风险判断写入 State；这会增加交互次数，但保留了正确的责任边界。
-
-新 generation 和独立 verification 会使任务比崩溃前多走一步。代价是不能复用旧的通过证据；收益是不会把恢复前的环境状态误当作恢复后的结果。`effect_class=none` 也默认不自动重试，因为“无外部副作用”仍不等于“结果已产生”。
+派生 session 会留下源文件、claim 和新分支三个可审计对象，存储成本更高；收益是事故证据不被覆盖，重复恢复不会产生第二组不确定事件。用户的 `continue` 也不直接恢复旧调用，而是触发新计划和新验证，因为用户接受风险不等于旧外部动作的结果已经知道。
 
 ## 设计边界
 
-本课刻意不做以下事情：
+本版支持：读取 active schema 3 的 pending boundary；确定未准入的调用记为 `not_executed`；已准入调用记为相应的 uncertain issue；源 session 保持不变；逐 issue 调查和用户决定；所有 issue 结算后重新规划和验证。
 
-- 不重连旧 `Popen`、PID、管道或 stdin 写入线程；旧进程会以 `orphaned` 事实保留，不能重新控制，也不能据此宣称已经退出。
-- 不根据工作区未变化、命令超时或进程消失推断调用没有发生。
-- 不自动回滚文件、shell 或外部服务副作用，不把未提交结果伪装成 verification。
-- 不跨进程继承旧 PermissionGate 的 `once` / `always` 运行时批准。
-- 不把 claim sidecar 当成 Trace 输入；它只用于防止同一源提交重复派生。
+本版不支持：重连旧 `Popen`、PID、管道或 stdin 线程；根据文件未变化、命令超时或 PID 消失推断“肯定没执行”；自动回滚或 replay 副作用；继承旧 PermissionGate 的运行时授权；把 claim sidecar 当作 Trace 输入。无法证明安全时，任务停在可解释的交接状态。
+
+## 关键流程
+
+```text
+--resume <source_session_id>
+  -> 校验 session 和 pending boundary
+  -> 观察工作区（只作为线索，不证明因果）
+  -> 按 handler_admitted / effect_class 创建 issue
+  -> 派生新 session，源文件保持不变
+  -> 未执行调用合成明确结果；不确定调用合成 uncertain 结果
+  -> 显示 issue 和 /resolve 用法
+
+/resolve issue-1 investigate 读取相关文件
+  -> 只读调查回合
+  -> /resolve issue-1 continue 调查后确认可以继续
+
+所有 issue 都 continue
+  -> crash_recovery replan
+  -> 重新授权
+  -> 独立 verification
+
+任一 issue block
+  -> 任务保持 blocked，不自动恢复旧调用
+```
+
+## 实现拆解
+
+[`src/mini_agent/resume.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/resume.py) 在 `prepare_resume()` 中分流 safe point 和 crash recovery，并在 `claim()` 前复核工作区观察；它根据 pending call 的准入状态构造恢复结果。[`src/mini_agent/session.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/session.py) 负责 claim、sidecar、派生 envelope 和两阶段耐久提交。
+
+[`src/mini_agent/state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/state.py) 保存 recovery、issue、decision、新 generation 和 `crash_recovery` trigger；`crash_recovery_gate()` 在 issue 未结算时把工具能力收窄到只读观察。[`src/mini_agent/tools/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/tools/base.py) 在 planning、repair 和 permission 之前执行这个 gate。
+
+[`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/context.py) 和 [`src/mini_agent/prompt.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/prompt.py) 给模型注入受保护的恢复摘要；[`src/mini_agent/__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/__main__.py) 只由 CLI 解析和记录 `/resolve`；[`src/mini_agent/trace.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/trace.py) 只读校验 recovery → issue → decision → trigger 因果链。
 
 ## 运行与观察
 
-在真实会话中，先使用 `/save` 让任务启用 schema 3 持久化，再在 active pending boundary 存在时运行：
+下面命令使用 Bash/zsh。只有在已有 active pending boundary 时，才会进入本课的 crash recovery 分支：
 
 ```bash
 PYTHONPATH=src python -m mini_agent --resume <source_session_id>
 ```
 
-预期看到源 ID、派生 session ID、分类表、工作区变化和 `/resolve` 用法。使用 `investigate` 后只读回合可以运行；在调查证据出现前直接 `continue` 会被拒绝。所有 issue 结算后，下一步不是继续旧工具回合，而是提交或复核 `crash_recovery` 触发的新计划。
+预期看到源 session ID、派生 session ID、调用分类、工作区观察和 `/resolve` 用法。`not_executed` 调用会自动补入明确的 `interrupted_before_handler` 结果；`uncertain_side_effect` 会阻止普通输入和副作用工具。
+
+执行 `/resolve <issue_id> investigate <反馈>` 后，只读回合可以运行；在调查成功前直接执行 `continue` 会被拒绝。所有 issue 结算后，下一步应是引用 `crash_recovery` trigger 的新计划和独立 verification，而不是继续旧的工具调用。源 session 的文件内容应保持不变。
 
 ## 本版特性、下一课与代码索引
 
-本版新增的是“崩溃后的可解释交接”，不是无限可靠的外部事务恢复。后续课程如继续扩展，应沿用源 session 不覆盖、不自动 replay、重新授权和独立 verification 这些边界。
+本版新增的是崩溃后的可解释交接：分类不完整调用、派生 session、逐 issue 用户决定、只读调查 gate、新 generation 和重新验证。它不是无限可靠的外部事务恢复，也不承诺无人值守地修复文件、shell、进程或 stdin 的副作用。
 
 下一课：[第 34 课：最小受控子代理委派](34-minimal-delegation.md)。
 
-- [State 恢复记录（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/state.py)
-- [Session claim 与派生 session（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/session.py)
-- [恢复候选分流（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/resume.py)
-- [CLI `/resolve`（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/__main__.py)
-- [Structured State 恢复摘要（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/context.py)
-- [Trace 因果校验（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/trace.py)
+核心代码索引：[`state.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/state.py)、[`session.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/session.py)、[`resume.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/resume.py)、[`__main__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/__main__.py)。
