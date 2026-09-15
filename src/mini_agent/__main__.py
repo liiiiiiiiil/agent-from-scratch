@@ -22,7 +22,9 @@ from mini_agent.output import TerminalOutput
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
 from mini_agent.processes import ProcessManager
 from mini_agent.resume import ResumeError, prepare_resume
-from mini_agent.session import SessionCommitUncertainError, SessionError, SessionStore
+from mini_agent.session import (
+    DurableToolBoundary, SessionCommitUncertainError, SessionError, SessionStore,
+)
 
 
 def _single_line_notice(value, limit=240):
@@ -125,6 +127,7 @@ def main():
     session_id = None
     clean_shutdown = False
     resumed = False
+    persistence_halted = False
     if argv and argv[0] == "--resume":
         if len(argv) != 2 or not argv[1].strip():
             print("用法: python -m mini_agent --resume <session_id>")
@@ -204,7 +207,11 @@ def main():
 
     def save_session(handoff_status="active", manual=False):
         """Save only a complete safe point; failed saves leave State untouched."""
-        nonlocal session_id
+        nonlocal session_id, persistence_halted
+        if persistence_halted:
+            if manual:
+                cli_notice("持久化已停止：请检查 session 文件和独占锁后重新启动。")
+            return False
         if not getattr(state, "task", ""):
             if manual:
                 cli_notice("用法: /save（当前没有活动任务）")
@@ -221,12 +228,15 @@ def main():
             )
         except SessionCommitUncertainError as error:
             session_id = error.session_id
+            persistence_halted = True
             cli_notice(
                 f"会话提交状态未确认（session_id={session_id}）："
                 f"{_single_line_notice(error, 500)}；请检查磁盘文件和独占锁。"
             )
             return False
         except SessionError as error:
+            if session_id is not None:
+                persistence_halted = True
             cli_notice(f"会话保存失败：{_single_line_notice(error, 500)}")
             return False
         new_session = envelope["session_id"]
@@ -260,6 +270,9 @@ def main():
 
     def cleanup_task_boundary():
         """Clean before State reset; an incomplete cleanup keeps the old task."""
+        if persistence_halted:
+            cli_notice("持久化已停止；当前任务不能安全切换或清空。")
+            return False
         if not getattr(state, "task_id", ""):
             return True
         sync_processes()
@@ -274,6 +287,10 @@ def main():
         return True
 
     def run_task(user_input, mode="auto"):
+        nonlocal session_id, persistence_halted
+        if persistence_halted:
+            cli_notice("持久化已停止；请检查当前 session 文件和独占锁后重新启动。")
+            return
         if not state.task:
             if hasattr(state, "begin_task"):
                 state.begin_task(user_input, mode=mode)
@@ -292,8 +309,32 @@ def main():
             return
         state.status = "running"
         context.history.append({"role": "user", "content": user_input})
+        if session_id is not None:
+            # The loop discovers this capability through the executor so old
+            # integrations that still provide a two-argument agent_loop keep
+            # working.
+            tool_executor.session_boundary = DurableToolBoundary(
+                get_session_store(), session_id, os.getcwd(),
+            )
+        else:
+            tool_executor.session_boundary = None
         try:
             result = agent_loop(context, tool_executor)
+        except SessionCommitUncertainError as error:
+            session_id = error.session_id
+            persistence_halted = True
+            cli_notice(
+                f"会话提交状态未确认（session_id={session_id}）："
+                f"{_single_line_notice(error, 500)}；已停止后续工具和模型请求。"
+            )
+            return
+        except SessionError as error:
+            persistence_halted = True
+            cli_notice(
+                f"会话持久化失败：{_single_line_notice(error, 500)}；"
+                "已停止后续工具和模型请求。"
+            )
+            return
         except LLMResponseError as error:
             state.status = "failed"
             cli_notice(f"服务商错误：{error}")
@@ -464,7 +505,7 @@ def main():
                 state.record_process_cleanup(report)
             if not report.complete:
                 cli_notice(report.render())
-            elif clean_shutdown and session_id is not None:
+            elif clean_shutdown and session_id is not None and not persistence_halted:
                 save_session("clean")
 
 

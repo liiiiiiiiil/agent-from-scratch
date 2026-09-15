@@ -1,10 +1,10 @@
 # 阶段九：会话持久化与恢复（Session Persistence & Resume）实施计划
 
-> 状态：v0.30、v0.31 已完成；v0.32–v0.33 待实施
+> 状态：v0.30、v0.31、v0.32 已完成；v0.33 待实施
 > 前置阶段：阶段六可靠执行（`v0.17`–`v0.21`）、阶段七结构化计划（`v0.22`–`v0.25`）与阶段八进程管理（`v0.26`–`v0.29`）
 > 建议版本范围：`v0.30`–`v0.33`
 
-v0.30 首次写入 schema 1；v0.31 的新写入格式为 `schema_version=2`，保留 `writer_version`、规范化 `workspace_root`、UTC `saved_at`、`save_kind`、`handoff_status`、`state`、`context`、工作区清单和 `integrity={"algorithm":"sha256","sha256":"..."}`。schema 1 仍可读取诊断，但只能恢复 schema 2。用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点自动更新同一文件。`active` 表示最后一次保存是可诊断的完整安全点，`clean` 只在正常退出或任务切换完成有界进程清理后提交。v0.31 增加 `--resume`，但只接受 `clean` 安全点并在提交 active 占用后等待用户输入，不自动调用 LLM。
+v0.30 首次写入 schema 1；v0.31 写入 schema 2；v0.32 的新写入格式为 `schema_version=3`，在同一原子文件中增加 `tool_boundary`。schema 1 仍可读取诊断，schema 2 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 3。用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点和工具边界自动更新同一文件。`active` 表示最后一次保存是可诊断的提交，`clean` 只在正常退出或任务切换完成有界进程清理后提交。`--resume` 只接受 clean、完整且 committed 的安全点并在提交 active 占用后等待用户输入，不自动调用 LLM。
 
 ## 1. 目标与定位
 
@@ -136,7 +136,7 @@ RoundCommit
 - status: incomplete | complete
 ```
 
-`pending` 只表示持久化边界已建立，不表示 handler 一定开始；必须另有准入事实才能判定不确定范围。`committed` 要求结果、State 和 history 一起可读；整轮 `complete` 要求每个调用都有唯一结果，才允许下一次模型请求。持久文件中的脱敏参数不能充当重试所需的原始参数；用户明确继续时也应重新提供或由当前受限恢复协议取得必要输入。
+`pending` 只表示持久化边界已建立，不表示 handler 一定开始；`handler_admitted=true` 才说明准入提交已经完成。`committed` 要求结果、State 和 history 一起可读；整轮 `committed` 要求每个调用都有唯一结果，才允许下一次模型请求。持久文件中的脱敏参数不能充当重试所需的原始参数；v0.32 只提供中断事实和拒绝续跑，用户交接与分类恢复留给 v0.33。
 
 ## 5. 版本切片
 
@@ -172,6 +172,8 @@ RoundCommit
 
 ### 5.3 `v0.32` Durable Tool Boundaries
 
+状态：已完成。
+
 目标：把模型工具调用的“准备执行”和“结果已进入协议”分别变成耐久事实。
 
 主要工作：
@@ -185,6 +187,8 @@ RoundCommit
 验收重点：在各提交位置模拟进程中断，能准确区分最后完整回合、未入 handler 和已入 handler 的调用；任何持久状态都不会声称半轮结果是完整协议。
 
 ### 5.4 `v0.33` Crash Recovery
+
+状态：待实施。
 
 目标：识别崩溃后的不完整调用，并以保守、可解释的路径恢复工作。
 

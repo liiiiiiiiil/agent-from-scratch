@@ -1,4 +1,4 @@
-"""Safe v0.31 session admission and fresh-runtime assembly."""
+"""Safe session admission and fresh-runtime assembly for schema 2/3."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -14,6 +14,7 @@ from mini_agent.permission import PermissionGate
 from mini_agent.processes import ProcessManager
 from mini_agent.prompt import build_system_prompt
 from mini_agent.session import (
+    SCHEMA_2_VERSION,
     SCHEMA_VERSION,
     SessionError,
     SessionStore,
@@ -221,12 +222,20 @@ def prepare_resume(store: SessionStore, session_id: str,
         envelope = store.load(session_id)
     except SessionError:
         raise
-    if envelope.get("schema_version") != SCHEMA_VERSION:
+    if envelope.get("schema_version") == 1:
         raise ResumeError("schema 1 会话只供诊断，不能续跑")
+    if envelope.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
+        raise ResumeError("不支持的 session schema，不能续跑")
     if envelope.get("save_kind") != "safe_point":
         raise ResumeError("只有 safe_point 会话可以恢复")
+    if (envelope.get("schema_version") == SCHEMA_VERSION
+            and envelope.get("tool_boundary", {}).get("status") == "pending"):
+        raise ResumeError("会话包含未完成的 tool_boundary；v0.32 不续跑半轮")
     if envelope.get("handoff_status") != "clean":
         raise ResumeError("只有 clean 会话可以恢复；当前会话仍是 active")
+    if (envelope.get("schema_version") == SCHEMA_VERSION
+            and envelope.get("tool_boundary", {}).get("status") != "committed"):
+        raise ResumeError("会话包含未完成的 tool_boundary；v0.32 不续跑半轮")
     issues = check_workspace_manifest(envelope, workspace_root)
     if issues:
         raise ResumeError("工作区检查失败：" + "；".join(issues[:20]))

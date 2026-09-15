@@ -13,6 +13,7 @@
 - **配置安全**：真实的 `BASE_URL`、`API_KEY`、`MODEL` 只放本地 `config_local.py`，不得提交到版本库。
 - **异常边界**：工具层/执行器负责把 handler 异常转换为错误结果并回灌模型；核心 agent loop 不对 LLM 或 CLI 顶层异常做兜底。
 - **协议完整**：工具调用必须为每个 call 回灌对应的 `role=tool` 结果；单轮工具结果全部回灌后再进入下一轮。
+- **持久化工具边界**：开启 `/save` 后，schema 3 必须在 handler 前提交 `handler_admitted`，每个 call 的 State、对应 `role=tool` 结果和边界状态必须按模型顺序原子提交；整轮 committed 前不得再次请求 LLM。提交失败不得进入 handler、后续 call 或下一次 LLM 请求；v0.32 只记录半轮事实并拒绝续跑。
 - **Plan Contract**：复杂任务由模型通过 `commit_plan` 提交完整不可变 revision，通过 `update_plan_progress` 追加独立步骤进度事件；简单任务继续 Direct Path。计划校验失败只回灌 `plan_rejected`，不得创建 `FailureEvent`、推进 generation 或产生验证证据；计划写入不替代实际执行和独立 verification。
 - **只读规划与交接**：普通任务可经 `begin_plan` 进入只读调查；`--plan` 任务必须先调查，提交后等待用户批准当前 revision。`exploring` 的副作用、verification 和混合提交在整轮与执行器两层拒绝；批准计划不得绕过 PermissionGate。用户驳回或继续调查的反馈由 CLI 记录，不能由模型伪造。
 - **Shell 副作用分类**：所有 `run_shell` 调用均按可能有副作用处理并在获准后预留 generation；`purpose=verification` 只指定验证证据用途，不把命令降为只读。
@@ -26,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.30`（会话持久化与安全点）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.32`（持久化工具执行边界）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
 `progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、
@@ -37,7 +38,7 @@ State 保持一次提醒兼容行为。
 
 活动后台进程属于当前 `task_id`，必须阻止任务进入 `done`；stdin 写入在途时也必须阻止完成。模型无工具调用而进程仍运行或 stdin 写入未收束时使用 `awaiting_process` 交回 CLI；用户恢复前先同步进程。`/new`、`/reset`、EOF、`exit` 和异常退出必须先有界清理当前任务登记的进程及写入线程；清理不完整时保留旧任务并报告具体进程 ID、PID 和原因。管道 stdin 只有显式启用时可写，单次 UTF-8 输入最多 4096 字节，正文不得进入 State、Trace、工具结果、授权提示或终端输出；PTY 不属于当前能力。
 
-`/save` 只在完整安全点持久化当前任务的 State、Context 和会话元数据；未结算 attempt、活动进程或在途 stdin 不得保存。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。v0.30 只校验会话文件，不恢复执行。
+`/save` 仍是开启持久化的唯一入口；完整安全点保存当前任务的 State、Context 和会话元数据。持久化工具回合另允许最后一轮的有序结果前缀和待结算 attempt，但只写入 schema 3 的 `tool_boundary`，不作为可恢复安全点。未结算 attempt、活动进程或在途 stdin 不得保存为 safe point。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。schema 3 的 pending/active 会话不恢复执行。
 
 ## 架构索引
 
@@ -46,7 +47,7 @@ State 保持一次提醒兼容行为。
 - `state.py`：独立于消息历史的任务、Plan Contract、工具和验证状态；`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读投影。
 - `permission.py`：按工具与参数模式匹配的 allow/deny/ask 权限闸门。
 - `processes.py`：CLI 生命周期内的后台进程句柄、进程组、双流排空、环形缓冲和有界清理；不可快照资源不进入 State。
-- `session.py`：v0.30 会话 schema、完整性校验和原子存取，不承担恢复执行。
+- `session.py`：schema 1/2/3 会话、完整性校验、原子存取和工具边界提交，不承担恢复执行。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。
 

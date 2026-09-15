@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from mini_agent.context import ContextManager
 from mini_agent.output import TerminalOutput
 from mini_agent.tools import registry
-from mini_agent.tools.base import ExecutionResult, ToolExecutor
+from mini_agent.tools.base import ExecutionResult, ToolAdmission, ToolExecutor
 from mini_agent.state import canonical_arguments_hash
 from mini_agent.tools.base import validate_arguments
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
@@ -319,6 +319,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     legacy_reminded = False
     internal_retry = False
     output = TerminalOutput(OUTPUT_MODE)
+    session_boundary = getattr(tool_executor, "session_boundary", None)
 
     def _finish(value):
         output.close()
@@ -333,7 +334,12 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         if not task_id:
             return
         facts = manager.sync_processes(task_id)
-        state.sync_processes(facts)
+        events = state.sync_processes(facts)
+        if session_boundary is not None and facts:
+            # Natural process exits are durable State facts without a new
+            # role=tool message.  A storage error intentionally bubbles out.
+            session_boundary.persist_process_sync(state, context_manager)
+        return events
 
     def _terminal_state_result(state):
         """Return the loop result for a terminal State, if it became terminal."""
@@ -554,6 +560,27 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             index for index, (name, args) in enumerate(parsed_calls)
             if has_other_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
         }
+        durable_invocations = {
+            index: f"r-{sum(1 for item in context_manager.history
+                              if isinstance(item, dict) and item.get("role") == "assistant"
+                              and item.get("tool_calls"))}-c-{index}"
+            for index in range(len(tool_calls))
+        }
+        if session_boundary is not None:
+            session_boundary.start_round(
+                max(1, sum(1 for item in context_manager.history
+                           if isinstance(item, dict) and item.get("role") == "assistant"
+                           and item.get("tool_calls"))),
+                msg,
+                [{
+                    "invocation_id": durable_invocations[index],
+                    "tool_call_id": tc.get("id"),
+                    "tool": parsed_calls[index][0],
+                    "arguments": parsed_calls[index][1],
+                    "effect_class": effects[index],
+                } for index, tc in enumerate(tool_calls)],
+                state, context_manager,
+            )
         repair_batch_errors = {}
         if state is not None and hasattr(state, "repair_phase"):
             repair_phase = state.repair_phase
@@ -574,7 +601,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                     detail = "工具调用失败: verification_required 阶段下一工具回合只能是单个独立 verification"
                     repair_batch_errors = {index: detail for index in range(len(parsed_calls))}
 
-        def _run(index_tc):
+        def _run(index_tc, pre_admission=None, admit_only=False):
             index, tc = index_tc
             tool_call_id = tc.get("id") if isinstance(tc, dict) else None
             if structured and state is not None and getattr(state, "is_terminal", lambda: False)():
@@ -664,14 +691,44 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 ) if structured else None
                 return tool_call_id, text, None, display
 
+            # Durable calls finish admission in the caller's thread.  A
+            # storage error from record_admission is deliberately outside the
+            # ordinary handler-error conversion below.
+            if structured and session_boundary is not None:
+                admission = pre_admission
+                if admission is None:
+                    admission = tool_executor.admit(name, args, state)
+                    if isinstance(admission, ToolAdmission):
+                        session_boundary.record_admission(
+                            durable_invocations[index], admission, state, context_manager,
+                        )
+                if isinstance(admission, ExecutionResult):
+                    execution = admission
+                else:
+                    if admit_only:
+                        return tool_call_id, None, admission, None
+                    execution = tool_executor.execute_admitted(admission, notify=False)
+                if admit_only:
+                    return tool_call_id, execution.tool_content(), execution, execution
+                if name == "recover":
+                    if execution.error_kind in ("task_terminal", "recovery_rejected"):
+                        content = execution.tool_content()
+                    elif execution.outcome != "succeeded":
+                        content = _recovery_rejection_content(state, args, execution.output_excerpt)
+                    else:
+                        content = execution.tool_content()
+                    return tool_call_id, content, None, execution
+                if execution.error_kind == "plan_rejected":
+                    return tool_call_id, execution.tool_content(), None, execution
+                if execution.error_kind == "task_terminal":
+                    return tool_call_id, execution.tool_content(), None, execution
+                return tool_call_id, execution.tool_content(), execution, execution
+
             # Isolate only this tool boundary so pool.map still returns one
             # protocol result per call; LLM and CLI exceptions remain uncaught.
             try:
                 if structured:
-                    execution = tool_executor.execute_result(
-                        name, args, state,
-                        notify=False,
-                    )
+                    execution = tool_executor.execute_result(name, args, state, notify=False)
                     if name == "recover":
                         if execution.error_kind in ("task_terminal", "recovery_rejected"):
                             content = execution.tool_content()
@@ -680,9 +737,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                         else:
                             content = execution.tool_content()
                         return tool_call_id, content, None, execution
-                    if execution.error_kind == "plan_rejected":
-                        return tool_call_id, execution.tool_content(), None, execution
-                    if execution.error_kind == "task_terminal":
+                    if execution.error_kind in ("plan_rejected", "task_terminal"):
                         return tool_call_id, execution.tool_content(), None, execution
                     return tool_call_id, execution.tool_content(), execution, execution
                 result = tool_executor.execute(name, args)
@@ -697,23 +752,68 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
 
         indexed_calls = list(enumerate(tool_calls))
         output.tools_start(tool_calls)
+
+        def _commit_one(index: int, result):
+            """Commit State, one protocol result, and the durable call ledger."""
+            tool_call_id, content, execution, display = result
+            committed_attempt = None
+            if (structured and state is not None and execution is not None
+                    and parsed_calls[index][0] != "recover"):
+                committed_attempt = state.record_execution_result(execution)
+            context_manager.history.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": content,
+            })
+            if session_boundary is not None:
+                boundary_execution = execution or display
+                if not isinstance(boundary_execution, ExecutionResult):
+                    raise RuntimeError("durable tool call 缺少 ExecutionResult")
+                session_boundary.record_execution_result(
+                    durable_invocations[index], boundary_execution, str(content),
+                    state, context_manager, committed_attempt,
+                )
+
         if has_possible or has_serial_plan_write or has_serial_process_observation:
             results = []
             for item in indexed_calls:
                 result = _run(item)
                 results.append(result)
-                if (structured and state is not None and result[2] is not None
-                        and parsed_calls[item[0]][0] != "recover"):
-                    state.record_execution_result(result[2])
+                _commit_one(item[0], result)
         else:
-            with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
-                results = list(pool.map(_run, indexed_calls))
-            # Concurrent handlers finish in arbitrary order; facts commit in
-            # model order so attempt ids and snapshots stay deterministic.
-            if structured and state is not None:
-                for _, _, execution, _ in results:
-                    if execution is not None:
-                        state.record_execution_result(execution)
+            if session_boundary is not None and structured:
+                # Admission is deliberately serialized.  Once every call has
+                # its durable admission, handler bodies may run concurrently.
+                staged: dict[int, ToolAdmission] = {}
+                immediate: dict[int, tuple] = {}
+                for item in indexed_calls:
+                    prepared = _run(item, admit_only=True)
+                    if isinstance(prepared[2], ToolAdmission):
+                        staged[item[0]] = prepared[2]
+                    else:
+                        immediate[item[0]] = prepared
+                with ThreadPoolExecutor(max_workers=max(1, len(staged))) as pool:
+                    futures = {
+                        index: pool.submit(_run, (index, tool_calls[index]), admission)
+                        for index, admission in staged.items()
+                    }
+                    results = []
+                    # Persist every completed model-order prefix immediately;
+                    # a later result never overtakes an earlier pending call.
+                    for index, _ in indexed_calls:
+                        result = (
+                            immediate[index] if index in immediate
+                            else futures[index].result()
+                        )
+                        results.append(result)
+                        _commit_one(index, result)
+            else:
+                with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
+                    results = list(pool.map(_run, indexed_calls))
+                # Concurrent handlers finish in arbitrary order; facts commit
+                # in model order so attempt ids and snapshots stay deterministic.
+                for index, result in enumerate(results):
+                    _commit_one(index, result)
 
         # Threads execute concurrently, but terminal output follows tool-call order.
         for tc, (tool_call_id, content, _, display) in zip(tool_calls, results):
@@ -723,12 +823,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             output.tool_result(name, arguments, content, display)
         output.close()
 
-        for tool_call_id, content, _, _ in results:
-            context_manager.history.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": content,
-            })
+        if session_boundary is not None:
+            session_boundary.complete_round(state, context_manager)
 
         # A process can exit while the tool round is being committed.  Sync
         # only after every role=tool result is in history so the next context

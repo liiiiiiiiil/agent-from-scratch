@@ -1,8 +1,8 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.31**（从完整安全点恢复会话；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.32**（持久化工具执行边界；含此前可靠执行能力）。
 
-## v0.31 会话持久化与安全恢复
+## v0.32 会话持久化与安全恢复
 
 ### 开启、更新和关闭会话
 
@@ -17,7 +17,7 @@
 
 ### 文件位置、格式和隐私边界
 
-默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。新写入 envelope 使用 `schema_version=2`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、保存 generation、`active/clean`、State、Context、任务涉及路径的工作区清单和覆盖其他字段的 SHA-256 完整性值。schema 1 仍可读取诊断，但不能恢复。
+默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。新写入 envelope 使用 `schema_version=3`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、保存 generation、`active/clean`、State、Context、工作区清单、`tool_boundary` 和覆盖其他字段的 SHA-256 完整性值。schema 1 仍可读取诊断，schema 2 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 3。
 
 State 导出的是权威计划、执行、失败、恢复、generation、预算私有计数、原始恢复参数和检查点**元数据**；不会写入锁、`ProcessManager`、`Popen`、线程或检查点前镜像字节。Context 导出普通任务历史、摘要、压缩标记、摘要轮数和待消费 Runtime Notice，但不导出受保护的 system prompt。assistant 工具调用必须与按序的 `role=tool` 结果一一配对。
 
@@ -31,7 +31,7 @@ SessionStore 提供读取、大小检查、schema 检查、字段/引用检查�
 PYTHONPATH=src python -m mini_agent --resume <session_id>
 ```
 
-恢复只接受 `schema_version=2`、`save_kind=safe_point`、`handoff_status=clean` 且工作区清单仍匹配的会话。CLI 会先构造新的 State、Context、工具注册表、ProcessManager 和 PermissionGate，再在 session 独占锁内复核原提交与工作区清单，把会话改写为后继 generation 的 `active` 版本；提交成功后显示原任务状态并等待输入，不自动请求 LLM。工作区变化、无法完整检查的路径、`active` 会话、损坏文件和锁竞争都会在调用 LLM 或工具前拒绝。恢复后的正常退出才重新写入 `clean`；异常退出留下 `active`，不能再次直接恢复。
+恢复只接受 schema 2/3 中 `schema_version`、`save_kind=safe_point`、`handoff_status=clean` 且工作区清单仍匹配的完整 committed 会话。CLI 会先构造新的 State、Context、工具注册表、ProcessManager 和 PermissionGate，再在 session 独占锁内复核原提交与工作区清单，把会话改写为 schema 3 的后继 generation `active` 版本；提交成功后显示原任务状态并等待输入，不自动请求 LLM。工作区变化、无法完整检查的路径、`active` 会话、pending tool boundary、损坏文件和锁竞争都会在调用 LLM 或工具前拒绝。恢复后的正常退出才重新写入 `clean`；异常退出留下 `active`，不能再次直接恢复。
 
 v0.30 的 schema 1 会话仍可读取诊断，但不能续跑。旧验证资格在恢复时清空，`verification_history` 只用于审计和 Trace 回放；恢复后的任务需要独立验证。旧 PID、旧 `process_id` 和没有前镜像字节的旧 `ready` checkpoint 只保留审计记录，不能控制进程或执行回滚。
 
@@ -47,7 +47,7 @@ v0.30 的 schema 1 会话仍可读取诊断，但不能续跑。旧验证资格�
 
 ## v0.30 会话持久化与安全点
 
-v0.30 引入 `/save`、本地 schema 1 session、脱敏 history、原子安全点和 `active/clean` 生命周期。它只负责校验和诊断；v0.31 的恢复入口使用 schema 2 和工作区清单。
+v0.30 引入 `/save`、本地 schema 1 session、脱敏 history、原子安全点和 `active/clean` 生命周期。v0.31 增加 schema 2 和工作区清单；v0.32 增加 schema 3 的持久化工具边界。半轮只用于诊断，不能通过 `--resume` 自动补结果或重放 handler。
 
 ## v0.29 后台进程有界文本输入
 
@@ -317,7 +317,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.31，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.32，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -364,7 +364,19 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 每轮带 `tool_calls` 的 assistant 消息，都会在进入下一轮或返回前追加全部对应的 `role=tool` 消息，避免达到迭代上限时留下协议不完整的消息序列。
 
-### 3.2 上下文预算与裁剪
+### 3.2 持久化工具执行边界
+
+输入 `/save` 后，session 文件升级为 schema 3。它仍然是单个原子 JSON 文件，同时保存 State、Context 和最后一个工具回合的 `tool_boundary`；不会额外创建 journal。`session_generation` 是每次提交递增的序号。
+
+工具回合的持久化顺序是固定的：先写入 assistant 消息和按模型顺序排列的 pending call；通过权限、参数和计划前置检查后，在 handler 真正开始前提交 `handler_admitted`；handler 返回后，先记账 State，再追加对应的 `role=tool`，然后原子提交该 call 的结果。所有 call 都 committed 后，才允许再次请求 LLM。`run_shell` 包括 `purpose="verification"` 始终按 `possible` 记录；`recover` 可能进入另一个工具或执行回滚，外层边界也保守记录为 `possible`，实际恢复 attempt 和 generation 仍由 `RecoveryRuntime` 管理。
+
+这条边界解决的是“工具已经执行，但结果还没有落盘”的窗口。串行副作用工具按模型顺序完成；effect class 为 `none` 的调用可以并发产生结果，但准入提交和主线程的结果提交仍按模型顺序进行。权限拒绝、参数错误、计划校验失败和 handler 异常都各自产生确定的工具结果；存储失败会停止后续 handler 与模型请求，不会被包装成普通工具失败。
+
+进程自然退出属于异步 State 事实，会单独提交，不伪造新的工具回复。`write_process.input` 只在保存时保留占位符；如果正文出现在其他持久化文本中，保存会拒绝。
+
+v0.32 的 pending 边界用于诊断中断发生在哪里，不能恢复未完成回合。`--resume` 只接受 clean、完整且 committed 的安全点；schema 2 的 clean 安全点仍可读取，并在恢复占用时升级为 schema 3。崩溃后如何分类尚未进入 handler、已经准入或可能产生副作用的调用，留给 v0.33。
+
+### 3.3 上下文预算与裁剪
 
 `CONTEXT_WINDOW` 可在 `config_local.py` 中按模型窗口覆盖。`ContextBudget` 默认保留 15% 给模型输出，历史层最多使用窗口的 45%；system 消息和首条 user task 是保底内容，永不删除。
 
@@ -376,13 +388,13 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 终端会输出 `[Context]` 日志，展示超限、截断和轮次删除的估算 token 节省量。保底内容本身超过预算时，agent 保留它们并继续请求，不会因裁剪逻辑崩溃。
 
-### 3.3 上下文压缩
+### 3.4 上下文压缩
 
 当预算超限且存在足够旧的历史轮次时，`ContextManager` 会调用一次不带工具 schema、也不向终端流式输出的摘要请求。摘要结果以 `[Historical Summary]` system 消息注入；近期轮次仍按完整 tool-calling 轮次保留。`AgentState.snapshot()` 每次重新渲染为 `[Structured State]`，用于锚定真实执行事实。
 
 摘要允许有损，State 不依赖摘要推断。摘要请求失败、返回空内容或没有可压缩的旧轮次时，ContextManager 自动退回 trimming；原始 `history` 始终不被修改。
 
-### 3.4 System Prompt
+### 3.5 System Prompt
 
 启动时由 `prompt.py` 的 `build_system_prompt()` 组装 `messages[0]`，分三层：
 
@@ -397,7 +409,7 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_prompt; print(build_system_prompt())"
 ```
 
-### 3.5 工具
+### 3.6 工具
 
 | 工具 | 参数 | 权限 | 说明 |
 |---|---|---|---|
@@ -416,7 +428,7 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `write_process` | `process_id: str, input: str, close_stdin?: bool` | **ASK** | 向显式开启管道的进程写入最多 4096 字节 UTF-8 文本；可单独发送 EOF；单次最多等待 2 秒 |
 | `rollback_checkpoint` | 内部 `checkpoint_id` | **仅 RecoveryRuntime** | 不进入模型 schema；恢复一个已授权且未冲突的单文件检查点 |
 
-### 3.6 权限交互
+### 3.7 权限交互
 
 v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`PermissionGate` 从工具参数中提取 pattern（文件工具提取 `path`，`run_shell` 和 `start_process` 各自提取 `command`，其他返回 `*`），用 `fnmatch` 做 wildcard 匹配。`start_process` 有自己的规则表，不继承 `run_shell` 已放行的命令。`write_process` 使用自己的 `ask` 规则，不继承启动命令或其他工具的授权。
 
@@ -471,7 +483,7 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 
 > 二维权限示例：配置 `{"read_file": {"*": "allow", "*.env": "deny"}}` 后，读取 `.env` 文件会被拒绝，其他文件正常放行。
 
-### 3.7 工具调用流程
+### 3.8 工具调用流程
 1. LLM 返回 `tool_calls`（一轮可含多个，代码用线程池并发执行）
 2. `ToolExecutor` 先过权限闸门（`PermissionGate.guard`）
 3. 通过则调 handler，失败则捕获异常返回错误信息给 LLM
@@ -481,14 +493,14 @@ v0.09 权限系统升级为二维匹配：`(tool_name, pattern) -> action`。`Pe
 
 如果一批调用中途使任务进入 `blocked`/`failed`，剩余调用仍各自产生拒绝结果并全部回灌，下一轮模型只能解释终态原因；它们不会再次触发权限询问或 handler。
 
-### 3.8 相对路径约定
+### 3.9 相对路径约定
 工具的相对路径（如 `examples/input.txt`）按进程的**当前工作目录**解析，不会自动相对已安装的包目录。使用仓库示例时，建议先进入仓库根目录：
 ```bash
 # 在 agent-from-scratch/ 目录下运行
 python -m mini_agent "读取 examples/input.txt"
 ```
 
-### 3.9 终端输出
+### 3.10 终端输出
 
 CLI 的输入提示固定为 `你 › `。助手正文通过 SSE 流式到达时，只有收到第一个非空 chunk 才显示 `助手 › `，随后直接追加正文；因此空回复不会留下空标题。agent loop 将 `call_llm` 的 `on_content` 回调连接到这一层，最终正文不会再次整段重播。
 

@@ -295,8 +295,13 @@ class ContextManager:
         self.last_stats: ContextStats | None = None
         self._runtime_notice: str | None = None
 
-    def export_session(self) -> dict[str, object]:
-        """Export task history and compaction state, excluding protected prompts."""
+    def export_session(self, *, allow_partial: bool = False) -> dict[str, object]:
+        """Export task history and compaction state, excluding protected prompts.
+
+        A durable tool boundary may contain only the final assistant tool-call
+        message and an ordered prefix of its results.  Ordinary session saves
+        keep the original complete-round requirement.
+        """
         history = json.loads(json.dumps(deepcopy(self.history), ensure_ascii=False))
         if not isinstance(history, list):
             raise ValueError("Context history 必须是列表")
@@ -386,12 +391,16 @@ class ContextManager:
             "runtime_notice": runtime_notice,
         }
         normalized = json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        self.validate_session_export(normalized)
+        self.validate_session_export(normalized, allow_partial=allow_partial)
         return normalized
 
+    def export_tool_boundary(self) -> dict[str, object]:
+        """Export a boundary snapshot while a final tool round is incomplete."""
+        return self.export_session(allow_partial=True)
+
     @staticmethod
-    def validate_session_export(payload: object) -> None:
-        """Check complete assistant tool-call/result pairing in an export."""
+    def validate_session_export(payload: object, *, allow_partial: bool = False) -> None:
+        """Check ordered assistant tool-call/result pairing in an export."""
         if not isinstance(payload, dict) or payload.get("format") != "mini_agent.context" or payload.get("format_version") != 1:
             raise ValueError("未知或不支持的 Context 导出版本")
         history = payload.get("history")
@@ -405,6 +414,7 @@ class ContextManager:
         if notice is not None and not isinstance(notice, str):
             raise ValueError("Context runtime_notice 类型无效")
         expected: list[str] = []
+        partial_assistant = False
         seen_call_ids: set[str] = set()
         for message in history:
             if not isinstance(message, dict) or not isinstance(message.get("role"), str):
@@ -442,7 +452,11 @@ class ContextManager:
                 elif not isinstance(raw_arguments, dict):
                     raise ValueError("tool call arguments 类型无效")
                 expected.append(call["id"])
-        if expected:
+            if expected and message is history[-1]:
+                partial_assistant = True
+        if expected and history and isinstance(history[-1], dict) and history[-1].get("role") == "tool":
+            partial_assistant = True
+        if expected and not (allow_partial and partial_assistant):
             raise ValueError("assistant tool call 结果未完整回灌")
 
     @classmethod

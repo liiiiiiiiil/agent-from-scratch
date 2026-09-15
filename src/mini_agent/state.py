@@ -2797,33 +2797,33 @@ class AgentState:
         with self._lock:
             return self._session_safety_issues_locked()
 
-    def _session_safety_issues_locked(self) -> list[str]:
+    def _session_safety_issues_locked(self, *, allow_pending: bool = False) -> list[str]:
         issues: list[str] = []
-        if self._pending_attempts:
+        if self._pending_attempts and not allow_pending:
             issues.append("存在未结算的 tool attempt: " + ", ".join(sorted(self._pending_attempts)))
-        if self._reserved_repair_cycles:
+        if self._reserved_repair_cycles and not allow_pending:
             issues.append("存在未结算的 recovery 预算预留")
         proposed_recoveries = [item.recovery_id for item in self.recovery_actions if item.status == "proposed"]
         if proposed_recoveries:
             issues.append("存在未结算的 recovery action: " + ", ".join(proposed_recoveries))
-        if self._pending_process_controls:
+        if self._pending_process_controls and not allow_pending:
             issues.append("存在未提交的进程控制结果")
         active = [item for item in self.process_records
                   if item.status == "running" or item.write_pending]
-        if active:
+        if active and not allow_pending:
             issues.append(
                 "存在活动后台进程或在途 stdin: "
                 + ", ".join(f"{item.process_id}(pid={item.pid})" for item in active)
             )
         uncommitted_events = [item.process_id for item in self.process_records
                               if item.status != "running" and item.terminal_event_id is None]
-        if uncommitted_events:
+        if uncommitted_events and not allow_pending:
             issues.append(
                 "存在尚未提交终止事件的进程: " + ", ".join(uncommitted_events)
             )
         return issues
 
-    def export_session(self) -> dict[str, Any]:
+    def export_session(self, *, allow_pending: bool = False) -> dict[str, Any]:
         """Export authoritative, JSON-safe task facts for v0.30 sessions.
 
         Runtime locks, the ProcessManager, checkpoint image bytes and all
@@ -2832,7 +2832,7 @@ class AgentState:
         therefore are not stored as authoritative facts.
         """
         with self._lock:
-            issues = self._session_safety_issues_locked()
+            issues = self._session_safety_issues_locked(allow_pending=allow_pending)
             if issues:
                 raise SessionExportError("；".join(issues))
 
@@ -2923,11 +2923,15 @@ class AgentState:
         # is a plain JSON value so that canonical hashing is independent of the
         # encoder used by callers.
         normalized = json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        self.validate_session_export(normalized)
+        self.validate_session_export(normalized, allow_pending=allow_pending)
         return normalized
 
+    def export_tool_boundary(self) -> dict[str, Any]:
+        """Export State while a durable tool boundary owns pending attempts."""
+        return self.export_session(allow_pending=True)
+
     @staticmethod
-    def validate_session_export(payload: Any) -> None:
+    def validate_session_export(payload: Any, *, allow_pending: bool = False) -> None:
         """Validate State references and private counters without restoring it."""
         if not isinstance(payload, dict):
             raise SessionExportError("State 导出必须是 JSON object")
@@ -3171,7 +3175,7 @@ class AgentState:
                 raise SessionExportError(f"State 私有计数器 {name} 必须为正整数")
         if private["repair_cycles"] > MAX_REPAIR_CYCLES or private["reserved_repair_cycles"] > MAX_REPAIR_CYCLES:
             raise SessionExportError("repair cycle 计数超过预算")
-        if private["reserved_repair_cycles"]:
+        if private["reserved_repair_cycles"] and not allow_pending:
             raise SessionExportError("安全点不得包含未结算的 recovery 预算")
         if len(payload["recovery_actions"]) > MAX_RECOVERY_ACTIONS:
             raise SessionExportError("recovery action 计数超过预算")
@@ -3208,9 +3212,20 @@ class AgentState:
                 raise SessionExportError("failure_retry_counts 无效")
         if len({item.get("failure_id") for item in private["failure_retry_counts"]}) != len(private["failure_retry_counts"]):
             raise SessionExportError("failure_retry_counts 含重复 failure")
-        if private.get("pending_attempts"):
+        pending_attempts = private.get("pending_attempts")
+        if not isinstance(pending_attempts, list) or any(
+                not isinstance(item, str) or not item.startswith("a-")
+                or not item[2:].isdigit()
+                for item in pending_attempts):
+            raise SessionExportError("pending_attempts 无效")
+        unique(pending_attempts, "pending attempt")
+        if any(item in attempt_set for item in pending_attempts):
+            raise SessionExportError("pending attempt 不能同时出现在 attempts")
+        if any(int(item[2:]) >= private["next_attempt"] for item in pending_attempts):
+            raise SessionExportError("pending attempt 引用了尚未分配的 attempt")
+        if pending_attempts and not allow_pending:
             raise SessionExportError("安全点不得包含 pending attempt")
-        if private.get("pending_process_controls"):
+        if private.get("pending_process_controls") and not allow_pending:
             raise SessionExportError("安全点不得包含 pending process control")
         boundaries = private["revision_attempt_boundaries"]
         if not isinstance(boundaries, list):

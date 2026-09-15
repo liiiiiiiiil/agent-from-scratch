@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.32.0] - Durable tool execution boundaries
+
+- Raised new session writes to schema 3 while retaining schema 1 diagnostics and schema 2 clean safe-point resume; claiming a schema 2 session upgrades it atomically.
+- Persisted one ordered tool boundary with redacted arguments, permission and handler admission facts, attempt/generation references, and pending/committed results in the same atomic session file as State and Context.
+- Committed handler admission before entering a handler, committed each State/history/tool result in model order, and allowed the next LLM request only after the whole round was committed. Storage failures stop subsequent handlers and model requests.
+- Kept `run_shell`, including `purpose="verification"`, in the possible-effect class; natural process exits are persisted as State facts without synthetic tool replies. v0.32 records incomplete rounds for diagnosis but does not resume them.
+- Added durable-boundary fault-injection coverage and lesson 32.
+
 ## [v0.31.0] - Safe resume from complete safe points
 
 - Raised new session writes to JSON `schema_version=2` with a bounded workspace manifest covering structured file facts, changed files, failures, checkpoints, and recursive grep scopes; shell command text is not treated as a path declaration.

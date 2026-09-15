@@ -49,7 +49,7 @@ class Tool:
 
     def effect_for(self, arguments: dict[str, Any]) -> EffectClass:
         # A shell command may write files regardless of its declared purpose.
-        if self.name == "run_shell":
+        if self.name in {"run_shell", "recover"}:
             return "possible"
         return self.effect_class
 
@@ -87,6 +87,19 @@ class ExecutionResult:
         if self.tool in {"get_process", "read_process", "list_processes", "wait_process"}:
             return format_tool_result(self.output, max_chars=8000)
         return format_tool_result(self.output)
+
+
+@dataclass(frozen=True)
+class ToolAdmission:
+    """Validated, authorized execution that has not entered its handler."""
+
+    tool: Tool
+    name: str
+    arguments: dict[str, Any]
+    effect_class: EffectClass
+    reservation: AttemptReservation | None
+    started: float
+    state: Any = None
 
 
 class ToolRegistry:
@@ -251,10 +264,161 @@ class ToolExecutor:
             try: print(f"[Executor] 结果回调失败: {type(error).__name__}")
             except Exception: pass
 
+    def _execute_admitted_result(self, admission: ToolAdmission,
+                                 *, notify: bool = True) -> ExecutionResult:
+        """Enter exactly the handler captured by a completed admission."""
+        tool = admission.tool
+        name = admission.name
+        normalized = admission.arguments
+        effect_class = admission.effect_class
+        reservation = admission.reservation
+        state = admission.state
+        started = admission.started
+        is_plan_tool = name in (
+            "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
+            "request_replan",
+        )
+        if is_plan_tool:
+            try:
+                output = tool.handler(**normalized)
+            except PlanRejected as error:
+                text = json.dumps({
+                    "status": "plan_rejected",
+                    "message": str(error)[:RESULT_BRIEF_MAX_LENGTH],
+                }, ensure_ascii=False)
+                result = ExecutionResult(
+                    name, normalized, "allowed", True, "invalid",
+                    int((monotonic() - started) * 1000), effect_class,
+                    text, _brief(text), error_kind="plan_rejected",
+                )
+                if notify:
+                    self._notify_result(result)
+                return result
+            except Exception as error:
+                text = f"Tool 执行失败: {error}"
+                result = ExecutionResult(
+                    name, normalized, "allowed", True, "failed",
+                    int((monotonic() - started) * 1000), effect_class,
+                    text, _brief(text), error_kind="handler_exception",
+                )
+                if notify:
+                    self._notify_result(result)
+                return result
+            result = ExecutionResult(
+                name, normalized, "allowed", True, "succeeded",
+                int((monotonic() - started) * 1000), effect_class,
+                output, _brief(output),
+            )
+            if notify:
+                self._notify_result(result)
+            return result
+
+        checkpoint_capture = None
+        checkpoint_id = None
+        checkpoint = None
+        checkpoint_store = self.checkpoint_store
+        if (state is not None and checkpoint_store is not None and
+                name in ("write_file", "edit_file") and effect_class == "possible"):
+            try:
+                checkpoint_capture = checkpoint_store.capture_before(
+                    reservation.attempt_id, reservation.generation_id,
+                    normalized.get("path"),
+                )
+                checkpoint_id = checkpoint_capture.checkpoint_id
+            except Exception:
+                checkpoint_capture = None
+        try:
+            output = tool.handler(**normalized)
+        except Exception as error:
+            if checkpoint_capture is not None:
+                try:
+                    checkpoint = checkpoint_store.capture_after(checkpoint_capture)
+                except Exception:
+                    pass
+            text = f"Tool 执行失败: {error}"
+            if hasattr(error, "error_kind"):
+                error_kind = str(error.error_kind)
+            elif isinstance(error, EditNoMatchError):
+                error_kind = "edit_no_match"
+            elif isinstance(error, EditMultipleMatchesError):
+                error_kind = "edit_multiple_matches"
+            else:
+                error_kind = "handler_exception"
+            if checkpoint is not None:
+                text += "\n" + _checkpoint_notice(checkpoint)
+            if name == "recover":
+                rejection = self._record_recovery_rejection(state, normalized, text)
+                if rejection is not None:
+                    text = rejection
+                    error_kind = "recovery_rejected"
+            result = ExecutionResult(
+                name, normalized, "allowed", True, "failed",
+                int((monotonic() - started) * 1000), effect_class,
+                text, _brief(text), error_kind=error_kind,
+                reservation=reservation, checkpoint_id=checkpoint_id,
+            )
+            if notify:
+                self._notify_result(result)
+            return result
+        if checkpoint_capture is not None:
+            try:
+                checkpoint = checkpoint_store.capture_after(checkpoint_capture)
+            except Exception:
+                pass
+        process_metadata = None
+        if name == "start_process" and isinstance(output, dict):
+            process_metadata = deepcopy(output)
+            public = {
+                key: output[key] for key in ("process_id", "pid", "status", "stdin_mode")
+                if key in output
+            }
+            if reservation is not None:
+                public["start_attempt_id"] = reservation.attempt_id
+            output = json.dumps(public, ensure_ascii=False)
+        if checkpoint is not None:
+            output = f"{output}\n{_checkpoint_notice(checkpoint)}"
+        excerpt = _brief(output)
+        exit_code = None
+        outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"
+        error_kind = None
+        if isinstance(output, str) and output.startswith("[timeout]"):
+            outcome, error_kind = "timeout", "timeout"
+        elif name in {"get_process", "read_process", "list_processes", "wait_process",
+                      "terminate_process", "kill_process", "write_process"}:
+            try:
+                process_result = json.loads(output) if isinstance(output, str) else {}
+            except ValueError:
+                process_result = {}
+            if isinstance(process_result, dict) and process_result.get("status") == "error":
+                error_kind = str(process_result.get("error_kind", "process_error"))
+                io_error = name == "write_process" and error_kind in {
+                    "broken_pipe", "stdin_pipe_error", "stdin_write_error",
+                    "stdin_write_thread_error",
+                }
+                control_error = (name in {"terminate_process", "kill_process"}
+                                 and error_kind == "control_failed")
+                outcome = "failed" if io_error or control_error else "invalid"
+        elif name == "run_shell" and isinstance(output, str):
+            match = re.match(r"\[exit=(-?\d+)\]", output)
+            if match:
+                exit_code = int(match.group(1))
+                if exit_code != 0:
+                    outcome, error_kind = "failed", "nonzero_exit"
+        result = ExecutionResult(
+            name, normalized, "allowed", True, outcome,
+            int((monotonic() - started) * 1000), effect_class,
+            output, excerpt, exit_code, error_kind, reservation,
+            checkpoint_id, process_metadata,
+        )
+        if notify:
+            self._notify_result(result)
+        return result
+
     def execute_result(self, name: str, arguments: dict[str, Any], state: Any = None,
                        notify: bool = True, reservation: AttemptReservation | None = None,
                        permission_already_checked: bool = False,
-                       _internal: bool = False) -> ExecutionResult:
+                       _internal: bool = False, on_admitted: Callable[[ToolAdmission], None] | None = None,
+                       admit_only: bool = False) -> ExecutionResult | ToolAdmission:
         """Execute and return facts; only admitted possible effects reserve generation."""
         started = monotonic()
         if state is not None and getattr(state, "is_terminal", lambda: False)():
@@ -402,26 +566,14 @@ class ToolExecutor:
         # rejected submission cannot consume a fingerprint, attempt number,
         # generation, or any other execution fact.
         if is_plan_tool:
-            try:
-                output = tool.handler(**normalized)
-            except PlanRejected as error:
-                return plan_rejected(error)
-            except Exception as error:
-                text = f"Tool 执行失败: {error}"
-                result = ExecutionResult(
-                    name, normalized, "allowed", True, "failed",
-                    int((monotonic() - started) * 1000), effect_class,
-                    text, _brief(text), error_kind="handler_exception",
-                )
-                if notify: self._notify_result(result)
-                return result
-            result = ExecutionResult(
-                name, normalized, "allowed", True, "succeeded",
-                int((monotonic() - started) * 1000), effect_class,
-                output, _brief(output),
+            admission = ToolAdmission(
+                tool, name, normalized, effect_class, None, started, state,
             )
-            if notify: self._notify_result(result)
-            return result
+            if admit_only:
+                return admission
+            if on_admitted is not None:
+                on_admitted(admission)
+            return self._execute_admitted_result(admission, notify=notify)
         try:
             if reservation is None and state is not None and name != "recover":
                 reservation = state.reserve_attempt(effect_class, name, normalized)
@@ -435,104 +587,36 @@ class ToolExecutor:
             if notify:
                 self._notify_result(result)
             return result
-        checkpoint_capture = None
-        checkpoint_id = None
-        checkpoint = None
-        checkpoint_store = self.checkpoint_store
-        if (state is not None and checkpoint_store is not None and
-                name in ("write_file", "edit_file") and effect_class == "possible"):
-            try:
-                checkpoint_capture = checkpoint_store.capture_before(
-                    reservation.attempt_id, reservation.generation_id,
-                    normalized.get("path"),
-                )
-                checkpoint_id = checkpoint_capture.checkpoint_id
-            except Exception:
-                # Checkpoint support must never change the original file tool's
-                # admission or handler behavior.
-                checkpoint_capture = None
-        try:
-            output = tool.handler(**normalized)
-        except Exception as error:
-            if checkpoint_capture is not None:
-                try:
-                    checkpoint = checkpoint_store.capture_after(checkpoint_capture)
-                except Exception:
-                    pass
-            text = f"Tool 执行失败: {error}"
-            if hasattr(error, "error_kind"):
-                error_kind = str(error.error_kind)
-            elif isinstance(error, EditNoMatchError):
-                error_kind = "edit_no_match"
-            elif isinstance(error, EditMultipleMatchesError):
-                error_kind = "edit_multiple_matches"
-            else:
-                error_kind = "handler_exception"
-            if checkpoint is not None:
-                text += "\n" + _checkpoint_notice(checkpoint)
-            if name == "recover":
-                rejection = self._record_recovery_rejection(state, normalized, text)
-                if rejection is not None:
-                    text = rejection
-                    error_kind = "recovery_rejected"
-            result = ExecutionResult(name, normalized, "allowed", True, "failed",
-                                     int((monotonic() - started) * 1000), effect_class,
-                                     text, _brief(text), error_kind=error_kind,
-                                     reservation=reservation, checkpoint_id=checkpoint_id)
-            if notify: self._notify_result(result)
-            return result
-        if checkpoint_capture is not None:
-            try:
-                checkpoint = checkpoint_store.capture_after(checkpoint_capture)
-            except Exception:
-                pass
-        process_metadata = None
-        if name == "start_process" and isinstance(output, dict):
-            process_metadata = deepcopy(output)
-            public = {
-                key: output[key] for key in ("process_id", "pid", "status", "stdin_mode")
-                if key in output
-            }
-            if reservation is not None:
-                public["start_attempt_id"] = reservation.attempt_id
-            output = json.dumps(public, ensure_ascii=False)
-        if checkpoint is not None:
-            output = f"{output}\n{_checkpoint_notice(checkpoint)}"
-        excerpt = _brief(output)
-        exit_code = None
-        outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"
-        error_kind = None
-        if isinstance(output, str) and output.startswith("[timeout]"):
-            outcome, error_kind = "timeout", "timeout"
-        elif name in {"get_process", "read_process", "list_processes", "wait_process",
-                      "terminate_process", "kill_process", "write_process"}:
-            try:
-                process_result = json.loads(output) if isinstance(output, str) else {}
-            except ValueError:
-                process_result = {}
-            if isinstance(process_result, dict) and process_result.get("status") == "error":
-                error_kind = str(process_result.get("error_kind", "process_error"))
-                io_error = name == "write_process" and error_kind in {
-                    "broken_pipe", "stdin_pipe_error", "stdin_write_error",
-                    "stdin_write_thread_error",
-                }
-                control_error = (name in {"terminate_process", "kill_process"}
-                                 and error_kind == "control_failed")
-                outcome = "failed" if io_error or control_error else "invalid"
-        elif name == "run_shell" and isinstance(output, str):
-            match = re.match(r"\[exit=(-?\d+)\]", output)
-            if match:
-                exit_code = int(match.group(1))
-                if exit_code != 0:
-                    outcome, error_kind = "failed", "nonzero_exit"
-        result = ExecutionResult(
-            name, normalized, "allowed", True, outcome,
-            int((monotonic() - started) * 1000), effect_class,
-            output, excerpt, exit_code, error_kind, reservation,
-            checkpoint_id, process_metadata,
+        admission = ToolAdmission(
+            tool, name, normalized, effect_class, reservation, started, state,
         )
-        if notify: self._notify_result(result)
-        return result
+        if admit_only:
+            return admission
+        if on_admitted is not None:
+            on_admitted(admission)
+        return self._execute_admitted_result(admission, notify=notify)
+
+    def admit(self, name: str, arguments: dict[str, Any], state: Any = None,
+              *, reservation: AttemptReservation | None = None,
+              permission_already_checked: bool = False,
+              _internal: bool = False) -> ToolAdmission | ExecutionResult:
+        """Run all pre-handler checks and return an admission or a result.
+
+        A caller that needs a durable handler boundary calls this method,
+        persists the returned ``ToolAdmission``, and only then calls
+        :meth:`execute_admitted`.
+        """
+        return self.execute_result(
+            name, arguments, state=state, notify=False, reservation=reservation,
+            permission_already_checked=permission_already_checked,
+            _internal=_internal, admit_only=True,
+        )
+
+    def execute_admitted(self, admission: ToolAdmission, *, notify: bool = True) -> ExecutionResult:
+        """Enter a previously admitted handler after its caller's commit."""
+        if not isinstance(admission, ToolAdmission):
+            raise TypeError("需要 ToolAdmission")
+        return self._execute_admitted_result(admission, notify=notify)
 
     def execute(self, name: str, arguments: dict[str, Any]) -> Any:
         """Compatibility API returning the handler/tool-protocol value."""

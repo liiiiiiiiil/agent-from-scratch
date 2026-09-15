@@ -1,6 +1,6 @@
 # 第 31 课：从完整安全点恢复会话（v0.31）
 
-上一课：[会话持久化与安全点](30-session-persistence.md) · [教程总览](README.md) · 下一课：v0.32 持久工具边界（规划中）
+上一课：[会话持久化与安全点](30-session-persistence.md) · [教程总览](README.md) · 下一课：[v0.32 持久化工具执行边界](32-durable-tool-boundaries.md)
 
 > 代码快照：`v0.31` · 相邻差异：`v0.30..v0.31` · 命令环境：Bash/zsh
 

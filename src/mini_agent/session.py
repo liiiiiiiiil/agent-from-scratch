@@ -1,8 +1,8 @@
-"""Private, atomic session storage.
+"""Private, atomic session storage and durable tool boundaries.
 
-The v0.31 format adds a bounded workspace manifest.  Loading remains a
-side-effect-free validation operation; runtime construction and resume
-admission live in :mod:`mini_agent.resume`.
+Schema 3 keeps State, Context, and the current tool boundary in one atomic
+session file. Loading remains a side-effect-free validation operation;
+runtime construction and resume admission live in :mod:`mini_agent.resume`.
 """
 from __future__ import annotations
 
@@ -20,10 +20,11 @@ from typing import Any
 
 from mini_agent import __version__
 from mini_agent.config import MAX_SESSION_FILE_BYTES
-from mini_agent.state import AgentState, SessionExportError
+from mini_agent.state import AgentState, SessionExportError, redacted_arguments
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SCHEMA_2_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 _INTEGRITY_ALGORITHM = "sha256"
@@ -31,6 +32,10 @@ _MANIFEST_FORMAT = "mini_agent.workspace_manifest"
 _MANIFEST_FORMAT_VERSION = 1
 _MAX_MANIFEST_ENTRIES = 4096
 _MAX_MANIFEST_DIRECTORY_ENTRIES = 2048
+_NO_OUTER_ATTEMPT_BOUNDARY_TOOLS = {
+    "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress", "request_replan",
+    "recover",
+}
 
 
 class SessionError(RuntimeError):
@@ -307,7 +312,7 @@ def build_workspace_manifest(state: dict[str, Any], workspace_root: str | os.Pat
     }
 
 
-def _validate_context_export(payload: Any) -> None:
+def _validate_context_export(payload: Any, *, allow_partial: bool = False) -> None:
     if not isinstance(payload, dict) or payload.get("format") != "mini_agent.context" or payload.get("format_version") != 1:
         raise SessionValidationError("未知或不支持的 Context 导出版本")
     if not isinstance(payload.get("history"), list):
@@ -324,6 +329,7 @@ def _validate_context_export(payload: Any) -> None:
 
     seen_call_ids: set[str] = set()
     expected: list[str] = []
+    partial_assistant = False
     for message in payload["history"]:
         if not isinstance(message, dict) or not isinstance(message.get("role"), str):
             raise SessionValidationError("Context history 含无效消息")
@@ -361,8 +367,191 @@ def _validate_context_export(payload: Any) -> None:
             elif not isinstance(raw_arguments, dict):
                 raise SessionValidationError("tool call arguments 类型无效")
             expected.append(call_id)
-    if expected:
+        if expected and message is payload["history"][-1]:
+            partial_assistant = True
+    if expected and payload["history"] and isinstance(payload["history"][-1], dict):
+        partial_assistant = partial_assistant or payload["history"][-1].get("role") == "tool"
+    if expected and not (allow_partial and partial_assistant):
         raise SessionValidationError("assistant tool call 结果未完整回灌")
+
+
+def _empty_tool_boundary() -> dict[str, Any]:
+    return {
+        "round_id": 0,
+        "assistant_message": None,
+        "calls": [],
+        "status": "committed",
+    }
+
+
+def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
+                           context: dict[str, Any]) -> None:
+    """Validate the durable round ledger against State and Context exports."""
+    if not isinstance(boundary, dict):
+        raise SessionValidationError("tool_boundary 必须是 object")
+    expected_fields = {"round_id", "assistant_message", "calls", "status"}
+    if set(boundary) != expected_fields:
+        raise SessionValidationError("tool_boundary 字段无效")
+    round_id = boundary.get("round_id")
+    if isinstance(round_id, bool) or not isinstance(round_id, int) or round_id < 0:
+        raise SessionValidationError("tool_boundary round_id 无效")
+    status = boundary.get("status")
+    if status not in {"pending", "committed"}:
+        raise SessionValidationError("tool_boundary status 无效")
+    calls = boundary.get("calls")
+    if not isinstance(calls, list):
+        raise SessionValidationError("tool_boundary calls 必须是列表")
+    assistant = boundary.get("assistant_message")
+    if not calls:
+        if assistant is not None:
+            raise SessionValidationError("空 tool_boundary 不能包含 assistant_message")
+        if status != "committed":
+            raise SessionValidationError("空 tool_boundary 不能是 pending")
+        return
+    if not isinstance(assistant, dict) or assistant.get("role") != "assistant":
+        raise SessionValidationError("tool_boundary 缺少 assistant_message")
+    assistant_calls = assistant.get("tool_calls")
+    if not isinstance(assistant_calls, list) or len(assistant_calls) != len(calls):
+        raise SessionValidationError("tool_boundary assistant 调用数量不一致")
+    history = context.get("history") if isinstance(context, dict) else None
+    if not isinstance(history, list):
+        raise SessionValidationError("tool_boundary 缺少 Context history")
+    round_count = sum(
+        1 for item in history
+        if isinstance(item, dict) and item.get("role") == "assistant" and item.get("tool_calls")
+    )
+    if round_id != round_count:
+        raise SessionValidationError("tool_boundary round_id 倒退或与 Context 不一致")
+    raw_ids: list[str] = []
+    for raw in assistant_calls:
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"]:
+            raise SessionValidationError("tool_boundary 原始 tool_call_id 无效")
+        raw_ids.append(raw["id"])
+    if len(raw_ids) != len(set(raw_ids)):
+        raise SessionValidationError("tool_boundary 原始 tool_call_id 重复")
+
+    state_attempts = {
+        item.get("attempt_id"): item
+        for item in state.get("attempts", [])
+        if isinstance(item, dict)
+    }
+    generation_ids = {
+        item.get("generation_id") for item in state.get("generations", [])
+        if isinstance(item, dict)
+    }
+    private = state.get("private")
+    pending_attempts = set(private.get("pending_attempts", [])) if isinstance(private, dict) else set()
+    seen_invocations: set[str] = set()
+    seen_pending = False
+    referenced_pending_attempts: set[str] = set()
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict):
+            raise SessionValidationError("tool_boundary call 无效")
+        call_fields = {
+            "sequence", "invocation_id", "tool_call_id", "tool", "arguments_summary",
+            "effect_class", "permission", "handler_admitted", "attempt_id",
+            "pre_generation_id", "generation_id", "status", "result",
+        }
+        if set(call) != call_fields:
+            raise SessionValidationError("tool_boundary call 字段无效")
+        if call.get("sequence") != index:
+            raise SessionValidationError("tool_boundary 调用顺序无效")
+        invocation_id = call.get("invocation_id")
+        if not isinstance(invocation_id, str) or not invocation_id or invocation_id in seen_invocations:
+            raise SessionValidationError("tool_boundary invocation_id 重复或无效")
+        seen_invocations.add(invocation_id)
+        if call.get("tool_call_id") != raw_ids[index] or not isinstance(call.get("tool"), str):
+            raise SessionValidationError("tool_boundary 调用身份不匹配")
+        if not isinstance(call.get("arguments_summary"), dict):
+            raise SessionValidationError("tool_boundary 参数摘要无效")
+        if call.get("effect_class") not in {"none", "possible"}:
+            raise SessionValidationError("tool_boundary effect_class 无效")
+        if call.get("permission") not in {"allowed", "denied", "not_checked"}:
+            raise SessionValidationError("tool_boundary permission 无效")
+        if not isinstance(call.get("handler_admitted"), bool):
+            raise SessionValidationError("tool_boundary handler_admitted 无效")
+        if call.get("status") not in {"pending", "committed"}:
+            raise SessionValidationError("tool_boundary call status 无效")
+        if call.get("status") == "pending":
+            seen_pending = True
+        elif seen_pending:
+            raise SessionValidationError("tool_boundary 结果必须是模型顺序前缀")
+        for name in ("pre_generation_id", "generation_id"):
+            value = call.get(name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or value not in generation_ids):
+                raise SessionValidationError(f"tool_boundary {name} 引用无效")
+        attempt_id = call.get("attempt_id")
+        if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id.startswith("a-")):
+            raise SessionValidationError("tool_boundary attempt_id 无效")
+        if call.get("handler_admitted") and call.get("permission") != "allowed":
+            raise SessionValidationError("handler_admitted 必须对应 allowed permission")
+        if (call.get("handler_admitted") and attempt_id is None
+                and call.get("tool") not in _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS):
+            raise SessionValidationError("handler_admitted 缺少 attempt 引用")
+        if call.get("status") == "pending" and call.get("result") is not None:
+            raise SessionValidationError("pending call 不能包含 result")
+        result = call.get("result")
+        if call.get("status") == "committed":
+            if not isinstance(result, dict):
+                raise SessionValidationError("committed call 缺少 result")
+            result_fields = {"outcome", "content", "output_excerpt", "error_kind", "exit_code"}
+            if (set(result) != result_fields
+                    or not isinstance(result.get("content"), str)
+                    or not isinstance(result.get("output_excerpt"), str)
+                    or (result.get("error_kind") is not None
+                        and not isinstance(result.get("error_kind"), str))
+                    or (result.get("exit_code") is not None
+                        and (isinstance(result.get("exit_code"), bool)
+                             or not isinstance(result.get("exit_code"), int)))):
+                raise SessionValidationError("tool_boundary result 字段无效")
+            if result.get("outcome") not in {"succeeded", "failed", "denied", "timeout", "invalid"}:
+                raise SessionValidationError("tool_boundary result outcome 无效")
+        if attempt_id is not None:
+            if call.get("status") == "pending":
+                if attempt_id not in pending_attempts:
+                    raise SessionValidationError("tool_boundary pending attempt 引用无效")
+                referenced_pending_attempts.add(attempt_id)
+            else:
+                attempt = state_attempts.get(attempt_id)
+                if attempt is None:
+                    raise SessionValidationError("tool_boundary committed attempt 引用无效")
+                for key in ("tool", "effect_class", "permission", "handler_admitted", "generation_id"):
+                    if attempt.get(key) != call.get(key):
+                        raise SessionValidationError(f"tool_boundary attempt {key} 引用不一致")
+                if call.get("pre_generation_id") != attempt.get("pre_generation_id"):
+                    raise SessionValidationError("tool_boundary pre_generation_id 引用不一致")
+        elif (call.get("status") == "pending" and call.get("handler_admitted")
+              and call.get("tool") not in _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS):
+            raise SessionValidationError("pending admitted call 缺少 attempt")
+
+    if status == "committed" and any(call.get("status") != "committed" for call in calls):
+        raise SessionValidationError("complete tool_boundary 仍有 pending call")
+    if status == "committed" and pending_attempts:
+        raise SessionValidationError("complete tool_boundary 仍包含 pending attempt")
+    if status == "pending" and pending_attempts != referenced_pending_attempts:
+        raise SessionValidationError("tool_boundary 与 State pending attempt 不一致")
+    assistant_index = next(
+        (index for index in range(len(history) - 1, -1, -1)
+         if isinstance(history[index], dict)
+         and history[index].get("role") == "assistant"
+         and history[index].get("tool_calls")),
+        None,
+    )
+    if assistant_index is None:
+        raise SessionValidationError("tool_boundary assistant 消息未写入 Context")
+    if history[assistant_index].get("tool_calls") != assistant_calls:
+        raise SessionValidationError("tool_boundary assistant 消息与 Context 不一致")
+    tool_history = history[assistant_index + 1:]
+    committed_ids = [call["tool_call_id"] for call in calls if call["status"] == "committed"]
+    actual_ids = [
+        item.get("tool_call_id") for item in tool_history
+        if isinstance(item, dict) and item.get("role") == "tool"
+    ]
+    if actual_ids != committed_ids:
+        raise SessionValidationError("tool_boundary 结果与 Context 顺序不一致")
+    if status == "committed" and len(actual_ids) < len(calls):
+        raise SessionValidationError("complete tool_boundary 缺少 Context 结果")
 
 
 class SessionStore:
@@ -449,7 +638,8 @@ class SessionStore:
                        workspace_root: str | os.PathLike[str] | None,
                        handoff_status: str, save_kind: str,
                        *, session_generation: int = 1,
-                       workspace_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+                       workspace_manifest: dict[str, Any] | None = None,
+                       tool_boundary: dict[str, Any] | None = None) -> dict[str, Any]:
         self._check_id(session_id)
         if handoff_status not in {"active", "clean"}:
             raise SessionValidationError("handoff_status 必须是 active 或 clean")
@@ -459,10 +649,19 @@ class SessionStore:
                 or session_generation < 1):
             raise SessionValidationError("session_generation 无效")
         try:
-            AgentState.validate_session_export(state)
+            AgentState.validate_session_export(state, allow_pending=save_kind == "tool_boundary")
         except (SessionExportError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"State 导出校验失败: {error}") from error
-        _validate_context_export(context)
+        boundary = deepcopy(tool_boundary) if tool_boundary is not None else _empty_tool_boundary()
+        _validate_context_export(
+            context,
+            allow_partial=(save_kind == "tool_boundary" and boundary.get("status") == "pending"),
+        )
+        _validate_tool_boundary(boundary, state, context)
+        if boundary.get("status") == "pending" and (save_kind != "tool_boundary" or handoff_status != "active"):
+            raise SessionValidationError("pending tool_boundary 只能以 active tool_boundary 保存")
+        if save_kind == "safe_point" and boundary.get("status") != "committed":
+            raise SessionValidationError("safe_point 必须包含 committed tool_boundary")
         manifest = workspace_manifest or build_workspace_manifest(state, workspace_root)
         if not isinstance(manifest, dict):
             raise SessionValidationError("workspace_manifest 无效")
@@ -478,6 +677,7 @@ class SessionStore:
             "workspace_manifest": deepcopy(manifest),
             "state": deepcopy(state),
             "context": deepcopy(context),
+            "tool_boundary": boundary,
         }
         digest = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
         payload["integrity"] = {"algorithm": _INTEGRITY_ALGORITHM, "sha256": digest}
@@ -530,12 +730,32 @@ class SessionStore:
 
     def save(self, session_id: str | None, state: Any, context: Any,
              *, workspace_root: str | os.PathLike[str] | None = None,
-             handoff_status: str = "active", save_kind: str = "safe_point") -> dict[str, Any]:
+             handoff_status: str = "active", save_kind: str = "safe_point",
+             tool_boundary: dict[str, Any] | None = None) -> dict[str, Any]:
         """Atomically save an exported State/Context and return the envelope."""
         selected_id = self._check_id(session_id) if session_id is not None else _new_session_id()
+        if save_kind not in {"safe_point", "tool_boundary"}:
+            raise SessionValidationError("save_kind 无效")
+        selected_boundary = deepcopy(tool_boundary) if tool_boundary is not None else None
         try:
-            state_export = state.export_session() if hasattr(state, "export_session") else deepcopy(state)
-            context_export = context.export_session() if hasattr(context, "export_session") else deepcopy(context)
+            if selected_boundary is None and session_id is not None:
+                try:
+                    previous_for_boundary = self.load(session_id)
+                    if previous_for_boundary.get("schema_version") == SCHEMA_VERSION:
+                        selected_boundary = deepcopy(previous_for_boundary.get("tool_boundary"))
+                except SessionError:
+                    pass
+            if selected_boundary is None:
+                selected_boundary = _empty_tool_boundary()
+            partial = save_kind == "tool_boundary" and selected_boundary.get("status") == "pending"
+            state_export = (
+                state.export_session(allow_pending=(save_kind == "tool_boundary"))
+                if hasattr(state, "export_session") else deepcopy(state)
+            )
+            context_export = (
+                context.export_session(allow_partial=partial)
+                if hasattr(context, "export_session") else deepcopy(context)
+            )
         except (SessionExportError, SessionValidationError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(str(error)) from error
         manifest = build_workspace_manifest(state_export, workspace_root)
@@ -557,6 +777,7 @@ class SessionStore:
                 handoff_status, save_kind,
                 session_generation=previous_generation + 1,
                 workspace_manifest=manifest,
+                tool_boundary=selected_boundary,
             )
             self._write_atomic(selected_id, envelope)
         except BaseException:
@@ -579,7 +800,7 @@ class SessionStore:
     def claim_resume(self, session_id: str, expected: dict[str, Any], *,
                      state_export: dict[str, Any] | None = None,
                      context_export: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Atomically claim one validated clean v2 commit for this runtime.
+        """Atomically claim one validated clean v2/v3 commit for this runtime.
 
         The expected integrity digest is checked again while the exclusive lock
         is held.  A race or an uncertain commit never returns a runnable
@@ -598,8 +819,8 @@ class SessionStore:
         lock_fd = self._acquire_lock(selected_id)
         try:
             current = self.load(selected_id)
-            if current.get("schema_version") != SCHEMA_VERSION:
-                raise SessionValidationError("待恢复 session 不是 schema 2")
+            if current.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
+                raise SessionValidationError("待恢复 session 不是 schema 2/3")
             if current.get("handoff_status") != "clean" or current.get("save_kind") != "safe_point":
                 raise SessionValidationError("session 不是可恢复的 clean safe_point")
             if current.get("integrity") != expected.get("integrity"):
@@ -614,6 +835,9 @@ class SessionStore:
                     "恢复占用前工作区检查失败：" + "；".join(workspace_issues[:20])
                 )
             active = deepcopy(current)
+            if current.get("schema_version") == SCHEMA_2_VERSION:
+                active["schema_version"] = SCHEMA_VERSION
+                active["tool_boundary"] = _empty_tool_boundary()
             active["handoff_status"] = "active"
             active["session_generation"] = int(current.get("session_generation", 1)) + 1
             active["saved_at"] = self._saved_at()
@@ -691,18 +915,24 @@ class SessionStore:
         schema_version = envelope.get("schema_version")
         if (isinstance(schema_version, bool)
                 or not isinstance(schema_version, int)
-                or schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}):
+                or schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_2_VERSION, SCHEMA_VERSION}):
             raise SessionValidationError("未知或不支持的 session schema_version")
         if schema_version == LEGACY_SCHEMA_VERSION:
             expected_fields = {
                 "schema_version", "session_id", "writer_version", "workspace_root",
                 "saved_at", "save_kind", "handoff_status", "state", "context", "integrity",
             }
-        elif schema_version == SCHEMA_VERSION:
+        elif schema_version == SCHEMA_2_VERSION:
             expected_fields = {
                 "schema_version", "session_id", "writer_version", "workspace_root",
                 "saved_at", "save_kind", "handoff_status", "session_generation",
                 "workspace_manifest", "state", "context", "integrity",
+            }
+        elif schema_version == SCHEMA_VERSION:
+            expected_fields = {
+                "schema_version", "session_id", "writer_version", "workspace_root",
+                "saved_at", "save_kind", "handoff_status", "session_generation",
+                "workspace_manifest", "state", "context", "tool_boundary", "integrity",
             }
         else:
             expected_fields = {"schema_version"}
@@ -725,7 +955,7 @@ class SessionStore:
             raise SessionValidationError("handoff_status 无效")
         if envelope.get("save_kind") not in {"safe_point", "tool_boundary"}:
             raise SessionValidationError("save_kind 无效")
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
             generation = envelope.get("session_generation")
             if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
                 raise SessionValidationError("session_generation 无效")
@@ -745,15 +975,34 @@ class SessionStore:
         if not secrets.compare_digest(actual, digest):
             raise SessionValidationError("session SHA-256 校验失败")
         try:
-            AgentState.validate_session_export(envelope.get("state"))
+            AgentState.validate_session_export(
+                envelope.get("state"),
+                allow_pending=(schema_version == SCHEMA_VERSION
+                                and envelope.get("save_kind") == "tool_boundary"),
+            )
         except (SessionExportError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"State 引用校验失败: {error}") from error
         try:
-            _validate_context_export(envelope.get("context"))
+            allow_partial = (
+                schema_version == SCHEMA_VERSION
+                and isinstance(envelope.get("tool_boundary"), dict)
+                and envelope["tool_boundary"].get("status") == "pending"
+            )
+            _validate_context_export(envelope.get("context"), allow_partial=allow_partial)
         except SessionValidationError:
             raise
         except (KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"Context 引用校验失败: {error}") from error
+        if schema_version == SCHEMA_VERSION:
+            _validate_tool_boundary(
+                envelope.get("tool_boundary"), envelope["state"], envelope["context"],
+            )
+            boundary_status = envelope["tool_boundary"].get("status")
+            if boundary_status == "pending":
+                if envelope.get("save_kind") != "tool_boundary" or envelope.get("handoff_status") != "active":
+                    raise SessionValidationError("pending tool_boundary 只能存在于 active tool_boundary session")
+            elif envelope.get("save_kind") == "safe_point" and boundary_status != "committed":
+                raise SessionValidationError("safe_point 的 tool_boundary 必须 committed")
 
     @staticmethod
     def _validate_workspace_manifest(manifest: Any, workspace_root: str) -> None:
@@ -816,3 +1065,144 @@ class SessionStore:
                     if (child.get("kind") == "file" and child.get("available")
                             and not re.fullmatch(r"[0-9a-f]{64}", str(child.get("sha256", "")))):
                         raise SessionValidationError("workspace_manifest 目录文件哈希无效")
+
+
+class DurableToolBoundary:
+    """Coordinate atomic schema 3 commits for one live tool round."""
+
+    def __init__(self, store: SessionStore, session_id: str,
+                 workspace_root: str | os.PathLike[str]) -> None:
+        self.store = store
+        self.session_id = SessionStore._check_id(session_id)
+        self.workspace_root = os.fspath(workspace_root)
+        self.boundary = _empty_tool_boundary()
+
+    def _context_export(self, context: Any) -> dict[str, Any]:
+        partial = self.boundary.get("status") == "pending"
+        if hasattr(context, "export_session"):
+            return context.export_session(allow_partial=partial)
+        return deepcopy(context)
+
+    def _save(self, state: Any, context: Any) -> dict[str, Any]:
+        envelope = self.store.save(
+            self.session_id, state, context,
+            workspace_root=self.workspace_root,
+            handoff_status="active", save_kind="tool_boundary",
+            tool_boundary=deepcopy(self.boundary),
+        )
+        self.session_id = envelope["session_id"]
+        return envelope
+
+    def start_round(self, round_id: int, assistant_message: dict[str, Any],
+                    calls: list[dict[str, Any]], state: Any, context: Any) -> dict[str, Any]:
+        """Persist an assistant message before any handler can run."""
+        context_export = (
+            context.export_session(allow_partial=True)
+            if hasattr(context, "export_session") else deepcopy(context)
+        )
+        history = context_export.get("history", [])
+        persisted_assistant = next(
+            (message for message in reversed(history)
+             if isinstance(message, dict)
+             and message.get("role") == "assistant"
+             and message.get("tool_calls")),
+            None,
+        )
+        if persisted_assistant is None:
+            raise SessionValidationError("工具回合开始时 Context 缺少 assistant 消息")
+        records: list[dict[str, Any]] = []
+        for index, call in enumerate(calls):
+            args = call.get("arguments", {})
+            records.append({
+                "sequence": index,
+                "invocation_id": call["invocation_id"],
+                "tool_call_id": call["tool_call_id"],
+                "tool": call["tool"],
+                "arguments_summary": redacted_arguments(args if isinstance(args, dict) else {}),
+                "effect_class": call.get("effect_class", "none"),
+                "permission": "not_checked",
+                "handler_admitted": False,
+                "attempt_id": None,
+                "pre_generation_id": None,
+                "generation_id": None,
+                "status": "pending",
+                "result": None,
+            })
+        self.boundary = {
+            "round_id": round_id,
+            "assistant_message": deepcopy(persisted_assistant),
+            "calls": records,
+            "status": "pending",
+        }
+        return self._save(state, context)
+
+    def _call(self, invocation_id: str) -> dict[str, Any]:
+        for call in self.boundary.get("calls", []):
+            if call.get("invocation_id") == invocation_id:
+                return call
+        raise SessionValidationError("未知 durable invocation_id")
+
+    @staticmethod
+    def _reservation_fields(admission: Any) -> dict[str, Any]:
+        reservation = getattr(admission, "reservation", None)
+        if reservation is None:
+            return {"attempt_id": None, "pre_generation_id": None, "generation_id": None}
+        return {
+            "attempt_id": reservation.attempt_id,
+            "pre_generation_id": reservation.pre_generation_id,
+            "generation_id": reservation.generation_id,
+        }
+
+    def record_admission(self, invocation_id: str, admission: Any,
+                         state: Any, context: Any) -> dict[str, Any]:
+        """Persist handler admission before entering the handler."""
+        call = self._call(invocation_id)
+        call.update({
+            "effect_class": getattr(admission, "effect_class", call["effect_class"]),
+            "permission": "allowed",
+            "handler_admitted": True,
+            **self._reservation_fields(admission),
+        })
+        return self._save(state, context)
+
+    def record_execution_result(self, invocation_id: str, execution: Any,
+                                content: str, state: Any, context: Any,
+                                attempt: Any = None) -> dict[str, Any]:
+        """Persist one State fact and its matching tool result."""
+        call = self._call(invocation_id)
+        reservation = getattr(execution, "reservation", None)
+        attempt_id = getattr(reservation, "attempt_id", None)
+        pre_generation_id = getattr(reservation, "pre_generation_id", None)
+        generation_id = getattr(reservation, "generation_id", None)
+        if attempt is not None:
+            attempt_id = getattr(attempt, "attempt_id", attempt_id)
+            pre_generation_id = getattr(attempt, "pre_generation_id", pre_generation_id)
+            generation_id = getattr(attempt, "generation_id", generation_id)
+        call.update({
+            "effect_class": getattr(execution, "effect_class", call["effect_class"]),
+            "permission": getattr(execution, "permission", call["permission"]),
+            "handler_admitted": bool(getattr(execution, "handler_admitted", False)),
+            "attempt_id": attempt_id,
+            "pre_generation_id": pre_generation_id,
+            "generation_id": generation_id,
+            "status": "committed",
+            "result": {
+                "outcome": getattr(execution, "outcome", "invalid"),
+                "content": str(content),
+                "output_excerpt": str(getattr(execution, "output_excerpt", "")),
+                "error_kind": getattr(execution, "error_kind", None),
+                "exit_code": getattr(execution, "exit_code", None),
+            },
+        })
+        return self._save(state, context)
+
+    def complete_round(self, state: Any, context: Any) -> dict[str, Any]:
+        """Commit the complete ordered round before another LLM request."""
+        if any(call.get("status") != "committed" for call in self.boundary.get("calls", [])):
+            raise SessionValidationError("工具回合尚未完成，不能提交 complete")
+        self.boundary["status"] = "committed"
+        return self._save(state, context)
+
+    def persist_process_sync(self, state: Any, context: Any) -> dict[str, Any]:
+        """Persist natural process-exit facts without adding a tool message."""
+        return self._save(state, context)
