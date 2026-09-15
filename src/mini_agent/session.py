@@ -20,7 +20,9 @@ from typing import Any
 
 from mini_agent import __version__
 from mini_agent.config import MAX_SESSION_FILE_BYTES
-from mini_agent.state import AgentState, SessionExportError, redacted_arguments
+from mini_agent.state import (
+    AgentState, SessionExportError, canonical_arguments_hash, redacted_arguments,
+)
 
 
 SCHEMA_VERSION = 3
@@ -449,10 +451,15 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("tool_boundary call 无效")
         call_fields = {
             "sequence", "invocation_id", "tool_call_id", "tool", "arguments_summary",
-            "effect_class", "permission", "handler_admitted", "attempt_id",
+            "arguments_hash", "effect_class", "permission", "handler_admitted", "attempt_id",
             "pre_generation_id", "generation_id", "status", "result",
         }
-        if set(call) != call_fields:
+        # v0.32 boundaries did not retain the original reservation hash.  They
+        # remain readable for clean replay diagnostics, but a pending admitted
+        # call without this field is not eligible for crash hand-off because
+        # reconstructing it from redacted arguments would break its identity.
+        legacy_call_fields = call_fields - {"arguments_hash"}
+        if set(call) not in (call_fields, legacy_call_fields):
             raise SessionValidationError("tool_boundary call 字段无效")
         if call.get("sequence") != index:
             raise SessionValidationError("tool_boundary 调用顺序无效")
@@ -464,6 +471,10 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("tool_boundary 调用身份不匹配")
         if not isinstance(call.get("arguments_summary"), dict):
             raise SessionValidationError("tool_boundary 参数摘要无效")
+        if "arguments_hash" in call and (
+                not isinstance(call.get("arguments_hash"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", call["arguments_hash"])):
+            raise SessionValidationError("tool_boundary arguments_hash 无效")
         if call.get("effect_class") not in {"none", "possible"}:
             raise SessionValidationError("tool_boundary effect_class 无效")
         if call.get("permission") not in {"allowed", "denied", "not_checked"}:
@@ -491,6 +502,9 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("handler_admitted 缺少 attempt 引用")
         if call.get("status") == "pending" and call.get("result") is not None:
             raise SessionValidationError("pending call 不能包含 result")
+        if (call.get("status") == "pending" and call.get("handler_admitted")
+                and "arguments_hash" not in call):
+            raise SessionValidationError("pending admitted call 缺少 durable arguments_hash")
         result = call.get("result")
         if call.get("status") == "committed":
             if not isinstance(result, dict):
@@ -505,7 +519,8 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                         and (isinstance(result.get("exit_code"), bool)
                              or not isinstance(result.get("exit_code"), int)))):
                 raise SessionValidationError("tool_boundary result 字段无效")
-            if result.get("outcome") not in {"succeeded", "failed", "denied", "timeout", "invalid"}:
+            if result.get("outcome") not in {
+                    "succeeded", "failed", "denied", "timeout", "invalid", "uncertain"}:
                 raise SessionValidationError("tool_boundary result outcome 无效")
         if attempt_id is not None:
             if call.get("status") == "pending":
@@ -521,6 +536,9 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                         raise SessionValidationError(f"tool_boundary attempt {key} 引用不一致")
                 if call.get("pre_generation_id") != attempt.get("pre_generation_id"):
                     raise SessionValidationError("tool_boundary pre_generation_id 引用不一致")
+                if ("arguments_hash" in call
+                        and call.get("arguments_hash") != attempt.get("arguments_hash")):
+                    raise SessionValidationError("tool_boundary arguments_hash 引用不一致")
         elif (call.get("status") == "pending" and call.get("handler_admitted")
               and call.get("tool") not in _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS):
             raise SessionValidationError("pending admitted call 缺少 attempt")
@@ -867,6 +885,274 @@ class SessionStore:
             ) from error
         return deepcopy(active)
 
+    def _crash_claim_path(self) -> Path:
+        return self.root / "crash_recovery_claims.json"
+
+    def _crash_claim_lock_path(self) -> Path:
+        return self.root / "crash_recovery_claims.lock"
+
+    def _acquire_crash_claim_lock(self) -> int:
+        try:
+            return os.open(
+                os.fspath(self._crash_claim_lock_path()),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError as error:
+            raise SessionBusyError("crash recovery claim 正在由其他恢复者提交；不会自动抢占遗留锁") from error
+        except OSError as error:
+            raise SessionError(f"无法创建 crash recovery claim 独占锁: {type(error).__name__}") from error
+
+    def _release_crash_claim_lock(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        finally:
+            try:
+                self._crash_claim_lock_path().unlink()
+            except FileNotFoundError:
+                pass
+
+    def _read_crash_claims(self) -> list[dict[str, Any]]:
+        """Read the private idempotency sidecar without exposing call data."""
+        path = self._crash_claim_path()
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return []
+        except OSError as error:
+            raise SessionError(f"无法读取 crash recovery claim: {type(error).__name__}") from error
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise SessionValidationError("crash recovery claim 文件权限或类型无效")
+        if info.st_size > 128 * 1024:
+            raise SessionSizeError("crash recovery claim 文件超过大小上限")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SessionValidationError("crash recovery claim 文件损坏") from error
+        if not isinstance(payload, dict) or set(payload) != {"format", "format_version", "claims", "integrity"}:
+            raise SessionValidationError("crash recovery claim 字段无效")
+        if payload.get("format") != "mini_agent.crash_recovery_claims" or payload.get("format_version") != 1:
+            raise SessionValidationError("未知 crash recovery claim 版本")
+        claims = payload.get("claims")
+        if not isinstance(claims, list) or len(claims) > 2048:
+            raise SessionValidationError("crash recovery claim 列表无效")
+        integrity = payload.get("integrity")
+        digest = integrity.get("sha256") if isinstance(integrity, dict) else None
+        if not isinstance(integrity, dict) or set(integrity) != {"algorithm", "sha256"} \
+                or integrity.get("algorithm") != _INTEGRITY_ALGORITHM:
+            raise SessionValidationError("crash recovery claim 完整性字段无效")
+        without_integrity = {key: value for key, value in payload.items() if key != "integrity"}
+        if not isinstance(digest, str) or not secrets.compare_digest(
+                hashlib.sha256(_canonical_bytes(without_integrity)).hexdigest(), digest):
+            raise SessionValidationError("crash recovery claim 完整性校验失败")
+        seen: set[str] = set()
+        for claim in claims:
+            if not isinstance(claim, dict):
+                raise SessionValidationError("crash recovery claim 记录无效")
+            base_fields = {
+                "source_session_id", "source_integrity", "derived_session_id", "recovery_id",
+            }
+            if set(claim) not in (base_fields, base_fields | {"status"}):
+                raise SessionValidationError("crash recovery claim 记录字段无效")
+            status = claim.get("status", "committed")
+            if status not in {"preparing", "committed"}:
+                raise SessionValidationError("crash recovery claim 状态无效")
+            key = f"{claim.get('source_session_id')}:{claim.get('source_integrity')}"
+            if key in seen:
+                raise SessionValidationError("crash recovery claim 含重复源提交")
+            seen.add(key)
+            self._check_id(claim.get("source_session_id"))
+            self._check_id(claim.get("derived_session_id"))
+            if (not isinstance(claim.get("source_integrity"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", claim["source_integrity"])
+                    or not isinstance(claim.get("recovery_id"), str)
+                    or not claim.get("recovery_id")):
+                raise SessionValidationError("crash recovery claim 引用无效")
+        return deepcopy(claims)
+
+    def _write_crash_claims(self, claims: list[dict[str, Any]], source_session_id: str) -> None:
+        payload: dict[str, Any] = {
+            "format": "mini_agent.crash_recovery_claims",
+            "format_version": 1,
+            "claims": deepcopy(claims),
+        }
+        payload["integrity"] = {
+            "algorithm": _INTEGRITY_ALGORITHM,
+            "sha256": hashlib.sha256(_canonical_bytes(payload)).hexdigest(),
+        }
+        encoded = _canonical_bytes(payload)
+        temporary: str | None = None
+        replaced = False
+        try:
+            fd, temporary = tempfile.mkstemp(
+                prefix=".crash_recovery_claims.", suffix=".tmp", dir=os.fspath(self.root)
+            )
+            with os.fdopen(fd, "wb") as handle:
+                os.fchmod(handle.fileno(), stat.S_IRUSR | stat.S_IWUSR)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._crash_claim_path())
+            replaced = True
+            temporary = None
+            directory_fd = os.open(os.fspath(self.root), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            if replaced:
+                raise SessionCommitUncertainError(
+                    source_session_id,
+                    f"crash recovery claim 已替换，但耐久性未确认: {type(error).__name__}",
+                ) from error
+            raise SessionError(f"crash recovery claim 原子写入失败: {type(error).__name__}") from error
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def claim_crash_recovery(
+        self, session_id: str, expected: dict[str, Any], *,
+        state_export: dict[str, Any], context_export: dict[str, Any],
+        tool_boundary: dict[str, Any], workspace_root: str | os.PathLike[str] | None = None,
+        workspace_manifest: dict[str, Any] | None = None,
+        recovery_id: str = "",
+    ) -> dict[str, Any]:
+        """Idempotently derive a runnable recovery branch while preserving its source."""
+        selected_id = self._check_id(session_id)
+        if not isinstance(expected, dict) or expected.get("session_id") != selected_id:
+            raise SessionValidationError("待恢复 crash session 提交不匹配")
+        try:
+            AgentState.validate_session_export(state_export)
+        except (SessionExportError, KeyError, TypeError, ValueError) as error:
+            raise SessionValidationError(f"崩溃恢复 State 校验失败: {error}") from error
+        _validate_context_export(context_export)
+        if tool_boundary.get("status") != "committed":
+            raise SessionValidationError("崩溃恢复派生 boundary 必须 committed")
+        lock_fd = self._acquire_lock(selected_id)
+        claim_lock_fd: int | None = None
+        try:
+            claim_lock_fd = self._acquire_crash_claim_lock()
+            current = self.load(selected_id)
+            if (current.get("schema_version") != SCHEMA_VERSION
+                    or current.get("handoff_status") != "active"
+                    or current.get("save_kind") != "tool_boundary"
+                    or current.get("tool_boundary", {}).get("status") != "pending"):
+                raise SessionValidationError("源 session 已不是 active pending tool_boundary")
+            expected_digest = expected.get("integrity", {}).get("sha256")
+            current_digest = current.get("integrity", {}).get("sha256")
+            if current.get("integrity") != expected.get("integrity"):
+                raise SessionValidationError("源 session 在 claim 前发生变化；请重新准备恢复候选")
+            claims = self._read_crash_claims()
+            existing = next((item for item in claims if item.get("source_session_id") == selected_id
+                             and item.get("source_integrity") == expected_digest), None)
+            envelope: dict[str, Any] | None = None
+            if existing is not None:
+                derived_id = existing["derived_session_id"]
+                if existing.get("recovery_id") != str(recovery_id):
+                    raise SessionValidationError("crash recovery claim 与当前 recovery_id 不一致")
+                derived_path = self.path_for(derived_id)
+                if existing.get("status", "committed") == "committed":
+                    if not derived_path.exists():
+                        raise SessionValidationError(
+                            "claim 已 committed 但派生 session 不存在；拒绝猜测或重新派生"
+                        )
+                    # A completed claim is a duplicate hand-off, not a new
+                    # runtime admission.  The CLI reports the existing branch
+                    # and the caller must use that session explicitly.
+                    self.load(derived_id)
+                    raise SessionValidationError(
+                        "该源提交已经派生 crash recovery session：" + derived_id
+                    )
+                elif derived_path.exists():
+                    # The previous writer may have replaced the derived file
+                    # but failed while committing the final sidecar state.
+                    # Validate it and finish the same claim; never mint a new
+                    # session ID.
+                    envelope = self.load(derived_id)
+                    updated = [
+                        dict(item, status=("committed" if item is existing else item.get("status", "committed")))
+                        for item in claims
+                    ]
+                    self._write_crash_claims(updated, selected_id)
+                else:
+                    # A durable preparing record is intentionally resumable.
+                    # Continue writing the predetermined derived ID.
+                    pass
+            else:
+                derived_id = _new_session_id()
+                claim = {
+                    "source_session_id": selected_id,
+                    "source_integrity": current_digest,
+                    "derived_session_id": derived_id,
+                    "recovery_id": str(recovery_id),
+                    "status": "preparing",
+                }
+                # Phase 1: durable intent.  If this write fails, there is no
+                # claim and a later prepare may safely retry with a new ID.
+                self._write_crash_claims(claims + [claim], selected_id)
+
+            if envelope is None:
+                state_export = deepcopy(state_export)
+                for record in state_export.get("crash_recoveries", []):
+                    if (not recovery_id) or record.get("recovery_id") == recovery_id:
+                        record["derived_session_id"] = derived_id
+                manifest = workspace_manifest or build_workspace_manifest(
+                    state_export, workspace_root or current["workspace_root"],
+                )
+                envelope = self._make_envelope(
+                    derived_id, state_export, context_export,
+                    workspace_root or current["workspace_root"], "active", "tool_boundary",
+                    session_generation=1, workspace_manifest=manifest,
+                    tool_boundary=deepcopy(tool_boundary),
+                )
+                # Phase 2a: durable derived branch.  A failure leaves the
+                # preparing record intact so retry can use this same ID.
+                self._write_atomic(derived_id, envelope)
+                # Phase 2b: publish the completed claim only after the branch
+                # has been written and validated by _write_atomic.
+                completed_claims = []
+                for item in claims if existing is not None else claims + [claim]:
+                    if item.get("source_session_id") == selected_id and item.get("source_integrity") == expected_digest:
+                        completed_claims.append(dict(item, status="committed"))
+                    else:
+                        completed_claims.append(item)
+                self._write_crash_claims(completed_claims, selected_id)
+        except BaseException:
+            if claim_lock_fd is not None:
+                try:
+                    self._release_crash_claim_lock(claim_lock_fd)
+                except OSError:
+                    pass
+            try:
+                self._release_lock(selected_id, lock_fd)
+            except OSError:
+                pass
+            raise
+        try:
+            if claim_lock_fd is not None:
+                self._release_crash_claim_lock(claim_lock_fd)
+        except OSError as error:
+            try:
+                self._release_lock(selected_id, lock_fd)
+            except OSError:
+                pass
+            raise SessionCommitUncertainError(
+                selected_id,
+                f"崩溃恢复 claim 已提交，但 claim 锁清理未确认: {type(error).__name__}",
+            ) from error
+        try:
+            self._release_lock(selected_id, lock_fd)
+        except OSError as error:
+            raise SessionCommitUncertainError(
+                selected_id,
+                f"崩溃恢复派生已写入，但源 session 锁清理未确认: {type(error).__name__}",
+            ) from error
+        return deepcopy(envelope)
+
     def create(self, state: Any, context: Any, **kwargs: Any) -> dict[str, Any]:
         """Create a new random-ID session; equivalent to ``save(None, ...)``."""
         return self.save(None, state, context, **kwargs)
@@ -1119,6 +1405,10 @@ class DurableToolBoundary:
                 "tool_call_id": call["tool_call_id"],
                 "tool": call["tool"],
                 "arguments_summary": redacted_arguments(args if isinstance(args, dict) else {}),
+                # This is the reservation/fingerprint identity, not a
+                # replayable argument payload.  It is required to reconnect a
+                # pending admitted call to its original budget reservation.
+                "arguments_hash": canonical_arguments_hash(args if isinstance(args, dict) else {}),
                 "effect_class": call.get("effect_class", "none"),
                 "permission": "not_checked",
                 "handler_admitted": False,
@@ -1169,6 +1459,10 @@ class DurableToolBoundary:
                                 content: str, state: Any, context: Any,
                                 attempt: Any = None) -> dict[str, Any]:
         """Persist one State fact and its matching tool result."""
+        if getattr(execution, "outcome", None) == "uncertain":
+            raise SessionValidationError(
+                "uncertain outcome 只能由 crash recovery 合成，不能来自普通 handler"
+            )
         call = self._call(invocation_id)
         reservation = getattr(execution, "reservation", None)
         attempt_id = getattr(reservation, "attempt_id", None)

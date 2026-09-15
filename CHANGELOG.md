@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.33.0] - Crash recovery and uncertain-effect handoff
+
+- Added schema 3 crash recovery for active pending tool boundaries. Recovery derives a new session, preserves the source byte-for-byte, and uses a private atomic claim sidecar to prevent duplicate branches.
+- Classified interrupted calls as `not_executed`, `uncertain_state_or_result`, or `uncertain_side_effect`; synthesized one ordered tool result per call without replaying handlers.
+- Added per-issue `/resolve <issue_id> investigate|continue|block` decisions, read-only investigation gates, crash-recovery replan triggers, fresh generations, and invalidated current verification evidence.
+- Added bounded crash facts to Structured State and read-only Trace, including recovery → issue → decision → trigger causal edges, plus v0.33 recovery tests and documentation.
+
 ## [v0.32.0] - Durable tool execution boundaries
 
 - Raised new session writes to schema 3 while retaining schema 1 diagnostics and schema 2 clean safe-point resume; claiming a schema 2 session upgrades it atomically.

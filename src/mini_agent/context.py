@@ -627,6 +627,25 @@ class ContextManager:
                 f"in_progress={in_progress_count}; omitted={omitted_count}"
             )
         base_lines.extend(plan_lines)
+        crash_items = [item for item in snapshot.get("crash_issues", [])
+                       if isinstance(item, dict)]
+        unresolved_crash = [item for item in crash_items
+                            if item.get("status") in ("unresolved", "investigating")]
+        if crash_items:
+            base_lines.append(
+                "Crash recovery issues (protected facts): " + bounded("; ".join(
+                    f"{item.get('issue_id', '?')} tool={item.get('tool', '?')} "
+                    f"class={item.get('classification', '?')} "
+                    f"admitted={str(bool(item.get('handler_admitted'))).lower()} "
+                    f"status={item.get('status', '?')}"
+                    for item in crash_items[:32]
+                ), 2200)
+            )
+            if unresolved_crash:
+                base_lines.append(
+                    "Crash recovery next action: read-only investigation; then "
+                    f"/resolve {unresolved_crash[0].get('issue_id', '?')} investigate|continue|block"
+                )
         decisions = snapshot.get("user_plan_decisions", [])
         if decisions:
             latest = decisions[-1]
@@ -826,6 +845,11 @@ class ContextManager:
                     )
                 )
             compact_lines.extend(bounded(line, 1500) for line in plan_lines)
+            if crash_items:
+                compact_lines.append("Crash recovery: " + bounded("; ".join(
+                    f"{item.get('issue_id', '?')}={item.get('classification', '?')}/{item.get('status', '?')}"
+                    for item in crash_items[:16]
+                ), 1200))
             active_trigger = next(
                 (item for item in snapshot.get("replan_triggers", [])
                  if item.get("trigger_id") == planning_state.get("active_trigger_id")),
@@ -836,7 +860,7 @@ class ContextManager:
                     "Active plan trigger: "
                     f"{planning_state.get('active_trigger_id')} "
                     f"kind={active_trigger.get('kind')}; source="
-                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or '-'}; "
+                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or active_trigger.get('caused_by_crash_recovery_id') or '-'}; "
                     f"reason={bounded(active_trigger.get('reason') or '-', 450)}"
                 )
             compact_lines.append(
@@ -918,12 +942,17 @@ class ContextManager:
                 compact_lines.append(bounded(plan_lines[-1], 200))
             else:
                 compact_lines.extend(bounded(line, 300) for line in plan_lines)
+            if crash_items:
+                compact_lines.append("Crash recovery: " + bounded("; ".join(
+                    f"{item.get('issue_id', '?')}={item.get('classification', '?')}/{item.get('status', '?')}"
+                    for item in crash_items[:12]
+                ), 900))
             if active_trigger is not None:
                 compact_lines.append(
                     "Active plan trigger: "
                     f"{planning_state.get('active_trigger_id')} "
                     f"kind={active_trigger.get('kind')}; source="
-                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or '-'}; "
+                    f"{active_trigger.get('caused_by_failure_id') or active_trigger.get('caused_by_attempt_id') or active_trigger.get('caused_by_decision_id') or active_trigger.get('caused_by_crash_recovery_id') or '-'}; "
                     f"reason={bounded(active_trigger.get('reason') or '-', 350)}"
                 )
             compact_lines.append(

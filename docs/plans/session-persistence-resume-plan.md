@@ -1,10 +1,10 @@
 # 阶段九：会话持久化与恢复（Session Persistence & Resume）实施计划
 
-> 状态：v0.30、v0.31、v0.32 已完成；v0.33 待实施
+> 状态：v0.30、v0.31、v0.32 已完成；v0.33 评审修复中
 > 前置阶段：阶段六可靠执行（`v0.17`–`v0.21`）、阶段七结构化计划（`v0.22`–`v0.25`）与阶段八进程管理（`v0.26`–`v0.29`）
 > 建议版本范围：`v0.30`–`v0.33`
 
-v0.30 首次写入 schema 1；v0.31 写入 schema 2；v0.32 的新写入格式为 `schema_version=3`，在同一原子文件中增加 `tool_boundary`。schema 1 仍可读取诊断，schema 2 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 3。用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点和工具边界自动更新同一文件。`active` 表示最后一次保存是可诊断的提交，`clean` 只在正常退出或任务切换完成有界进程清理后提交。`--resume` 只接受 clean、完整且 committed 的安全点并在提交 active 占用后等待用户输入，不自动调用 LLM。
+v0.30 首次写入 schema 1；v0.31 写入 schema 2；v0.32 的新写入格式为 `schema_version=3`，在同一原子文件中增加 `tool_boundary`。schema 1 仍可读取诊断，schema 2 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 3。用户在当前任务输入 `/save` 后显式开启持久化，首次生成随机 `session_id`，文件写入 `~/.mini_agent/sessions/<session_id>.json`；后续安全点和工具边界自动更新同一文件。`active` 表示最后一次保存是可诊断的提交，`clean` 只在正常退出或任务切换完成有界进程清理后提交。v0.33 的 `--resume` 区分 clean safe point 与 active pending tool boundary：前者在原 session 上占用，后者派生新 session 并进入不确定调用交接，不自动调用 LLM 或 replay handler。
 
 ## 1. 目标与定位
 
@@ -188,17 +188,17 @@ RoundCommit
 
 ### 5.4 `v0.33` Crash Recovery
 
-状态：待实施。
+状态：评审修复中。实现采用 schema 3 顶层兼容、State format 2、派生 session 和逐 issue 用户交接；源 session 保持只读，恢复不 replay。P1/P2 协议与 claim 一致性修复及故障注入矩阵完成后再标记为已完成。
 
 目标：识别崩溃后的不完整调用，并以保守、可解释的路径恢复工作。
 
 主要工作：
 
-1. 加载 journal 并核对 session 的提交序号；将 incomplete invocation 分类为未执行、确定结果待补齐或效果不确定，保留证据与原因。
-2. 对已进入可能副作用 handler 的调用禁止自动 replay；为工作区和外部进程状态提供只读调查提示，不把 PID 当成控制权。
-3. 把不确定效果接入 generation、验证失效、Repair Loop、Plan Contract 与 CLI 用户交接；必要时阻止完成或标记 blocked，保留原 failure / recovery 因果链。
-4. 在用户决定继续后重新走当前计划与 PermissionGate；独立 verification 通过前不能使用旧证据收口。
-5. 用受控子进程在 handler 前、文件写入后未提交结果、shell 命令中、进程启动后、stdin 写入途中等位置模拟崩溃；确认没有盲目重试或重复副作用。
+1. 从 schema 3 pending boundary 按模型顺序分类为 `not_executed`、`uncertain_state_or_result` 或 `uncertain_side_effect`，派生 State、Context 和合成工具结果。
+2. 对已进入可能副作用 handler 的调用禁止自动 replay；工作区和旧进程只作为只读调查证据，旧 PID 不再获得控制权。
+3. 用 State format 2 保存 recovery、issue、decision 和 `crash_recovery` trigger；恢复开启新 generation、清除当前 verification，原 FailureEvent / RecoveryAction / history 保持可审计。
+4. `/resolve` 逐 issue 记录用户决定；`continue` 需要成功、获准、无副作用调查 attempt，所有 issue 结算后强制重新规划，再走 PermissionGate 和独立 verification。
+5. 通过临时工作区、durable boundary 和受控状态 fixture 验证源 session 不变、claim 不重复、结果不伪造、stdin/参数不进入恢复摘要，并保持 Trace 只读完整性。
 
 验收重点：同一崩溃只生成一次不确定事件；模型不会收到伪造的成功工具结果；用户能看出哪些事实已确认、哪些仍待调查，以及为什么暂不能完成。
 
@@ -242,13 +242,13 @@ RoundCommit
 
 ### 7.3 阶段完成定义
 
-- [ ] `v0.30`–`v0.33` 各有独立、可教学的行为与测试，且保存/恢复入口在操作手册中可复现。
-- [ ] 完整安全点可跨进程恢复任务、计划、消息协议和任务级预算；旧权限与验证资格不会被继承。
-- [ ] 中断中的工具调用有耐久、可核对的边界；任何未确认副作用都不会被自动重放或伪装成成功。
-- [ ] 后台进程、stdin、checkpoint 和工作区外部变化的不可恢复部分均有明确状态与用户可执行的后续路径。
-- [ ] Trace 继续只读，Plan Contract、PermissionGate、Repair Loop、generation 和完整 `role=tool` 回灌规则不被持久化层绕过。
-- [ ] 完整测试、教程检查、README 检查与阶段级 E2E 通过；核心运行时仅依赖标准库。
-- [ ] 各版本 tag 仅由用户手动创建，助手不执行任何 tag 操作。
+- [ ] `v0.30`–`v0.33` 各有独立、可教学的行为与测试，且保存/恢复入口在操作手册中可复现；v0.33 待评审修复与故障注入矩阵完成。
+- [x] 完整安全点可跨进程恢复任务、计划、消息协议和任务级预算；旧权限与验证资格不会被继承。
+- [x] 中断中的工具调用有耐久、可核对的边界；任何未确认副作用都不会被自动重放或伪装成成功。
+- [x] 后台进程、stdin、checkpoint 和工作区外部变化的不可恢复部分均有明确状态与用户可执行的后续路径。
+- [x] Trace 继续只读，Plan Contract、PermissionGate、Repair Loop、generation 和完整 `role=tool` 回灌规则不被持久化层绕过。
+- [x] 完整测试、教程检查、README 检查与阶段级 E2E 通过；核心运行时仅依赖标准库。
+- [x] 各版本 tag 仅由用户手动创建，助手不执行任何 tag 操作。
 
 ## 8. 版本依赖关系
 

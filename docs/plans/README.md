@@ -11,6 +11,9 @@
 - [`adaptive-planning-plan.md`](adaptive-planning-plan.md) — 阶段七自适应规划与重规划实施计划（v0.22 Plan Contract / v0.23 Plan Mode & Handoff / v0.24 Replanning Policy / v0.25 Plan Trace & Evaluation）。
 - [`process-management-plan.md`](process-management-plan.md) — 阶段八进程管理实施计划（v0.26 后台进程 / v0.27 进程观察 / v0.28 进程控制 / v0.29 有界管道 stdin；PTY 后续评估）。
 - [`session-persistence-resume-plan.md`](session-persistence-resume-plan.md) — 阶段九会话持久化与恢复实施计划（v0.30 会话持久化 / v0.31 安全恢复 / v0.32 持久工具边界 / v0.33 崩溃恢复）。
+
+阶段九当前状态：v0.30–v0.32 已完成，v0.33 正在根据评审修复协议和数据一致性问题。目标仍是使用 schema 3 的 pending tool boundary 派生新 session，逐项记录不确定调用和用户决定；源 session 不覆盖，旧调用不自动 replay。
+- [`subagent-delegation-plan.md`](subagent-delegation-plan.md) — 阶段十受控子代理委派实施计划（v0.34 最小委派 / v0.35 生命周期与预算 / v0.36 有界并行 / v0.37 持久委派）；保持子代理只读、单层，由父 Agent 独占修改和完成判定。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

@@ -1,8 +1,8 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.32**（持久化工具执行边界；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.33**（崩溃恢复与不确定副作用交接；含此前可靠执行能力）。
 
-## v0.32 会话持久化与安全恢复
+## v0.33 会话持久化、崩溃恢复与安全交接
 
 ### 开启、更新和关闭会话
 
@@ -47,7 +47,33 @@ v0.30 的 schema 1 会话仍可读取诊断，但不能续跑。旧验证资格�
 
 ## v0.30 会话持久化与安全点
 
-v0.30 引入 `/save`、本地 schema 1 session、脱敏 history、原子安全点和 `active/clean` 生命周期。v0.31 增加 schema 2 和工作区清单；v0.32 增加 schema 3 的持久化工具边界。半轮只用于诊断，不能通过 `--resume` 自动补结果或重放 handler。
+v0.30 引入 `/save`、本地 schema 1 session、脱敏 history、原子安全点和 `active/clean` 生命周期。v0.31 增加 schema 2 和工作区清单；v0.32 增加 schema 3 的持久化工具边界；v0.33 在 active pending 边界上建立崩溃恢复交接。clean 安全点仍按原流程恢复，pending 半轮则派生新 session，不覆盖源文件，也不自动补做 handler。
+
+### `--resume` 的两种分流
+
+```bash
+PYTHONPATH=src python -m mini_agent --resume <session_id>
+```
+
+- `clean + safe_point`：检查 workspace manifest，claim 原 session，创建新的 resume generation，等待用户输入。
+- `active + schema 3 + pending tool_boundary`：显示源 session、派生 session、workspace 变化和 issue 分类；claim 后只在新 session 上运行。
+- schema 1、schema 2 active、没有 pending 证据或损坏的 session：拒绝进入运行时，不调用 LLM、handler 或 PermissionGate。
+
+崩溃恢复使用私有的 `crash_recovery_claims.json` sidecar，位置与 session 目录相同。它只保存源 session ID、源完整性摘要、派生 ID、恢复 ID 和 `preparing/committed` 阶段，不保存工具原始参数、shell 命令、stdin 或模型配置。先提交 `preparing` 意图，再写入并校验派生 session，最后提交 `committed`；中途失败可用同一派生 ID 重试。sidecar 或派生 session 的耐久性未确认时，不向 CLI 返回可运行对象；已 `committed` 的同一源完整性重复 claim 会报告已有的派生 session。
+
+### `/resolve`
+
+恢复报告中的每个 issue 都必须逐项处理，一次只接受一个 issue：
+
+```text
+/resolve <issue_id> investigate <必填反馈>
+/resolve <issue_id> continue <必填反馈>
+/resolve <issue_id> block <必填反馈>
+```
+
+`investigate` 只记录用户决定并允许只读调查；`continue` 要求本次恢复 generation 中已有成功、获准、`effect_class=none` 的调查 attempt；`block` 立即终止任务并保留其他 issue。所有 issue 都 continue 后会创建 `crash_recovery` replan trigger，必须重新提交或复核计划，再重新授权和独立 verification。未结算 issue 存在时，副作用工具、verification、计划提交、普通输入和完成状态均会被拒绝。
+
+工作区变化不能证明 handler 执行或未执行，但会生成一个必须调查并由用户结算的 `workspace-drift` issue；准备和 claim 阶段比较路径、类型、可用性、目录成员及内容 hash 的结构化摘要。已准入调用不重放：`effect_class=none` 记录为 `uncertain_state_or_result`，可能有副作用的调用记录为 `uncertain_side_effect`；未进入 handler 的调用才会得到 `interrupted_before_handler` 的明确未执行结果。旧 PID、进程 ID 和 stdin 写入线程不跨进程继承，可能遗留的进程以 `orphaned` 事实保留，并通过独立 process issue 阻止任务完成；用户 `continue` 不会恢复 PID 控制权。
 
 ## v0.29 后台进程有界文本输入
 
@@ -317,7 +343,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.32，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.33，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -374,7 +400,7 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 进程自然退出属于异步 State 事实，会单独提交，不伪造新的工具回复。`write_process.input` 只在保存时保留占位符；如果正文出现在其他持久化文本中，保存会拒绝。
 
-v0.32 的 pending 边界用于诊断中断发生在哪里，不能恢复未完成回合。`--resume` 只接受 clean、完整且 committed 的安全点；schema 2 的 clean 安全点仍可读取，并在恢复占用时升级为 schema 3。崩溃后如何分类尚未进入 handler、已经准入或可能产生副作用的调用，留给 v0.33。
+v0.33 增加了 pending 边界的崩溃恢复交接。`--resume` 仍保留 v0.31 的 clean safe point 路径；遇到 active pending boundary 时，新的 session 会保存按模型顺序合成的 `role=tool` 结果和恢复 State，但不会重放旧调用。恢复 generation 的当前 verification 资格会清除，append-only verification history、FailureEvent、RecoveryAction 和计划历史仍保留供审计。
 
 ### 3.3 上下文预算与裁剪
 

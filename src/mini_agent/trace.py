@@ -23,7 +23,8 @@ class TraceQueryError(ValueError):
 
 _GENERATION_FIELDS = (
     "generation_id", "opened_by_attempt_id", "opened_by_failure_id",
-    "opened_by_recovery_id", "opened_by_process_event_id", "open_reason",
+    "opened_by_recovery_id", "opened_by_process_event_id",
+    "opened_by_crash_recovery_id", "open_reason",
 )
 _ATTEMPT_FIELDS = (
     "attempt_id", "pre_generation_id", "generation_id", "tool",
@@ -62,7 +63,7 @@ _PLAN_DECISION_FIELDS = (
 _TRIGGER_FIELDS = (
     "trigger_id", "generation_id", "kind", "reason",
     "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id",
-    "status", "result_revision_id",
+    "status", "result_revision_id", "caused_by_crash_recovery_id",
 )
 _TRACE_EVENT_FIELDS = (
     "sequence_id", "kind", "generation_id", "revision_id", "record_type",
@@ -88,6 +89,21 @@ _PROCESS_EVENT_FIELDS = (
     "event_id", "process_id", "task_id", "kind", "generation_id",
     "start_attempt_id", "stdout_offset", "stderr_offset", "exit_code",
     "caused_by_control_attempt_id", "reason",
+)
+_CRASH_RECOVERY_FIELDS = (
+    "recovery_id", "source_session_id", "source_session_generation",
+    "source_commit_sequence", "source_integrity", "source_round",
+    "recovery_generation_id", "workspace_report", "issue_ids", "status",
+    "derived_session_id", "workspace_observation_digest",
+)
+_CRASH_ISSUE_FIELDS = (
+    "issue_id", "recovery_id", "invocation_id", "tool", "effect_class",
+    "handler_admitted", "attempt_id", "generation_id",
+    "recovery_generation_id", "classification", "reason", "status",
+)
+_CRASH_DECISION_FIELDS = (
+    "decision_id", "recovery_id", "issue_id", "decision", "feedback",
+    "generation_id", "investigation_attempt_id",
 )
 
 _ACCEPTED_RECOVERY_STATUSES = {"reserved", "executed", "terminal"}
@@ -509,6 +525,9 @@ def _build_edges(
     triggers: dict[int, dict[str, Any]] | None = None,
     trace_events: list[dict[str, Any]] | None = None,
     process_events: dict[str, dict[str, Any]] | None = None,
+    crash_recoveries: dict[str, dict[str, Any]] | None = None,
+    crash_issues: dict[str, dict[str, Any]] | None = None,
+    crash_decisions: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     plan_revisions = plan_revisions or {}
@@ -517,6 +536,39 @@ def _build_edges(
     triggers = triggers or {}
     trace_events = trace_events or []
     process_events = process_events or {}
+    crash_recoveries = crash_recoveries or {}
+    crash_issues = crash_issues or {}
+    crash_decisions = crash_decisions or {}
+
+    for issue_id, issue in crash_issues.items():
+        recovery_id = issue.get("recovery_id")
+        recovery = _mapping_get(crash_recoveries, recovery_id)
+        resolved = recovery is not None and issue_id in (recovery.get("issue_ids") or [])
+        edges.append(_edge(
+            "crash_recovery_issue", _node("crash_recovery", recovery_id),
+            _node("crash_issue", issue_id), issue.get("recovery_generation_id"),
+            resolved, None if resolved else "issue 未被对应恢复记录收录",
+        ))
+    for decision_id, decision in crash_decisions.items():
+        issue_id = decision.get("issue_id")
+        issue = _mapping_get(crash_issues, issue_id)
+        resolved = issue is not None and decision.get("recovery_id") == issue.get("recovery_id")
+        edges.append(_edge(
+            "crash_recovery_decision", _node("crash_issue", issue_id),
+            _node("crash_decision", decision_id), decision.get("generation_id"),
+            resolved, None if resolved else "decision 未引用对应 issue",
+        ))
+    for trigger_id, trigger in triggers.items():
+        recovery_id = trigger.get("caused_by_crash_recovery_id")
+        if recovery_id is None:
+            continue
+        recovery = _mapping_get(crash_recoveries, recovery_id)
+        resolved = recovery is not None and trigger.get("kind") == "crash_recovery"
+        edges.append(_edge(
+            "crash_recovery_trigger", _node("crash_recovery", recovery_id),
+            _node("trigger", trigger_id), trigger.get("generation_id"),
+            resolved, None if resolved else "crash recovery trigger 引用不存在",
+        ))
 
     for event_id, event in process_events.items():
         start_id = event.get("start_attempt_id")
@@ -547,6 +599,7 @@ def _build_edges(
             ("failure", "opened_by_failure_id"),
             ("recovery", "opened_by_recovery_id"),
             ("process_event", "opened_by_process_event_id"),
+            ("crash_recovery", "opened_by_crash_recovery_id"),
         ]
         present = [(kind, field, generation.get(field)) for kind, field in opener_fields
                    if generation.get(field) is not None]
@@ -576,6 +629,7 @@ def _build_edges(
             collection = {
                 "attempt": attempts, "failure": failures, "recovery": recoveries,
                 "process_event": process_events,
+                "crash_recovery": crash_recoveries,
             }[kind]
             target = _mapping_get(collection, identifier)
             resolved = target is not None and gid != 0 and len(present) == 1
@@ -618,6 +672,15 @@ def _build_edges(
                     _add_issue(issues, f"generation {gid} 的进程退出事件未打开该 generation")
                     resolved = False
                     detail = "进程退出事件的 generation 不一致"
+            elif generation.get("open_reason") == "crash_recovery":
+                if kind != "crash_recovery":
+                    _add_issue(issues, f"generation {gid} 的 crash_recovery opener 必须是 crash recovery")
+                    resolved = False
+                    detail = "open_reason 与 opener 类型不一致"
+                elif target.get("recovery_generation_id") != gid:
+                    _add_issue(issues, f"generation {gid} 的 crash recovery opener 未打开该 generation")
+                    resolved = False
+                    detail = "crash recovery opener 的 generation 不一致"
             else:
                 _add_issue(issues, f"generation {gid} 的 open_reason 与 opener 不一致")
                 resolved = False
@@ -823,6 +886,10 @@ def _build_edges(
             source_type, source_id, collection = "attempt", trigger.get("caused_by_attempt_id"), attempts
         elif trigger.get("caused_by_decision_id") is not None:
             source_type, source_id, collection = "decision", trigger.get("caused_by_decision_id"), plan_decisions
+        elif trigger.get("caused_by_crash_recovery_id") is not None:
+            source_type, source_id, collection = (
+                "crash_recovery", trigger.get("caused_by_crash_recovery_id"), crash_recoveries,
+            )
         else:
             _add_issue(issues, f"trigger {trigger_id} 缺少来源")
         source = _mapping_get(collection, source_id) if collection is not None else None
@@ -850,6 +917,8 @@ def _build_edges(
             source_ok = source_ok and source.get("decision") in {
                 "rejected", "continue_exploring", "resume_blocked",
             }
+        elif source_ok and source_type == "crash_recovery":
+            source_ok = source.get("recovery_generation_id") == trigger.get("generation_id")
         if source_type is not None:
             if not source_ok:
                 _add_issue(issues, f"trigger {trigger_id} 的 {source_type} 来源不存在或类型不匹配")
@@ -1049,6 +1118,9 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     raw_processes = _records(snapshot, "processes", issues) if "processes" in snapshot else []
     raw_process_events = _records(snapshot, "process_events", issues) if "process_events" in snapshot else []
     raw_trace_events = _records(snapshot, "trace_events", issues) if "trace_events" in snapshot else []
+    raw_crash_recoveries = _records(snapshot, "crash_recoveries", issues) if "crash_recoveries" in snapshot else []
+    raw_crash_issues = _records(snapshot, "crash_issues", issues) if "crash_issues" in snapshot else []
+    raw_crash_decisions = _records(snapshot, "crash_decisions", issues) if "crash_decisions" in snapshot else []
 
     generations = [_safe_record(item, _GENERATION_FIELDS, issues, f"generations[{i}]")
                    for i, item in enumerate(raw_generations)]
@@ -1072,6 +1144,18 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
                       for i, item in enumerate(raw_processes)]
     process_events_list = [_safe_record(item, _PROCESS_EVENT_FIELDS, issues, f"process_events[{i}]")
                            for i, item in enumerate(raw_process_events)]
+    crash_recoveries_list = [
+        _safe_record(item, _CRASH_RECOVERY_FIELDS, issues, f"crash_recoveries[{i}]")
+        for i, item in enumerate(raw_crash_recoveries)
+    ]
+    crash_issues_list = [
+        _safe_record(item, _CRASH_ISSUE_FIELDS, issues, f"crash_issues[{i}]")
+        for i, item in enumerate(raw_crash_issues)
+    ]
+    crash_decisions_list = [
+        _safe_record(item, _CRASH_DECISION_FIELDS, issues, f"crash_decisions[{i}]")
+        for i, item in enumerate(raw_crash_decisions)
+    ]
     trace_events = [_safe_trace_event(item, issues, f"trace_events[{i}]")
                     for i, item in enumerate(raw_trace_events)]
 
@@ -1084,7 +1168,8 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         if gid in generation_map:
             _add_issue(issues, f"generation ID 重复: {gid}")
             continue
-        if record.get("open_reason") not in {"task_start", "possible_effect", "recovery", "process_exit", "resume"}:
+        if record.get("open_reason") not in {
+                "task_start", "possible_effect", "recovery", "process_exit", "resume", "crash_recovery"}:
             _add_issue(issues, f"generation {gid}.open_reason 非法: {record.get('open_reason')}")
         if gid == 0 and record.get("open_reason") != "task_start":
             _add_issue(issues, "初始 generation 0 的 open_reason 必须是 task_start")
@@ -1104,6 +1189,53 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     recovery_map = _id_map(recoveries_list, "recovery_id", "recovery", issues)
     checkpoint_map = _id_map(checkpoints_list, "checkpoint_id", "checkpoint", issues)
     process_event_map = _id_map(process_events_list, "event_id", "process event", issues)
+    crash_recovery_map = _id_map(crash_recoveries_list, "recovery_id", "crash recovery", issues)
+    crash_issue_map = _id_map(crash_issues_list, "issue_id", "crash issue", issues)
+    crash_decision_map: dict[int, dict[str, Any]] = {}
+    for index, record in enumerate(crash_decisions_list):
+        identifier = record.get("decision_id")
+        if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0:
+            _add_issue(issues, f"crash_decisions[{index}].decision_id 非法: {identifier}")
+        elif identifier in crash_decision_map:
+            _add_issue(issues, f"crash decision ID 重复: {identifier}")
+        else:
+            crash_decision_map[identifier] = record
+
+    for index, record in enumerate(crash_recoveries_list):
+        owner = f"crash recovery {record.get('recovery_id', index)}"
+        recovery_generation = record.get("recovery_generation_id")
+        if not _valid_generation(recovery_generation) or recovery_generation not in generation_map:
+            _add_issue(issues, f"{owner}.recovery_generation_id 引用不存在或非法: {recovery_generation}")
+        issue_ids = record.get("issue_ids", [])
+        if not isinstance(issue_ids, list):
+            _add_issue(issues, f"{owner}.issue_ids 不是数组")
+        else:
+            for issue_id in issue_ids:
+                if not isinstance(issue_id, str) or issue_id not in crash_issue_map:
+                    _add_issue(issues, f"{owner}.issue_ids 引用不存在: {issue_id}")
+    for index, record in enumerate(crash_issues_list):
+        owner = f"crash issue {record.get('issue_id', index)}"
+        if record.get("recovery_id") not in crash_recovery_map:
+            _add_issue(issues, f"{owner}.recovery_id 引用不存在: {record.get('recovery_id')}")
+        if record.get("classification") not in {
+            "not_executed", "uncertain_state_or_result", "uncertain_side_effect",
+            "workspace_drift",
+        }:
+            _add_issue(issues, f"{owner}.classification 非法: {record.get('classification')}")
+        recovery_generation = record.get("recovery_generation_id")
+        if not _valid_generation(recovery_generation) or recovery_generation not in generation_map:
+            _add_issue(issues, f"{owner}.recovery_generation_id 引用不存在或非法: {recovery_generation}")
+    for index, record in enumerate(crash_decisions_list):
+        owner = f"crash decision {record.get('decision_id', index)}"
+        if record.get("recovery_id") not in crash_recovery_map:
+            _add_issue(issues, f"{owner}.recovery_id 引用不存在: {record.get('recovery_id')}")
+        if record.get("issue_id") not in crash_issue_map:
+            _add_issue(issues, f"{owner}.issue_id 引用不存在: {record.get('issue_id')}")
+        if record.get("decision") not in {"investigate", "continue", "block"}:
+            _add_issue(issues, f"{owner}.decision 非法: {record.get('decision')}")
+        value = record.get("generation_id")
+        if not _valid_generation(value) or value not in generation_map:
+            _add_issue(issues, f"{owner}.generation_id 引用不存在或非法: {value}")
     revision_ids: set[int] = set()
     for index, revision in enumerate(revisions_list):
         revision_id = revision.get("revision_id")
@@ -1114,7 +1246,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
 
     for index, record in enumerate(attempts_list):
         owner = f"attempt {record.get('attempt_id', index)}"
-        if record.get("outcome") not in {"succeeded", "failed", "denied", "timeout", "invalid"}:
+        if record.get("outcome") not in {"succeeded", "failed", "denied", "timeout", "invalid", "uncertain"}:
             _add_issue(issues, f"{owner}.outcome 非法: {record.get('outcome')}")
         for field in ("pre_generation_id", "generation_id"):
             value = record.get(field)
@@ -1229,7 +1361,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             _add_issue(issues, f"process ID 重复: {process_id}")
         else:
             process_ids.add(process_id)
-        if process.get("status") not in {"running", "exited", "failed", "terminated"}:
+        if process.get("status") not in {"running", "exited", "failed", "terminated", "orphaned"}:
             _add_issue(issues, f"{owner}.status 非法: {process.get('status')}")
         if process.get("stdin_mode", "closed") not in {"closed", "pipe"}:
             _add_issue(issues, f"{owner}.stdin_mode 非法: {process.get('stdin_mode')}")
@@ -1316,7 +1448,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         terminal = process_event_map.get(terminal_id) if terminal_id else None
         if process.get("status") == "running" and terminal_id is not None:
             _add_issue(issues, f"running process {process_id} 不能引用最终事件")
-        if process.get("status") != "running" and terminal is None:
+        if process.get("status") not in {"running", "orphaned"} and terminal is None:
             _add_issue(issues, f"非 running process {process_id} 缺少最终事件")
         if terminal is not None:
             if terminal.get("process_id") != process_id:
@@ -1358,6 +1490,9 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
                                   ("opened_by_recovery_id", recovery_map),
                                   ("opened_by_process_event_id", process_event_map)):
             _ref_issue(issues, f"generation {gid}", field, record.get(field), collection)
+        if record.get("open_reason") == "crash_recovery" and not isinstance(
+                record.get("opened_by_crash_recovery_id"), str):
+            _add_issue(issues, f"generation {gid} 缺少 crash recovery opener")
 
     current_generation = snapshot.get("current_generation_id")
     if current_generation is not None and (
@@ -1370,6 +1505,12 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     all_edges = _build_edges(
         generation_map, attempt_map, failure_map, recovery_map, evidence_list, issues,
         trace_events=trace_events, process_events=process_event_map,
+        crash_recoveries={item.get("recovery_id"): item for item in crash_recoveries_list
+                          if isinstance(item.get("recovery_id"), str)},
+        crash_issues={item.get("issue_id"): item for item in crash_issues_list
+                      if isinstance(item.get("issue_id"), str)},
+        crash_decisions={item.get("decision_id"): item for item in crash_decisions_list
+                         if isinstance(item.get("decision_id"), int)},
     )
 
     # Completion evidence intentionally retains only the current generation;
@@ -1436,6 +1577,18 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             if item.get("start_generation_id") == gid
             or process_event_map.get(item.get("terminal_event_id"), {}).get("generation_id") == gid
         ]
+        grouped_crash_recoveries = [
+            deepcopy(item) for item in crash_recoveries_list
+            if item.get("recovery_generation_id") == gid
+        ]
+        grouped_crash_issues = [
+            deepcopy(item) for item in crash_issues_list
+            if item.get("recovery_generation_id") == gid
+        ]
+        grouped_crash_decisions = [
+            deepcopy(item) for item in crash_decisions_list
+            if item.get("generation_id") == gid
+        ]
         local_edges = [deepcopy(edge) for edge in all_edges
                        if edge.get("generation_id") == gid
                        or edge.get("from") == _node("generation", gid)
@@ -1459,6 +1612,9 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             "verification_evidence": grouped_evidence,
             "processes": grouped_processes,
             "process_events": grouped_process_events,
+            "crash_recoveries": grouped_crash_recoveries,
+            "crash_issues": grouped_crash_issues,
+            "crash_decisions": grouped_crash_decisions,
             "causal_edges": local_edges,
             "edges": local_edges,
             "conclusion": conclusion,
@@ -1493,6 +1649,18 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         "task_info": task_info,
         "query": query,
         "generations": generations_report,
+        "crash_recoveries": [
+            deepcopy(item) for item in crash_recoveries_list
+            if generation_id is None or item.get("recovery_generation_id") == generation_id
+        ],
+        "crash_issues": [
+            deepcopy(item) for item in crash_issues_list
+            if generation_id is None or item.get("recovery_generation_id") == generation_id
+        ],
+        "crash_decisions": [
+            deepcopy(item) for item in crash_decisions_list
+            if generation_id is None or item.get("generation_id") == generation_id
+        ],
         "causal_edges": all_edges if generation_id is None else [
             deepcopy(edge) for edge in all_edges
             if edge.get("generation_id") == generation_id
@@ -1561,6 +1729,9 @@ def build_trace(
     raw_triggers = raw_records("replan_triggers") if "replan_triggers" in snapshot else []
     raw_events = raw_records("trace_events") if "trace_events" in snapshot else []
     raw_process_events = raw_records("process_events") if "process_events" in snapshot else []
+    raw_crash_recoveries = raw_records("crash_recoveries") if "crash_recoveries" in snapshot else []
+    raw_crash_issues = raw_records("crash_issues") if "crash_issues" in snapshot else []
+    raw_crash_decisions = raw_records("crash_decisions") if "crash_decisions" in snapshot else []
 
     plan_records = [
         _safe_plan_revision(item, issues, f"plan_revisions[{index}]")
@@ -1585,6 +1756,18 @@ def build_trace(
     process_event_records = [
         _safe_record(item, _PROCESS_EVENT_FIELDS, issues, f"process_events[{index}]")
         for index, item in enumerate(raw_process_events)
+    ]
+    crash_recovery_records = [
+        _safe_record(item, _CRASH_RECOVERY_FIELDS, issues, f"crash_recoveries[{index}]")
+        for index, item in enumerate(raw_crash_recoveries)
+    ]
+    crash_issue_records = [
+        _safe_record(item, _CRASH_ISSUE_FIELDS, issues, f"crash_issues[{index}]")
+        for index, item in enumerate(raw_crash_issues)
+    ]
+    crash_decision_records = [
+        _safe_record(item, _CRASH_DECISION_FIELDS, issues, f"crash_decisions[{index}]")
+        for index, item in enumerate(raw_crash_decisions)
     ]
 
     plan_map: dict[int, dict[str, Any]] = {}
@@ -1634,6 +1817,19 @@ def build_trace(
     process_event_map = {
         record.get("event_id"): record for record in process_event_records
         if isinstance(record.get("event_id"), str) and record.get("event_id")
+    }
+    crash_recovery_map = {
+        record.get("recovery_id"): record for record in crash_recovery_records
+        if isinstance(record.get("recovery_id"), str) and record.get("recovery_id")
+    }
+    crash_issue_map = {
+        record.get("issue_id"): record for record in crash_issue_records
+        if isinstance(record.get("issue_id"), str) and record.get("issue_id")
+    }
+    crash_decision_map = {
+        record.get("decision_id"): record for record in crash_decision_records
+        if isinstance(record.get("decision_id"), int)
+        and not isinstance(record.get("decision_id"), bool)
     }
 
     # A plan-bearing v0.22/v0.24 snapshot without v0.25 events can still
@@ -1705,6 +1901,9 @@ def build_trace(
         "verification_history": evidence,
         "process_event": process_event_map,
         "tool_history": tool_history,
+        "crash_recovery": crash_recovery_map,
+        "crash_issue": crash_issue_map,
+        "crash_decision": crash_decision_map,
     }
     for index, event in enumerate(event_records):
         sequence_id = event.get("sequence_id")
@@ -1733,7 +1932,10 @@ def build_trace(
             else:
                 if _hashable(record_type) and _hashable(record_id):
                     event_by_target.setdefault((record_type, record_id), []).append(event)
-                target_generation = target.get("generation_id") if isinstance(target, Mapping) else None
+                if record_type in {"crash_recovery", "crash_issue"}:
+                    target_generation = target.get("recovery_generation_id") if isinstance(target, Mapping) else None
+                else:
+                    target_generation = target.get("generation_id") if isinstance(target, Mapping) else None
                 # Recovery events point at the final RecoveryAction record;
                 # all recorded recovery state transitions after activation use
                 # that successor generation.
@@ -1895,10 +2097,15 @@ def build_trace(
     # link from a resolved trigger to exactly one revision.
     consumed: dict[int, list[int]] = {}
     for trigger_id, trigger in trigger_map.items():
-        if trigger.get("kind") not in {"failure", "observation", "user_feedback", "blocked_resume"}:
+        if trigger.get("kind") not in {
+            "failure", "observation", "user_feedback", "blocked_resume", "crash_recovery",
+        }:
             _add_issue(issues, f"trigger {trigger_id}.kind 非法")
         source_fields = [
-            field for field in ("caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id")
+            field for field in (
+                "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id",
+                "caused_by_crash_recovery_id",
+            )
             if trigger.get(field) is not None
         ]
         if len(source_fields) != 1:
@@ -1914,6 +2121,15 @@ def build_trace(
             source = _mapping_get(attempts, trigger.get(source_field)) if source_field == "caused_by_attempt_id" else None
             source_ok = source is not None and source.get("generation_id") == trigger.get("generation_id") and observation_attempt(source)
             source_type = "attempt"
+            source_id = trigger.get(source_field)
+        elif trigger.get("kind") == "crash_recovery":
+            source = (_mapping_get(crash_recovery_map, trigger.get(source_field))
+                      if source_field == "caused_by_crash_recovery_id" else None)
+            source_ok = (
+                source is not None
+                and source.get("recovery_generation_id") == trigger.get("generation_id")
+            )
+            source_type = "crash_recovery"
             source_id = trigger.get(source_field)
         else:
             source = _mapping_get(decision_map, trigger.get(source_field)) if source_field == "caused_by_decision_id" else None
@@ -1981,12 +2197,14 @@ def build_trace(
         trigger = _mapping_get(trigger_map, revision.get("trigger_id"))
         if trigger is not None and revision_id_value in start_by_revision:
             source_id = next((trigger.get(field) for field in (
-                "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id"
+                "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id",
+                "caused_by_crash_recovery_id",
             ) if trigger.get(field) is not None), None)
             source_type = (
                 "failure" if trigger.get("caused_by_failure_id") is not None else
                 "attempt" if trigger.get("caused_by_attempt_id") is not None else
-                "user_plan_decision" if trigger.get("caused_by_decision_id") is not None else None
+                "user_plan_decision" if trigger.get("caused_by_decision_id") is not None else
+                "crash_recovery" if trigger.get("caused_by_crash_recovery_id") is not None else None
             )
             if source_type is not None:
                 source_events = _event_index(event_records, source_type, source_id)
@@ -2099,11 +2317,14 @@ def build_trace(
     missing_fact_edges: list[dict[str, Any]] = []
     if "trace_events" in snapshot:
         required_events = (
-            ("attempt", attempts, "execution_result"),
+            ("attempt", attempts, {"execution_result", "crash_recovery_uncertain"}),
             ("failure", failures, "failure_recorded"),
             ("recovery_action", recoveries, None),
             ("verification_history", dict(enumerate(evidence)), "verification_recorded"),
             ("process_event", process_event_map, "process_event"),
+            ("crash_recovery", crash_recovery_map, "crash_recovery_started"),
+            ("crash_issue", crash_issue_map, "crash_recovery_issue"),
+            ("crash_decision", crash_decision_map, "crash_recovery_decision"),
         )
         recovery_kinds = {
             "recovery_proposed", "recovery_activated", "recovery_result", "recovery_rejected",
@@ -2111,17 +2332,19 @@ def build_trace(
         for record_type, records, expected_kind in required_events:
             for record_id, fact in records.items():
                 matches = event_by_target.get((record_type, record_id), [])
-                recorded = any(
-                    event.get("kind") == expected_kind
-                    if expected_kind is not None else event.get("kind") in recovery_kinds
-                    for event in matches
-                )
+                if expected_kind is None:
+                    recorded = any(event.get("kind") in recovery_kinds for event in matches)
+                elif isinstance(expected_kind, set):
+                    recorded = any(event.get("kind") in expected_kind for event in matches)
+                else:
+                    recorded = any(event.get("kind") == expected_kind for event in matches)
                 if recorded:
                     continue
                 _add_issue(issues, f"{record_type} {record_id} 缺少对应 trace event")
                 missing_fact_edges.append(_edge(
                     "trace_event_missing", _node(record_type, record_id),
-                    "trace_event:missing", fact.get("generation_id"), False,
+                    "trace_event:missing",
+                    fact.get("generation_id", fact.get("recovery_generation_id")), False,
                     "事实缺少顺序事件，revision 归属不可确认",
                 ))
 
@@ -2130,6 +2353,13 @@ def build_trace(
         generation_map, attempts, failures, recoveries, evidence, issues,
         plan_map, progress_map, decision_map, trigger_map, event_records,
         process_event_map,
+        {item.get("recovery_id"): item for item in raw_crash_recoveries
+         if isinstance(item, Mapping) and isinstance(item.get("recovery_id"), str)},
+        {item.get("issue_id"): item for item in crash_issue_records
+         if isinstance(item.get("issue_id"), str)},
+        {item.get("decision_id"): item for item in crash_decision_records
+         if isinstance(item.get("decision_id"), int)
+         and not isinstance(item.get("decision_id"), bool)},
     )
     all_edges.extend(missing_fact_edges)
 
@@ -2183,6 +2413,21 @@ def build_trace(
             for identifier, record in process_event_map.items()
             if _valid_generation(record.get("generation_id"))
         },
+        **{
+            _node("crash_recovery", identifier): record.get("recovery_generation_id")
+            for identifier, record in crash_recovery_map.items()
+            if _valid_generation(record.get("recovery_generation_id"))
+        },
+        **{
+            _node("crash_issue", identifier): record.get("recovery_generation_id")
+            for identifier, record in crash_issue_map.items()
+            if _valid_generation(record.get("recovery_generation_id"))
+        },
+        **{
+            _node("crash_decision", identifier): record.get("generation_id")
+            for identifier, record in crash_decision_map.items()
+            if _valid_generation(record.get("generation_id"))
+        },
     }
     endpoint_generation.update({
         _node("generation", identifier): identifier
@@ -2207,6 +2452,9 @@ def build_trace(
         "recovery_action": recoveries,
         "verification_history": evidence,
         "process_event": process_event_map,
+        "crash_recovery": crash_recovery_map,
+        "crash_issue": crash_issue_map,
+        "crash_decision": crash_decision_map,
     }
 
     def event_record(event: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2221,6 +2469,8 @@ def build_trace(
             return deepcopy(_mapping_get(attempts, trigger.get("caused_by_attempt_id")))
         if trigger.get("caused_by_decision_id") is not None:
             return deepcopy(_mapping_get(decision_map, trigger.get("caused_by_decision_id")))
+        if trigger.get("caused_by_crash_recovery_id") is not None:
+            return deepcopy(_mapping_get(crash_recovery_map, trigger.get("caused_by_crash_recovery_id")))
         return None
 
     def in_period(event: Mapping[str, Any], revision_id_value: int) -> bool:
@@ -2287,8 +2537,10 @@ def build_trace(
                 if _valid_generation(item.get("generation_id")):
                     generation_ids_for_revision.add(item["generation_id"])
         source = source_for_trigger(trigger)
-        if source is not None and _valid_generation(source.get("generation_id")):
-            generation_ids_for_revision.add(source["generation_id"])
+        if source is not None:
+            source_generation = source.get("generation_id", source.get("recovery_generation_id"))
+            if _valid_generation(source_generation):
+                generation_ids_for_revision.add(source_generation)
         start = _mapping_get(start_by_revision, revision_id_value)
         end = _mapping_get(next_start_by_revision, revision_id_value)
         start_event = commit_event if _valid_positive_id(start) else None
@@ -2366,10 +2618,12 @@ def build_trace(
                 source_key = (
                     "failure" if selected_trigger.get("caused_by_failure_id") is not None else
                     "attempt" if selected_trigger.get("caused_by_attempt_id") is not None else
-                    "user_plan_decision"
+                    "user_plan_decision" if selected_trigger.get("caused_by_decision_id") is not None else
+                    "crash_recovery"
                 )
                 source_identifier = next((selected_trigger.get(field) for field in (
-                    "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id"
+                    "caused_by_failure_id", "caused_by_attempt_id", "caused_by_decision_id",
+                    "caused_by_crash_recovery_id",
                 ) if selected_trigger.get(field) is not None), None)
                 selected_keys.add((source_key, source_identifier))
         selected_timeline_events = [
@@ -2412,6 +2666,18 @@ def build_trace(
         ]
         generation["trace_events"] = [
             deepcopy(event) for event in event_records if event.get("generation_id") == gid
+        ]
+        generation["crash_recoveries"] = [
+            deepcopy(item) for item in crash_recovery_records
+            if item.get("recovery_generation_id") == gid
+        ]
+        generation["crash_issues"] = [
+            deepcopy(item) for item in crash_issue_records
+            if item.get("recovery_generation_id") == gid
+        ]
+        generation["crash_decisions"] = [
+            deepcopy(item) for item in crash_decision_records
+            if item.get("generation_id") == gid
         ]
         generation_edges = [
             deepcopy(edge) for edge in all_edges
@@ -2482,6 +2748,12 @@ def build_trace(
             deepcopy(item) for item in evidence
             if item.get("generation_id") == target_generation
         ]
+        unresolved_crash = any(
+            item.get("status") in {"unresolved", "investigating"}
+            and _valid_generation(item.get("recovery_generation_id"))
+            and item.get("recovery_generation_id") <= target_generation
+            for item in crash_issue_records
+        )
         failures_until = [
             deepcopy(item) for item in failures.values()
             if for_generation is None or item.get("generation_id") <= for_generation
@@ -2501,11 +2773,14 @@ def build_trace(
             "verification_complete": (
                 bool(current_evidence)
                 and current_evidence[-1].get("outcome") == "passed"
+                and not unresolved_crash
                 and not (
                     target_generation == current_generation
                     and snapshot.get("verification_required", False)
                 )
             ),
+            "crash_recovery_complete": not unresolved_crash,
+            "completion_blocked_by_crash_recovery": unresolved_crash,
             "last_failure": failures_until[-1] if failures_until else None,
             "stagnation": latest_stagnation(for_generation),
             "terminal_summary": (
@@ -2545,6 +2820,18 @@ def build_trace(
     report["plan_revisions"] = deepcopy(selected_plan_views)
     report["plan_timeline"] = plan_timeline
     report["trace_events"] = deepcopy(selected_timeline_events)
+    report["crash_recoveries"] = [
+        deepcopy(item) for item in crash_recovery_records
+        if generation_id is None or item.get("recovery_generation_id") == generation_id
+    ]
+    report["crash_issues"] = [
+        deepcopy(item) for item in crash_issue_records
+        if generation_id is None or item.get("recovery_generation_id") == generation_id
+    ]
+    report["crash_decisions"] = [
+        deepcopy(item) for item in crash_decision_records
+        if generation_id is None or item.get("generation_id") == generation_id
+    ]
     report["causal_edges"] = [
         deepcopy(edge) for edge in all_edges
         if generation_id is None
@@ -2559,7 +2846,12 @@ def build_trace(
         }
         selected_trigger = _mapping_get(trigger_map, plan_map[revision_id].get("trigger_id"))
         if selected_trigger:
-            for field, kind in (("caused_by_failure_id", "failure"), ("caused_by_attempt_id", "attempt"), ("caused_by_decision_id", "decision")):
+            for field, kind in (
+                ("caused_by_failure_id", "failure"),
+                ("caused_by_attempt_id", "attempt"),
+                ("caused_by_decision_id", "decision"),
+                ("caused_by_crash_recovery_id", "crash_recovery"),
+            ):
                 if selected_trigger.get(field) is not None:
                     selected_edge_nodes.add(_node(kind, selected_trigger[field]))
         report["causal_edges"] = [
@@ -2642,6 +2934,9 @@ def render_trace(report: Mapping[str, Any]) -> str:
             ("Failures", "failures", "failure_id", _FAILURE_FIELDS + ("diagnosis", "diagnosis_source")),
             ("Recovery actions", "recovery_actions", "recovery_id", _RECOVERY_FIELDS),
             ("Verification evidence", "verification_evidence", None, _VERIFICATION_FIELDS),
+            ("Crash recoveries", "crash_recoveries", "recovery_id", _CRASH_RECOVERY_FIELDS),
+            ("Crash issues", "crash_issues", "issue_id", _CRASH_ISSUE_FIELDS),
+            ("Crash decisions", "crash_decisions", "decision_id", _CRASH_DECISION_FIELDS),
         )
         for title, key, identifier_field, fields in sections:
             lines.append(f"  {title}:")

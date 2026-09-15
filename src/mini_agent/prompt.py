@@ -104,6 +104,7 @@ _CORE_RULES = """<rules>
 - Repair Loop 约束：Structured State 的 repair_loop.phase 为 diagnosis_required 时，先只读调查，或独占调用 recover 处理 active_failure_id，或独占调用 request_replan 转入 Explore；不得直接执行副作用、推进旧计划或 verification。recover 只能引用当前活动 failure。
 - recover 成功后 phase 会变为 verification_required；下一工具回合只能独占调用 run_shell(purpose="verification")。恢复动作结果不是验证证据；验证失败会重新进入 diagnosis_required，并消耗的是实际激活的恢复周期预算。
 - 有 active plan 时，只有所有计划步骤完成且最近一次修改后验证通过，任务才算完成；无计划时沿用最近一次修改后验证通过的完成条件。阶段性调查/汇报后若仍未完成，下一条回复必须携带能推进任务的工具调用（提交或推进计划、执行调查/操作或验证），不能只口头描述“接下来执行”；确实无法继续时才说明具体阻塞原因。
+- 崩溃恢复规则：Structured State 中的 crash recovery 结果不是 handler 成功结果，绝不重放原 tool call，也不能把工作区看起来未变化当作未执行。存在未结算 issue 时只能使用真正的只读观察工具；用户的 /resolve investigate、continue、block 决定不能由模型伪造。continue 必须有本 generation 成功且获准的无副作用调查 attempt；所有 issue 结算后必须提交或复核引用 crash_recovery trigger 的新计划，并重新经过 PermissionGate 和独立 verification。
 
 # Safety
 - 写文件前会被权限闸门拦截询问，这是预期行为。

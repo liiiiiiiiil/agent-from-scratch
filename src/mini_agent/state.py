@@ -16,12 +16,12 @@ from mini_agent.config import (MAX_ATTEMPT_FINGERPRINTS, MAX_FAILURE_RETRIES,
                                MAX_STAGNANT_ROUNDS)
 
 EffectClass = Literal["none", "possible"]
-AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid"]
+AttemptOutcome = Literal["succeeded", "failed", "denied", "timeout", "invalid", "uncertain"]
 FailureCategory = Literal["protocol", "permission", "transient", "deterministic", "validation", "unknown"]
 RepairPhase = Literal["idle", "diagnosis_required", "verification_required"]
 PlanStepStatus = Literal["pending", "in_progress", "completed"]
 PlanningPhase = Literal["direct", "exploring", "awaiting_approval", "executing"]
-ProcessStatus = Literal["running", "exited", "failed", "terminated"]
+ProcessStatus = Literal["running", "exited", "failed", "terminated", "orphaned"]
 ProcessEventKind = Literal["started", "exited", "failed", "terminated", "killed", "cleanup_failed"]
 StdinMode = Literal["closed", "pipe"]
 StdinState = Literal["disabled", "open", "write_pending", "closed", "error"]
@@ -169,13 +169,14 @@ class UserPlanDecision:
 class ReplanTrigger:
     trigger_id: int
     generation_id: int
-    kind: Literal["failure", "observation", "user_feedback", "blocked_resume"]
+    kind: Literal["failure", "observation", "user_feedback", "blocked_resume", "crash_recovery"]
     reason: str
     caused_by_failure_id: str | None = None
     caused_by_attempt_id: str | None = None
     caused_by_decision_id: int | None = None
     status: Literal["active", "resolved", "rejected"] = "active"
     result_revision_id: int | None = None
+    caused_by_crash_recovery_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,7 +200,65 @@ class ExecutionGeneration:
     opened_by_failure_id: str | None = None
     opened_by_recovery_id: str | None = None
     opened_by_process_event_id: str | None = None
-    open_reason: Literal["task_start", "possible_effect", "recovery", "process_exit", "resume"] = "task_start"
+    open_reason: Literal[
+        "task_start", "possible_effect", "recovery", "process_exit", "resume", "crash_recovery"
+    ] = "task_start"
+    opened_by_crash_recovery_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CrashRecoveryRecord:
+    """One immutable hand-off from an incomplete schema-3 tool boundary."""
+
+    recovery_id: str
+    source_session_id: str
+    source_session_generation: int
+    source_commit_sequence: int
+    source_integrity: str
+    source_round: int
+    recovery_generation_id: int
+    workspace_report: tuple[str, ...] = ()
+    issue_ids: tuple[str, ...] = ()
+    status: Literal["resolving", "replanned", "blocked", "complete"] = "resolving"
+    derived_session_id: str | None = None
+    # Digest of the structured workspace observation captured while preparing
+    # the candidate.  The complete observation stays in the candidate/runtime;
+    # this digest makes the hand-off auditable without copying file contents.
+    workspace_observation_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class CrashRecoveryIssue:
+    """A pending invocation whose external outcome cannot be asserted."""
+
+    issue_id: str
+    recovery_id: str
+    invocation_id: str
+    tool: str
+    effect_class: EffectClass
+    handler_admitted: bool
+    attempt_id: str | None
+    generation_id: int | None
+    recovery_generation_id: int
+    classification: Literal[
+        "not_executed", "uncertain_state_or_result", "uncertain_side_effect",
+        "workspace_drift",
+    ]
+    reason: str
+    status: Literal["unresolved", "investigating", "continued", "blocked"] = "unresolved"
+
+
+@dataclass(frozen=True)
+class CrashRecoveryDecision:
+    """The CLI-only decision attached to one crash-recovery issue."""
+
+    decision_id: int
+    recovery_id: str
+    issue_id: str
+    decision: Literal["investigate", "continue", "block"]
+    feedback: str
+    generation_id: int
+    investigation_attempt_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -358,6 +417,9 @@ class AgentState:
     attempts: list[ExecutionAttempt] = field(default_factory=list)
     failures: list[FailureEvent] = field(default_factory=list)
     recovery_actions: list[RecoveryAction] = field(default_factory=list)
+    crash_recoveries: list[CrashRecoveryRecord] = field(default_factory=list)
+    crash_issues: list[CrashRecoveryIssue] = field(default_factory=list)
+    crash_decisions: list[CrashRecoveryDecision] = field(default_factory=list)
     trace_events: list[TraceEvent] = field(default_factory=list)
     process_records: list[ProcessRecord] = field(default_factory=list)
     process_events: list[ProcessEvent] = field(default_factory=list)
@@ -384,6 +446,9 @@ class AgentState:
     _next_trace_sequence: int = field(default=1, init=False, repr=False)
     _next_task_id: int = field(default=1, init=False, repr=False)
     _next_process_event: int = field(default=1, init=False, repr=False)
+    _next_crash_recovery: int = field(default=1, init=False, repr=False)
+    _next_crash_issue: int = field(default=1, init=False, repr=False)
+    _next_crash_decision: int = field(default=1, init=False, repr=False)
     _pending_process_controls: dict[str, tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
     _pending_attempts: set[str] = field(default_factory=set, init=False, repr=False)
     _revision_attempt_boundaries: dict[int, int] = field(default_factory=dict, init=False, repr=False)
@@ -474,12 +539,22 @@ class AgentState:
             ) if active else None,
             "planning_phase": self.planning_state.phase,
             "repair_phase": self._repair_phase,
+            "crash_recovery": tuple(
+                (item.recovery_id, item.status, item.recovery_generation_id,
+                 tuple(item.issue_ids)) for item in self.crash_recoveries
+            ),
+            "crash_issues": tuple(
+                (item.issue_id, item.status, item.classification,
+                 item.investigation_attempt_id if hasattr(item, "investigation_attempt_id") else None)
+                for item in self.crash_issues
+            ),
             # Failure IDs are task-local sequence numbers.  They must not
             # turn the same underlying failure into apparent progress.
             "active_failure": failure_summary,
             "trigger": (
                 trigger.kind, trigger.caused_by_failure_id,
                 trigger.caused_by_attempt_id, trigger.caused_by_decision_id,
+                trigger.caused_by_crash_recovery_id,
             ) if trigger is not None else None,
             "decisions": tuple(
                 (decision.revision_id, decision.decision, decision.feedback,
@@ -513,6 +588,9 @@ class AgentState:
             return "等待 CLI 用户批准、驳回或继续调查"
         if self.status == "awaiting_process":
             return "继续输入以观察后台进程"
+        unresolved = [item for item in self.crash_issues if item.status in ("unresolved", "investigating")]
+        if unresolved:
+            return f"逐项使用 /resolve {unresolved[0].issue_id} investigate|continue|block"
         if self._repair_phase == "verification_required":
             return "独占调用 run_shell(purpose=verification)"
         if self._repair_phase == "diagnosis_required":
@@ -702,6 +780,332 @@ class AgentState:
                 "terminal_reason": self.terminal_reason if count >= MAX_STAGNANT_ROUNDS else None,
                 "allowed_next_action": self._allowed_next_action_locked(),
             }
+
+    @property
+    def unresolved_crash_issues(self) -> list[CrashRecoveryIssue]:
+        with self._lock:
+            return [item for item in self.crash_issues
+                    if item.status in ("unresolved", "investigating")]
+
+    def has_unresolved_crash_recovery(self) -> bool:
+        with self._lock:
+            return any(item.status in ("unresolved", "investigating")
+                       for item in self.crash_issues)
+
+    def crash_recovery_gate(self, name: str, arguments: dict[str, Any] | None = None,
+                            effect_class: EffectClass = "none") -> str | None:
+        """Keep an unresolved recovery hand-off on the read-only investigation path."""
+        with self._lock:
+            if not any(item.status in ("unresolved", "investigating")
+                       for item in self.crash_issues):
+                return None
+            if not any(item.status == "investigating" for item in self.crash_issues):
+                return "工具调用拒绝: 请先由用户使用 /resolve <issue_id> investigate 开启调查"
+            allowed = {
+                "read_file", "list_dir", "grep", "calculate",
+                "get_process", "read_process", "list_processes", "wait_process",
+            }
+            if name not in allowed or effect_class != "none":
+                return "工具调用拒绝: crash recovery 仍有未结算 issue；当前只允许只读调查"
+            return None
+
+    def begin_crash_recovery(
+        self,
+        source_session_id: str,
+        source_session_generation: int,
+        source_commit_sequence: int,
+        source_integrity: str,
+        source_round: int,
+        pending_calls: list[dict[str, Any]],
+        workspace_report: list[str] | tuple[str, ...] = (),
+        workspace_observation_digest: str | None = None,
+    ) -> CrashRecoveryRecord:
+        """Convert one durable pending suffix into a new, non-replayable generation."""
+        with self._lock:
+            if not isinstance(source_session_id, str) or not source_session_id:
+                raise ValueError("source_session_id 无效")
+            if any(item.status in ("resolving",) for item in self.crash_recoveries):
+                raise ValueError("当前已有活动 crash recovery")
+            if not isinstance(pending_calls, list) or not pending_calls:
+                raise ValueError("crash recovery 至少需要一个 pending call")
+            self._ensure_generation()
+            recovery_id = f"cr-{self._next_crash_recovery}"
+            self._next_crash_recovery += 1
+            generation_id = self._verification_generation + 1
+            self._verification_generation = generation_id
+            previous_status = self.status
+            previous_terminal_reason = self.terminal_reason
+            record = CrashRecoveryRecord(
+                recovery_id, source_session_id, int(source_session_generation),
+                int(source_commit_sequence), str(source_integrity), int(source_round),
+                generation_id, tuple(str(item)[:500] for item in workspace_report)[:64],
+                (), "resolving", None, workspace_observation_digest,
+            )
+            self.generations.append(ExecutionGeneration(
+                generation_id, opened_by_crash_recovery_id=recovery_id,
+                open_reason="crash_recovery",
+            ))
+            self._append_trace_event_locked(
+                "crash_recovery_started", generation_id=generation_id,
+                record_type="crash_recovery", record_id=recovery_id,
+            )
+            self.verification_evidence.clear()
+            self._last_verified_generation = -1
+            self._verification_required = True
+            self._pending_attempts.clear()
+            self._pending_process_controls.clear()
+            # A process handle cannot cross the session boundary.  Preserve the
+            # fact that it may still exist without claiming an exit or input
+            # delivery, and make it permanently non-controllable in this task.
+            orphaned_processes = [
+                item for item in self.process_records
+                if item.status == "running" or item.write_pending
+            ]
+            self.process_records = [
+                replace(
+                    item,
+                    status="orphaned",
+                    # No writer thread or process handle crosses the derived
+                    # session boundary.  Possible partial delivery is an
+                    # issue fact, never a live write_pending capability.
+                    write_pending=False,
+                    stdin_state=("error" if item.write_pending else item.stdin_state),
+                ) if item in orphaned_processes else item
+                for item in self.process_records
+            ]
+            self.awaiting_process = None
+            issue_ids: list[str] = []
+
+            def add_issue(issue: CrashRecoveryIssue) -> None:
+                issue_ids.append(issue.issue_id)
+                self.crash_issues.append(issue)
+                self._append_trace_event_locked(
+                    "crash_recovery_issue", generation_id=generation_id,
+                    record_type="crash_issue", record_id=issue.issue_id,
+                )
+
+            # Every old process or in-flight stdin writer receives its own
+            # user-settled fact.  The new runtime cannot control the old PID,
+            # and it must not claim that stdin was delivered or that the
+            # process exited.
+            for process in orphaned_processes:
+                issue_id = f"issue-{self._next_crash_issue}"
+                self._next_crash_issue += 1
+                stdin_note = (
+                    "；stdin 可能部分投递，不能确认送达"
+                    if process.write_pending else ""
+                )
+                issue = CrashRecoveryIssue(
+                    issue_id, recovery_id, f"process:{process.process_id}",
+                    "process", "possible", True, process.start_attempt_id,
+                    process.start_generation_id, generation_id,
+                    "uncertain_side_effect",
+                    f"旧进程 {process.process_id} (pid={process.pid}) 不能跨恢复分支控制；"
+                    f"不能断言退出或外部状态{stdin_note}。",
+                    "unresolved",
+                )
+                add_issue(issue)
+
+            if workspace_report:
+                issue_id = f"issue-{self._next_crash_issue}"
+                self._next_crash_issue += 1
+                add_issue(CrashRecoveryIssue(
+                    issue_id, recovery_id, "workspace-drift", "workspace", "none",
+                    False, None, None, generation_id, "workspace_drift",
+                    "恢复准备阶段观察到工作区与 durable manifest 不一致；变化只能作为调查证据，"
+                    "不能推断任何 pending handler 是否执行。",
+                    "unresolved",
+                ))
+
+            for call in pending_calls:
+                effect = call.get("effect_class", "none")
+                admitted = bool(call.get("handler_admitted", False))
+                if not admitted:
+                    classification = "not_executed"
+                    reason = "持久边界显示 handler_admitted=false；调用未进入 handler，恢复时补入未执行结果。"
+                elif effect == "none":
+                    classification = "uncertain_state_or_result"
+                    reason = "调用已准入无外部副作用工具，但结果未提交；不能推断 State 或观察结果是否产生。"
+                else:
+                    classification = "uncertain_side_effect"
+                    reason = "调用已准入可能产生副作用的 handler，但结果未提交；不得重放或声称成功。"
+                issue_id = f"issue-{self._next_crash_issue}"
+                self._next_crash_issue += 1
+                attempt_id = call.get("attempt_id") if isinstance(call.get("attempt_id"), str) else None
+                if admitted and attempt_id is not None:
+                    if any(item.attempt_id == attempt_id for item in self.attempts):
+                        raise ValueError("crash recovery attempt_id 与既有 attempt 冲突")
+                    summary = deepcopy(call.get("arguments_summary", {}))
+                    arguments_hash = call.get("arguments_hash")
+                    if (not isinstance(arguments_hash, str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", arguments_hash)):
+                        raise ValueError("pending admitted call 缺少 durable arguments_hash")
+                    attempt_generation = int(
+                        call.get("generation_id")
+                        if isinstance(call.get("generation_id"), int)
+                        else generation_id
+                    )
+                    attempt = ExecutionAttempt(
+                        attempt_id,
+                        int(call.get("pre_generation_id") if call.get("pre_generation_id") is not None else attempt_generation),
+                        attempt_generation, str(call.get("tool", "<unknown>")), arguments_hash,
+                        summary, "uncertain", 0, effect, True,
+                        str(call.get("permission", "allowed")),
+                        output_excerpt="crash recovery: result not committed",
+                        error_kind="crash_recovery_uncertain",
+                    )
+                    self.attempts.append(attempt)
+                    try:
+                        self._next_attempt = max(self._next_attempt, int(attempt_id[2:]) + 1)
+                    except (TypeError, ValueError):
+                        pass
+                    self._append_trace_event_locked(
+                        "crash_recovery_uncertain",
+                        generation_id=attempt_generation, record_type="attempt", record_id=attempt.attempt_id,
+                    )
+                issue = CrashRecoveryIssue(
+                    issue_id, recovery_id, str(call.get("invocation_id", "")),
+                    str(call.get("tool", "<unknown>")), effect, admitted, attempt_id,
+                    call.get("generation_id"), generation_id, classification, reason,
+                    "unresolved" if admitted else "continued",
+                )
+                add_issue(issue)
+                self.tool_history.append({
+                    "tool": issue.tool,
+                    "arguments_hash": str(call.get("arguments_hash") or canonical_arguments_hash(call.get("arguments_summary", {}))),
+                    "ok": False, "brief": reason[:240], "crash_issue_id": issue_id,
+                })
+            record = replace(record, issue_ids=tuple(issue_ids))
+            if not any(item.status == "unresolved" for item in self.crash_issues
+                       if item.recovery_id == recovery_id):
+                record = replace(record, status="complete")
+            self.crash_recoveries.append(record)
+            if any(item.status == "unresolved" for item in self.crash_issues
+                   if item.recovery_id == recovery_id):
+                # An existing trigger belongs to the source audit trail.  Do
+                # not silently erase it when crash recovery adds another
+                # obligation; only create the crash trigger after all issues
+                # have been explicitly continued.
+                self.planning_state = replace(self.planning_state, phase="exploring")
+            if previous_status in ("blocked", "failed", "done"):
+                self.status = previous_status
+                self.terminal_reason = previous_terminal_reason
+            else:
+                self.status = "running"
+                self.terminal_reason = previous_terminal_reason
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return record
+
+    def resolve_crash_issue(
+        self, issue_id: str, decision: str, feedback: str,
+        investigation_attempt_id: str | None = None,
+    ) -> CrashRecoveryDecision:
+        """Apply one explicit CLI decision; the model cannot manufacture it."""
+        with self._lock:
+            if self.status in ("blocked", "failed", "done"):
+                raise PlanRejected("当前任务已终止，不能继续结算 crash issue")
+            issue = next((item for item in self.crash_issues if item.issue_id == issue_id), None)
+            if issue is None:
+                raise PlanRejected("未知 crash recovery issue")
+            if issue.status in ("continued", "blocked"):
+                raise PlanRejected("该 issue 已结算")
+            if decision not in ("investigate", "continue", "block"):
+                raise PlanRejected("decision 必须是 investigate、continue 或 block")
+            clean_feedback = self._plan_text(feedback, "feedback", _PLAN_REASON_MAX)
+            selected_attempt = investigation_attempt_id
+            if decision == "continue":
+                if issue.status != "investigating":
+                    raise PlanRejected("continue 前必须先对该 issue 使用 investigate")
+                if issue.classification == "workspace_drift" and issue.tool != "workspace":
+                    raise PlanRejected("workspace drift issue 引用无效")
+                investigate_decisions = [
+                    item for item in self.crash_decisions
+                    if item.recovery_id == issue.recovery_id
+                    and item.issue_id == issue.issue_id
+                    and item.decision == "investigate"
+                ]
+                if not investigate_decisions:
+                    raise PlanRejected("continue 前必须存在该 issue 的 investigate 决定")
+                candidates = [
+                    item for item in self.attempts
+                    if item.generation_id == issue.recovery_generation_id
+                    and item.outcome == "succeeded" and item.handler_admitted
+                    and item.permission == "allowed" and item.effect_class == "none"
+                    and item.tool not in {
+                        "begin_plan", "cancel_planning", "commit_plan",
+                        "update_plan_progress", "request_replan", "recover",
+                        "rollback_checkpoint", "run_shell",
+                    }
+                ]
+                if selected_attempt is not None:
+                    candidates = [item for item in candidates if item.attempt_id == selected_attempt]
+                if not candidates:
+                    raise PlanRejected("continue 需要本次恢复 generation 中成功、获准且无副作用的调查 attempt")
+                if issue.classification == "workspace_drift":
+                    candidates = [item for item in candidates if item.tool in {
+                        "read_file", "list_dir", "grep", "calculate",
+                        "get_process", "read_process", "list_processes", "wait_process",
+                    }]
+                    if not candidates:
+                        raise PlanRejected("workspace drift continue 需要只读调查 attempt")
+                selected_attempt = candidates[-1].attempt_id
+                new_status = "continued"
+            elif decision == "investigate":
+                new_status = "investigating"
+            else:
+                new_status = "blocked"
+            decision_record = CrashRecoveryDecision(
+                self._next_crash_decision, issue.recovery_id, issue_id,
+                decision, clean_feedback, self._verification_generation, selected_attempt,
+            )
+            self._next_crash_decision += 1
+            self.crash_decisions.append(decision_record)
+            index = self.crash_issues.index(issue)
+            self.crash_issues[index] = replace(issue, status=new_status)
+            recovery_index = next(i for i, item in enumerate(self.crash_recoveries)
+                                  if item.recovery_id == issue.recovery_id)
+            recovery = self.crash_recoveries[recovery_index]
+            if decision == "block":
+                self.status = "blocked"
+                self.terminal_reason = f"crash_recovery_blocked; issue={issue_id}"
+                self.crash_recoveries[recovery_index] = replace(recovery, status="blocked")
+            elif all(item.status == "continued" for item in self.crash_issues
+                     if item.recovery_id == issue.recovery_id):
+                previous_trigger_id = self.planning_state.active_trigger_id
+                if previous_trigger_id is not None:
+                    for trigger_index, previous_trigger in enumerate(self.replan_triggers):
+                        if (previous_trigger.trigger_id == previous_trigger_id
+                                and previous_trigger.status == "active"):
+                            self.replan_triggers[trigger_index] = replace(
+                                previous_trigger, status="rejected",
+                            )
+                            self._append_trace_event_locked(
+                                "replan_trigger_superseded",
+                                generation_id=self._verification_generation,
+                            )
+                            break
+                trigger = ReplanTrigger(
+                    self._next_plan_trigger, self._verification_generation,
+                    "crash_recovery", "所有不确定调用已由用户逐项结算，必须重新规划。",
+                    caused_by_crash_recovery_id=issue.recovery_id,
+                )
+                self._next_plan_trigger += 1
+                self.replan_triggers.append(trigger)
+                self.planning_state = replace(
+                    self.planning_state, phase="exploring", active_trigger_id=trigger.trigger_id,
+                    trigger_no_progress_commits=0,
+                )
+                self.crash_recoveries[recovery_index] = replace(recovery, status="replanned")
+                self._append_trace_event_locked(
+                    "crash_recovery_trigger", generation_id=self._verification_generation,
+                    record_type="replan_trigger", record_id=trigger.trigger_id,
+                )
+            self._append_trace_event_locked(
+                "crash_recovery_decision", generation_id=self._verification_generation,
+                record_type="crash_decision", record_id=decision_record.decision_id,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return decision_record
 
     def repair_gate(self, name: str, arguments: dict[str, Any],
                     effect_class: EffectClass = "none",
@@ -1401,7 +1805,7 @@ class AgentState:
                                          if item.trigger_id == trigger_id and item.status == "active"), None)
                 if resolved_trigger is None:
                     raise PlanRejected("当前 trigger 已失效")
-                if active is None and resolved_trigger.kind not in ("failure", "blocked_resume"):
+                if active is None and resolved_trigger.kind not in ("failure", "blocked_resume", "crash_recovery"):
                     raise PlanRejected("该 trigger 必须引用当前 active revision")
             if active is not None and resolved_trigger is None:
                 raise PlanRejected("后续 revision 必须引用当前活动 trigger")
@@ -1567,6 +1971,13 @@ class AgentState:
                 self.replan_triggers[index] = replace(
                     resolved_trigger, status="resolved", result_revision_id=revision.revision_id,
                 )
+                if resolved_trigger.kind == "crash_recovery":
+                    for recovery_index, recovery in enumerate(self.crash_recoveries):
+                        if recovery.recovery_id == resolved_trigger.caused_by_crash_recovery_id:
+                            self.crash_recoveries[recovery_index] = replace(
+                                recovery, status="complete",
+                            )
+                            break
                 self._append_trace_event_locked(
                     "trigger_resolved",
                     generation_id=revision.generation_id,
@@ -2317,6 +2728,8 @@ class AgentState:
 
     def record_execution_result(self, result: Any) -> ExecutionAttempt | None:
         """Commit an ExecutionResult and derive attempt/failure/verification facts."""
+        if getattr(result, "outcome", None) == "uncertain":
+            raise ValueError("uncertain outcome 只能由 crash recovery 结算旧 attempt")
         if (getattr(result, "error_kind", None) in (
                 "plan_rejected", "planning_phase_gate", "task_terminal",
             )
@@ -2644,6 +3057,7 @@ class AgentState:
             self.verification_evidence.clear(); self.verification_history.clear()
             self.generations.clear(); self.attempts.clear()
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
+            self.crash_recoveries.clear(); self.crash_issues.clear(); self.crash_decisions.clear()
             self.trace_events.clear()
             self.process_records.clear(); self.process_events.clear(); self.awaiting_process = None
             self._verification_generation = 0; self._last_verified_generation = -1
@@ -2656,6 +3070,7 @@ class AgentState:
             self._failure_retry_counts.clear(); self._original_attempt_arguments.clear(); self._next_recovery = 1
             self._next_trace_sequence = 1
             self._next_process_event = 1
+            self._next_crash_recovery = 1; self._next_crash_issue = 1; self._next_crash_decision = 1
             self._pending_process_controls.clear()
             self._pending_attempts.clear()
             self._revision_attempt_boundaries.clear()
@@ -2695,6 +3110,35 @@ class AgentState:
             if self.status in ("blocked", "failed"): return None
             if self.status == "awaiting_process": return None
             if self.planning_state.phase == "awaiting_approval": return None
+            unresolved = [item for item in self.crash_issues
+                          if item.status in ("unresolved", "investigating")]
+            if unresolved:
+                return {
+                    "unfinished_todos": [],
+                    "unfinished_plan_steps": [],
+                    "verification_required": True,
+                    "repair_phase": self._repair_phase,
+                    "active_failure_id": self._active_failure_id,
+                    "active_recovery_id": self._active_recovery_id,
+                    "crash_recovery": {
+                        "issues": [
+                            {"issue_id": item.issue_id, "tool": item.tool,
+                             "classification": item.classification,
+                             "handler_admitted": item.handler_admitted,
+                             "reason": item.reason}
+                            for item in unresolved[:32]
+                        ],
+                    },
+                    "progress_marker": (
+                        "crash_recovery",
+                        tuple((item.issue_id, item.status) for item in unresolved),
+                        self._verification_generation,
+                    ),
+                    "message": (
+                        "崩溃恢复仍有未结算调用。只能先进行只读调查；"
+                        f"然后逐项使用 /resolve {unresolved[0].issue_id} continue 或 block。"
+                    ),
+                }
             active_processes = [
                 item for item in self.process_records
                 if item.status == "running" or item.write_pending
@@ -2816,7 +3260,8 @@ class AgentState:
                 + ", ".join(f"{item.process_id}(pid={item.pid})" for item in active)
             )
         uncommitted_events = [item.process_id for item in self.process_records
-                              if item.status != "running" and item.terminal_event_id is None]
+                              if item.status not in ("running", "orphaned")
+                              and item.terminal_event_id is None]
         if uncommitted_events and not allow_pending:
             issues.append(
                 "存在尚未提交终止事件的进程: " + ", ".join(uncommitted_events)
@@ -2845,7 +3290,7 @@ class AgentState:
 
             payload = {
                 "format": "mini_agent.state",
-                "format_version": 1,
+                "format_version": 2,
                 "task": self.task,
                 "task_id": self.task_id,
                 "tool_history": deepcopy(self.tool_history),
@@ -2865,6 +3310,9 @@ class AgentState:
                 "attempts": [asdict(item) for item in self.attempts],
                 "failures": [asdict(item) for item in self.failures],
                 "recovery_actions": [asdict(item) for item in self.recovery_actions],
+                "crash_recoveries": [asdict(item) for item in self.crash_recoveries],
+                "crash_issues": [asdict(item) for item in self.crash_issues],
+                "crash_decisions": [asdict(item) for item in self.crash_decisions],
                 "trace_events": [asdict(item) for item in self.trace_events],
                 "process_records": [asdict(item) for item in self.process_records],
                 "process_events": [asdict(item) for item in self.process_events],
@@ -2901,6 +3349,9 @@ class AgentState:
                     "next_trace_sequence": self._next_trace_sequence,
                     "next_task_id": self._next_task_id,
                     "next_process_event": self._next_process_event,
+                    "next_crash_recovery": self._next_crash_recovery,
+                    "next_crash_issue": self._next_crash_issue,
+                    "next_crash_decision": self._next_crash_decision,
                     "pending_process_controls": [
                         {"process_id": process_id, "expected": expected, "attempt_id": attempt_id}
                         for process_id, (expected, attempt_id)
@@ -2935,7 +3386,11 @@ class AgentState:
         """Validate State references and private counters without restoring it."""
         if not isinstance(payload, dict):
             raise SessionExportError("State 导出必须是 JSON object")
-        if payload.get("format") != "mini_agent.state" or payload.get("format_version") != 1:
+        format_version = payload.get("format_version")
+        if (payload.get("format") != "mini_agent.state"
+                or isinstance(format_version, bool)
+                or not isinstance(format_version, int)
+                or format_version not in (1, 2)):
             raise SessionExportError("未知或不支持的 State 导出版本")
 
         def require_type(name: str, expected: type | tuple[type, ...]) -> Any:
@@ -2956,16 +3411,23 @@ class AgentState:
             "verification_evidence", "verification_history", "generations",
             "attempts", "failures", "recovery_actions", "trace_events",
             "process_records", "process_events", "checkpoint_metadata",
+            "crash_recoveries", "crash_issues", "crash_decisions",
         )
+        optional_v1_lists = {"crash_recoveries", "crash_issues", "crash_decisions"}
         for name in list_names:
+            if name in optional_v1_lists and format_version == 1 and name not in payload:
+                continue
             require_type(name, list)
         record_lists = (
             "plan_revisions", "plan_progress_history", "user_plan_decisions",
             "replan_triggers", "verification_evidence", "verification_history",
             "generations", "attempts", "failures", "recovery_actions",
             "trace_events", "process_records", "process_events", "checkpoint_metadata",
+            "crash_recoveries", "crash_issues", "crash_decisions",
         )
         for name in record_lists:
+            if name not in payload:
+                continue
             if any(not isinstance(item, dict) for item in payload[name]):
                 raise SessionExportError(f"State {name} 含非 object 记录")
         planning = require_type("planning_state", dict)
@@ -2981,6 +3443,9 @@ class AgentState:
             "next_trace_sequence", "next_task_id", "next_process_event",
             "pending_process_controls", "pending_attempts", "revision_attempt_boundaries",
         }
+        optional_v1_private = {"next_crash_recovery", "next_crash_issue", "next_crash_decision"}
+        if format_version == 2:
+            required_private.update(optional_v1_private)
         missing_private = sorted(required_private - set(private))
         if missing_private:
             raise SessionExportError("State private 字段缺失: " + ", ".join(missing_private))
@@ -3002,11 +3467,15 @@ class AgentState:
         generation_ids = set(generations)
         for generation in payload["generations"]:
             if generation.get("open_reason") not in {
-                "task_start", "possible_effect", "recovery", "process_exit", "resume",
+                "task_start", "possible_effect", "recovery", "process_exit", "resume", "crash_recovery",
             }:
                 raise SessionExportError("generation open_reason 无效")
             if generation.get("generation_id") == 0 and generation.get("open_reason") != "task_start":
                 raise SessionExportError("初始 generation 必须是 task_start")
+            if generation.get("open_reason") == "crash_recovery":
+                if (not isinstance(generation.get("opened_by_crash_recovery_id"), str)
+                        or not re.fullmatch(r"cr-[1-9][0-9]*", generation["opened_by_crash_recovery_id"])):
+                    raise SessionExportError("crash recovery generation opener 无效")
         current_generation = private.get("verification_generation")
         if not isinstance(current_generation, int) or current_generation < 0:
             raise SessionExportError("verification_generation 无效")
@@ -3088,6 +3557,10 @@ class AgentState:
         unique(attempt_ids, "attempt")
         attempt_set = set(attempt_ids)
         for attempt in attempts:
+            if attempt.get("outcome") not in {
+                "succeeded", "failed", "denied", "timeout", "invalid", "uncertain",
+            }:
+                raise SessionExportError("attempt outcome 无效")
             if attempt.get("pre_generation_id") not in generation_ids or attempt.get("generation_id") not in generation_ids:
                 raise SessionExportError("attempt 引用了不存在的 generation")
             if attempt.get("caused_by_attempt_id") is not None and attempt["caused_by_attempt_id"] not in attempt_set:
@@ -3122,6 +3595,10 @@ class AgentState:
             raise SessionExportError("decision_id 无效")
         unique(decision_ids, "decision")
         for trigger in payload["replan_triggers"]:
+            if trigger.get("kind") not in {
+                "failure", "observation", "user_feedback", "blocked_resume", "crash_recovery",
+            }:
+                raise SessionExportError("replan trigger kind 无效")
             if trigger.get("generation_id") not in generation_ids:
                 raise SessionExportError("replan trigger 引用了不存在的 generation")
             for key, values in (("caused_by_failure_id", failure_set), ("caused_by_attempt_id", attempt_set), ("caused_by_decision_id", {item.get("decision_id") for item in payload["user_plan_decisions"]})):
@@ -3145,6 +3622,12 @@ class AgentState:
                 raise SessionExportError("process record 引用无效")
             if process.get("start_generation_id") not in generation_ids:
                 raise SessionExportError("process record generation 引用无效")
+            if process.get("status") not in {"running", "exited", "failed", "terminated", "orphaned"}:
+                raise SessionExportError("process status 无效")
+            if not isinstance(process.get("write_pending"), bool):
+                raise SessionExportError("process write_pending 类型无效")
+            if process.get("status") == "orphaned" and process.get("write_pending"):
+                raise SessionExportError("orphaned process 不得保留 write_pending")
         event_ids = [item.get("event_id") for item in payload["process_events"]]
         unique(event_ids, "process event")
         for event in payload["process_events"]:
@@ -3162,6 +3645,8 @@ class AgentState:
             "next_plan_decision", "next_plan_trigger", "next_recovery", "next_trace_sequence",
             "next_task_id", "next_process_event", "repair_cycles", "reserved_repair_cycles",
         )
+        if format_version == 2:
+            counters = counters + ("next_crash_recovery", "next_crash_issue", "next_crash_decision")
         for name in counters:
             if (not isinstance(private.get(name), int) or isinstance(private[name], bool)
                     or private[name] < 0):
@@ -3260,6 +3745,199 @@ class AgentState:
             raise SessionExportError("active failure 引用无效")
         if private.get("active_recovery_id") is not None and private["active_recovery_id"] not in recovery_set:
             raise SessionExportError("active recovery 引用无效")
+        crash_recoveries = payload.get("crash_recoveries", [])
+        crash_issues = payload.get("crash_issues", [])
+        crash_decisions = payload.get("crash_decisions", [])
+        if not isinstance(crash_recoveries, list) or not isinstance(crash_issues, list) or not isinstance(crash_decisions, list):
+            raise SessionExportError("crash recovery 列表类型无效")
+        crash_recovery_ids = [item.get("recovery_id") for item in crash_recoveries]
+        crash_issue_ids = [item.get("issue_id") for item in crash_issues]
+        if (any(not isinstance(value, str) or not value for value in crash_recovery_ids + crash_issue_ids)
+                or any(not re.fullmatch(r"cr-[1-9][0-9]*", value) for value in crash_recovery_ids)
+                or any(not re.fullmatch(r"issue-[1-9][0-9]*", value) for value in crash_issue_ids)):
+            raise SessionExportError("crash recovery/issue ID 无效")
+        unique(crash_recovery_ids, "crash recovery")
+        unique(crash_issue_ids, "crash issue")
+        crash_recovery_set = set(crash_recovery_ids)
+        crash_issue_set = set(crash_issue_ids)
+        crash_decision_ids = [item.get("decision_id") for item in crash_decisions]
+        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in crash_decision_ids):
+            raise SessionExportError("crash decision ID 无效")
+        unique(crash_decision_ids, "crash decision")
+        for trigger in payload["replan_triggers"]:
+            if trigger.get("kind") == "crash_recovery":
+                if trigger.get("caused_by_crash_recovery_id") not in crash_recovery_set:
+                    raise SessionExportError("crash recovery trigger 引用无效")
+        for item in crash_recoveries:
+            if (not isinstance(item.get("source_session_id"), str)
+                    or not item.get("source_session_id")
+                    or not isinstance(item.get("source_integrity"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", item.get("source_integrity", ""))
+                    or (not isinstance(item.get("source_session_generation"), int)
+                        or isinstance(item.get("source_session_generation"), bool)
+                        or item.get("source_session_generation") < 1)
+                    or (not isinstance(item.get("source_commit_sequence"), int)
+                        or isinstance(item.get("source_commit_sequence"), bool)
+                        or item.get("source_commit_sequence") < 0)
+                    or (not isinstance(item.get("source_round"), int)
+                        or isinstance(item.get("source_round"), bool)
+                        or item.get("source_round") < 0)
+                    or (not isinstance(item.get("recovery_generation_id"), int)
+                        or isinstance(item.get("recovery_generation_id"), bool)
+                        or item.get("recovery_generation_id") not in generation_ids)
+                    or not isinstance(item.get("issue_ids"), list)
+                    or item.get("status") not in {"resolving", "replanned", "blocked", "complete"}):
+                raise SessionExportError("crash recovery 记录无效")
+            if (not all(isinstance(issue_id, str) for issue_id in item.get("issue_ids", []))
+                    or len(item.get("issue_ids", [])) != len(set(item.get("issue_ids", [])))):
+                raise SessionExportError("crash recovery issue_ids 无效")
+            if not isinstance(item.get("workspace_report", []), list):
+                raise SessionExportError("workspace_report 必须是数组")
+            digest = item.get("workspace_observation_digest")
+            if digest is not None and (not isinstance(digest, str)
+                                       or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise SessionExportError("workspace observation digest 无效")
+            if any(not isinstance(report, str) or len(report) > 500
+                   for report in item.get("workspace_report", [])):
+                raise SessionExportError("workspace_report 无效")
+            if not isinstance(item.get("derived_session_id"), (str, type(None))) or (
+                    item.get("derived_session_id") is not None
+                    and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", item["derived_session_id"])):
+                raise SessionExportError("derived session ID 无效")
+            recovery_generation = next(
+                (generation for generation in payload["generations"]
+                 if generation.get("generation_id") == item.get("recovery_generation_id")),
+                None,
+            )
+            if (not isinstance(recovery_generation, dict)
+                    or recovery_generation.get("open_reason") != "crash_recovery"
+                    or recovery_generation.get("opened_by_crash_recovery_id") != item.get("recovery_id")):
+                raise SessionExportError("crash recovery generation opener 无效")
+            expected_issue_ids = [issue.get("issue_id") for issue in crash_issues
+                                  if issue.get("recovery_id") == item.get("recovery_id")]
+            if item.get("issue_ids") != expected_issue_ids:
+                raise SessionExportError("crash recovery issue_ids 必须精确匹配同 recovery 的有序 issues")
+            owned_issues = [issue for issue in crash_issues
+                            if issue.get("recovery_id") == item.get("recovery_id")]
+            statuses = {issue.get("status") for issue in owned_issues}
+            if item.get("status") == "complete" and statuses - {"continued"}:
+                raise SessionExportError("complete crash recovery 仍有未结算 issue")
+            if item.get("status") == "replanned" and statuses - {"continued"}:
+                raise SessionExportError("replanned crash recovery 仍有未结算 issue")
+            if item.get("status") == "replanned" and not any(
+                    trigger.get("kind") == "crash_recovery"
+                    and trigger.get("caused_by_crash_recovery_id") == item.get("recovery_id")
+                    for trigger in payload["replan_triggers"]):
+                raise SessionExportError("replanned crash recovery 缺少聚合 replan trigger")
+            if item.get("status") == "resolving" and not (statuses - {"continued"}):
+                raise SessionExportError("没有未结算 issue 的 crash recovery 不能保持 resolving")
+            if item.get("status") == "blocked" and "blocked" not in statuses:
+                raise SessionExportError("blocked crash recovery 缺少 blocked issue")
+        for item in crash_issues:
+            if (item.get("recovery_id") not in crash_recovery_set
+                    or not isinstance(item.get("issue_id"), str)
+                    or not isinstance(item.get("invocation_id"), str)
+                    or not isinstance(item.get("tool"), str)
+                    or item.get("effect_class") not in {"none", "possible"}
+                    or not isinstance(item.get("handler_admitted"), bool)
+                    or item.get("classification") == "not_executed" and item.get("handler_admitted")
+                    or item.get("recovery_generation_id") not in generation_ids
+                    or item.get("classification") not in {
+                        "not_executed", "uncertain_state_or_result", "uncertain_side_effect",
+                        "workspace_drift",
+                    }
+                    or item.get("status") not in {"unresolved", "investigating", "continued", "blocked"}):
+                raise SessionExportError("crash issue 记录无效")
+            owner = next(item2 for item2 in crash_recoveries
+                         if item2.get("recovery_id") == item.get("recovery_id"))
+            if item.get("recovery_generation_id") != owner.get("recovery_generation_id"):
+                raise SessionExportError("crash issue recovery generation 归属不一致")
+            if not item.get("invocation_id") or not item.get("tool") or not isinstance(item.get("reason"), str):
+                raise SessionExportError("crash issue identity/reason 无效")
+            classification = item.get("classification")
+            if classification == "workspace_drift":
+                if (item.get("invocation_id") != "workspace-drift"
+                        or item.get("tool") != "workspace"
+                        or item.get("handler_admitted")
+                        or item.get("effect_class") != "none"
+                        or item.get("attempt_id") is not None
+                        or item.get("generation_id") is not None):
+                    raise SessionExportError("workspace drift issue 形状无效")
+            elif classification == "not_executed":
+                if item.get("handler_admitted") or item.get("attempt_id") is not None:
+                    raise SessionExportError("not_executed issue 不得引用 handler attempt")
+                if item.get("status") != "continued":
+                    raise SessionExportError("not_executed issue 必须自动结算")
+            elif classification == "uncertain_state_or_result" and (
+                    not item.get("handler_admitted") or item.get("effect_class") != "none"):
+                raise SessionExportError("uncertain_state_or_result issue 形状无效")
+            elif classification == "uncertain_side_effect" and (
+                    not item.get("handler_admitted") or item.get("effect_class") != "possible"):
+                raise SessionExportError("uncertain_side_effect issue 形状无效")
+            if (item.get("generation_id") is not None
+                    and (not isinstance(item.get("generation_id"), int)
+                         or isinstance(item.get("generation_id"), bool)
+                         or item.get("generation_id") not in generation_ids)):
+                raise SessionExportError("crash issue generation 引用无效")
+            if item.get("attempt_id") is not None and item.get("attempt_id") not in attempt_set:
+                raise SessionExportError("crash issue attempt 引用无效")
+            if item.get("attempt_id") is not None:
+                attempt = next(attempt for attempt in attempts
+                               if attempt.get("attempt_id") == item.get("attempt_id"))
+                if (attempt.get("tool") != item.get("tool")
+                        and item.get("tool") != "process"):
+                    raise SessionExportError("crash issue attempt/tool 引用不一致")
+                if (attempt.get("generation_id") != item.get("generation_id")
+                        or attempt.get("effect_class") != item.get("effect_class")
+                        or attempt.get("handler_admitted") is not True):
+                    raise SessionExportError("crash issue attempt 引用不一致")
+        for item in crash_decisions:
+            issue = next((candidate for candidate in crash_issues
+                          if candidate.get("issue_id") == item.get("issue_id")), None)
+            if (item.get("recovery_id") not in crash_recovery_set
+                    or item.get("issue_id") not in crash_issue_set
+                    or issue is None
+                    or issue.get("recovery_id") != item.get("recovery_id")
+                    or not isinstance(item.get("decision_id"), int)
+                    or isinstance(item.get("decision_id"), bool)
+                    or item.get("decision") not in {"investigate", "continue", "block"}
+                    or item.get("generation_id") not in generation_ids):
+                raise SessionExportError("crash decision 记录无效")
+            investigation_attempt_id = item.get("investigation_attempt_id")
+            if investigation_attempt_id is not None and (
+                    not isinstance(investigation_attempt_id, str)
+                    or not investigation_attempt_id.startswith("a-")
+                    or investigation_attempt_id not in attempt_set):
+                raise SessionExportError("crash decision investigation attempt 引用无效")
+            if item.get("generation_id") != issue.get("recovery_generation_id"):
+                raise SessionExportError("crash decision generation 与 issue recovery 不一致")
+            if item.get("decision") == "investigate" and item.get("investigation_attempt_id") is not None:
+                raise SessionExportError("investigate 决定不能预先声称调查 attempt")
+            if item.get("decision") == "continue":
+                selected = item.get("investigation_attempt_id")
+                if selected is None:
+                    raise SessionExportError("continue 决定缺少调查 attempt")
+                attempt = next(attempt for attempt in attempts if attempt.get("attempt_id") == selected)
+                if (attempt.get("generation_id") != issue.get("recovery_generation_id")
+                        or attempt.get("outcome") != "succeeded"
+                        or attempt.get("permission") != "allowed"
+                        or attempt.get("effect_class") != "none"
+                        or attempt.get("handler_admitted") is not True):
+                    raise SessionExportError("continue 调查 attempt 不属于恢复 generation")
+                investigate_events = [
+                    event.get("sequence_id") for event in payload["trace_events"]
+                    if event.get("record_type") == "crash_decision"
+                    and event.get("record_id") in {
+                        decision.get("decision_id") for decision in crash_decisions
+                        if decision.get("issue_id") == issue.get("issue_id")
+                        and decision.get("decision") == "investigate"
+                    }
+                ]
+                attempt_events = [event.get("sequence_id") for event in payload["trace_events"]
+                                  if event.get("record_type") == "attempt"
+                                  and event.get("record_id") == selected]
+                if not investigate_events or not attempt_events or max(investigate_events) >= max(attempt_events):
+                    raise SessionExportError("调查 attempt 必须发生在 investigate 决定之后")
         for checkpoint in payload["checkpoint_metadata"]:
             if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("checkpoint_id"), str):
                 raise SessionExportError("checkpoint metadata 无效")
@@ -3267,14 +3945,15 @@ class AgentState:
                 raise SessionExportError("checkpoint metadata 引用无效")
 
     @classmethod
-    def restore_session(cls, payload: Any, workspace_root: str | None = None) -> "AgentState":
+    def restore_session(cls, payload: Any, workspace_root: str | None = None,
+                        *, allow_pending: bool = False) -> "AgentState":
         """Rebuild authoritative State facts from a validated session export.
 
         This conversion never restores operating-system handles.  Checkpoint
         metadata and historical process records are imported as audit facts;
         their live capabilities are intentionally supplied by the new runtime.
         """
-        cls.validate_session_export(payload)
+        cls.validate_session_export(payload, allow_pending=allow_pending)
         if not isinstance(payload, dict):  # keeps type checkers and callers honest
             raise SessionExportError("State 导出必须是 JSON object")
 
@@ -3326,7 +4005,7 @@ class AgentState:
             raw["trigger_id"], raw["generation_id"], raw["kind"], raw["reason"],
             raw.get("caused_by_failure_id"), raw.get("caused_by_attempt_id"),
             raw.get("caused_by_decision_id"), raw.get("status", "active"),
-            raw.get("result_revision_id"),
+            raw.get("result_revision_id"), raw.get("caused_by_crash_recovery_id"),
         ) for raw in payload["replan_triggers"]]
         planning = PlanningState(**{
             key: payload["planning_state"][key]
@@ -3354,6 +4033,7 @@ class AgentState:
             raw["generation_id"], raw.get("opened_by_attempt_id"),
             raw.get("opened_by_failure_id"), raw.get("opened_by_recovery_id"),
             raw.get("opened_by_process_event_id"), raw.get("open_reason", "task_start"),
+            raw.get("opened_by_crash_recovery_id"),
         ) for raw in payload["generations"]]
         attempts = [ExecutionAttempt(
             raw["attempt_id"], raw["pre_generation_id"], raw["generation_id"], raw["tool"],
@@ -3402,6 +4082,25 @@ class AgentState:
             tuple(awaiting_raw.get("last_stderr_offsets", [])),
         )
 
+        crash_recoveries = [CrashRecoveryRecord(
+            raw["recovery_id"], raw["source_session_id"], raw["source_session_generation"],
+            raw["source_commit_sequence"], raw["source_integrity"], raw["source_round"],
+            raw["recovery_generation_id"], tuple(raw.get("workspace_report", [])),
+            tuple(raw.get("issue_ids", [])), raw.get("status", "resolving"),
+            raw.get("derived_session_id"),
+            raw.get("workspace_observation_digest"),
+        ) for raw in payload.get("crash_recoveries", [])]
+        crash_issues = [CrashRecoveryIssue(
+            raw["issue_id"], raw["recovery_id"], raw["invocation_id"], raw["tool"],
+            raw["effect_class"], raw["handler_admitted"], raw.get("attempt_id"),
+            raw.get("generation_id"), raw["recovery_generation_id"], raw["classification"],
+            raw["reason"], raw.get("status", "unresolved"),
+        ) for raw in payload.get("crash_issues", [])]
+        crash_decisions = [CrashRecoveryDecision(
+            raw["decision_id"], raw["recovery_id"], raw["issue_id"], raw["decision"],
+            raw["feedback"], raw["generation_id"], raw.get("investigation_attempt_id"),
+        ) for raw in payload.get("crash_decisions", [])]
+
         state = cls(
             task=payload["task"], task_id=payload["task_id"], tool_history=deepcopy(payload["tool_history"]),
             files_changed=deepcopy(payload["files_changed"]), errors=deepcopy(payload["errors"]),
@@ -3411,6 +4110,8 @@ class AgentState:
             stagnation_state=stagnation, verification_evidence=evidence,
             verification_history=verification_history, generations=generations, attempts=attempts,
             failures=failures, recovery_actions=recoveries, trace_events=trace_events,
+            crash_recoveries=crash_recoveries, crash_issues=crash_issues,
+            crash_decisions=crash_decisions,
             process_records=process_records, process_events=process_events,
             awaiting_process=awaiting, recovery_notice=payload["recovery_notice"],
         )
@@ -3423,6 +4124,9 @@ class AgentState:
             "next_trace_sequence", "next_task_id", "next_process_event",
         ):
             setattr(state, f"_{name}", deepcopy(private[name]))
+        state._next_crash_recovery = int(private.get("next_crash_recovery", 1))
+        state._next_crash_issue = int(private.get("next_crash_issue", 1))
+        state._next_crash_decision = int(private.get("next_crash_decision", 1))
         state._fingerprint_counts = {
             (item["tool"], item["arguments_hash"]): item["count"]
             for item in private["fingerprint_counts"]
@@ -3549,6 +4253,9 @@ class AgentState:
                 "attempts": [asdict(x) for x in self.attempts],
                 "failures": [asdict(x) for x in self.failures],
                 "recovery_actions": [asdict(x) for x in self.recovery_actions],
+                "crash_recoveries": [asdict(x) for x in self.crash_recoveries],
+                "crash_issues": [asdict(x) for x in self.crash_issues],
+                "crash_decisions": [asdict(x) for x in self.crash_decisions],
                 "trace_events": [asdict(x) for x in self.trace_events],
                 "processes": [asdict(x) for x in self.process_records],
                 "process_events": [asdict(x) for x in self.process_events],

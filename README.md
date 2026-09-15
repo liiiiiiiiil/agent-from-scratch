@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程到 `v0.32`（第 32 课：持久化工具执行边界）。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码正在完成 `v0.33`（第 33 课：崩溃恢复与不确定副作用交接）的评审修复。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -68,6 +68,7 @@
     <tr><td><strong>v0.30</strong></td><td><a href="./docs/tutorials/30-session-persistence.md">会话持久化与安全点</a></td><td>通过 /save 显式开启本地保存，在完整安全点原子更新 active 会话，退出或任务切换时在进程清理后提交 clean；本版只能校验文件，不能恢复任务。</td></tr>
     <tr><td><strong>v0.31</strong></td><td><a href="./docs/tutorials/31-safe-resume.md">从完整安全点恢复会话</a></td><td>用 --resume 检查 schema 2、工作区清单和 clean 交接，在新进程重建运行时；旧验证、进程句柄和 checkpoint 回滚资格不会被继承。</td></tr>
     <tr><td><strong>v0.32</strong></td><td><a href="./docs/tutorials/32-durable-tool-boundaries.md">持久化工具执行边界</a></td><td>在同一 schema 3 session 文件中按 handler 准入、单 call 结果和整轮 complete 提交 State 与 Context；半轮只用于诊断，暂不续跑。</td></tr>
+    <tr><td><strong>v0.33</strong></td><td><a href="./docs/tutorials/33-crash-recovery.md">崩溃恢复与不确定副作用交接</a></td><td>从 active pending 边界派生新 session，逐项区分未执行与不确定事实；不自动重放，先只读调查并由用户决定继续或阻塞。</td></tr>
     <tr><td>后续版本</td><td>按需追加</td><td>继续扩展记忆、沙箱等能力。</td></tr>
   </tbody>
 </table>

@@ -453,6 +453,17 @@ class ToolExecutor:
                 "not_checked", False, "invalid", 0, "none", text, text,
                 error_kind="internal_tool",
             )
+        if state is not None and hasattr(state, "crash_recovery_gate"):
+            raw_arguments = arguments if isinstance(arguments, dict) else {}
+            crash_error = state.crash_recovery_gate(
+                name, raw_arguments, tool.effect_for(raw_arguments),
+            )
+            if crash_error:
+                return ExecutionResult(
+                    name, deepcopy(raw_arguments), "not_checked", False, "invalid", 0,
+                    tool.effect_for(raw_arguments), crash_error, _brief(crash_error),
+                    error_kind="crash_recovery_gate",
+                )
         if (name != "request_replan" and state is not None
                 and hasattr(state, "planning_gate")):
             raw_arguments = arguments if isinstance(arguments, dict) else {}
@@ -490,6 +501,14 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
+        if state is not None and hasattr(state, "crash_recovery_gate"):
+            crash_error = state.crash_recovery_gate(name, normalized, effect_class)
+            if crash_error:
+                return ExecutionResult(
+                    name, normalized, "not_checked", False, "invalid", 0,
+                    effect_class, crash_error, _brief(crash_error),
+                    error_kind="crash_recovery_gate",
+                )
         if name in {"terminate_process", "kill_process", "write_process"} and state is not None:
             manager = getattr(state, "_process_manager", None)
             if manager is None or manager.get_owned(state.task_id, normalized["process_id"]) is None:
@@ -509,7 +528,20 @@ class ToolExecutor:
                     effect_class, phase_error, _brief(phase_error),
                     error_kind="planning_phase_gate",
                 )
-        if state is not None and hasattr(state, "repair_gate"):
+        # Crash recovery has a deliberately narrow investigation lane.  Once
+        # the crash gate has admitted a genuinely read-only observation, the
+        # ordinary Repair Loop gate must not turn the preserved verification or
+        # diagnosis obligation into a deadlock.  This does not clear any
+        # repair state and does not admit effects or verification commands.
+        crash_investigation = bool(
+            state is not None
+            and hasattr(state, "has_unresolved_crash_recovery")
+            and state.has_unresolved_crash_recovery()
+            and effect_class == "none"
+            and hasattr(state, "crash_recovery_gate")
+            and state.crash_recovery_gate(name, normalized, effect_class) is None
+        )
+        if state is not None and hasattr(state, "repair_gate") and not crash_investigation:
             phase_error = state.repair_gate(
                 name, normalized, effect_class, reservation=reservation,
             )

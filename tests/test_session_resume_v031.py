@@ -22,6 +22,7 @@ from mini_agent.session import SessionBusyError, SessionStore, SessionValidation
 from mini_agent.state import (
     AgentState, ExecutionAttempt, VerificationEvidence, canonical_arguments_hash,
 )
+from mini_agent.tools.base import ExecutionResult
 from mini_agent.trace import build_trace
 
 
@@ -202,6 +203,38 @@ def test_trace_replays_old_facts_and_new_resume_origin_from_state_only(tmp_path:
     assert report["integrity"] == {"status": "complete", "issues": []}
     assert any(item.get("kind") == "session_resumed" for item in report["trace_events"])
     assert any(item.get("kind") == "task_started" for item in report["trace_events"])
+
+
+def test_clean_schema3_resume_preserves_unresolved_crash_handoff(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = AgentState()
+    state.begin_task("preserve crash handoff")
+    state.begin_crash_recovery(
+        "source-session", 1, 1, "a" * 64, 2,
+        [{
+            "invocation_id": "inv-1", "tool": "write_file", "effect_class": "possible",
+            "handler_admitted": True, "attempt_id": "a-1", "generation_id": 1,
+            "pre_generation_id": 0, "permission": "allowed", "arguments_hash": "b" * 64,
+            "arguments_summary": {"path": "task.txt", "content": "<str:4>"},
+        }],
+    )
+    context = ContextManager(state, [{"role": "user", "content": "continue"}])
+    store = SessionStore(tmp_path / "sessions")
+    envelope = store.save(None, state, context, workspace_root=workspace, handoff_status="clean")
+
+    runtime = prepare_resume(store, envelope["session_id"], workspace).claim()
+    assert runtime.recovery_mode == "safe_point"
+    assert runtime.state.unresolved_crash_issues[0].classification == "uncertain_side_effect"
+    assert runtime.state.verification_evidence == []
+    issue = runtime.state.unresolved_crash_issues[0]
+    runtime.state.resolve_crash_issue(issue.issue_id, "investigate", "调查恢复后的事实")
+    runtime.state.record_execution_result(ExecutionResult(
+        "read_file", {"path": str(workspace)}, "allowed", True, "succeeded", 0,
+        "none", "observation", "observation",
+    ))
+    runtime.state.resolve_crash_issue(issue.issue_id, "continue", "接受用户风险决定")
+    assert runtime.state.crash_recoveries[0].status == "replanned"
 
 
 def test_workspace_file_directory_and_untracked_changes_are_rejected(tmp_path: Path):

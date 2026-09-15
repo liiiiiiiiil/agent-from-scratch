@@ -4,7 +4,7 @@
 
 ## 0. 心智模型：一句话版本
 
-**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入，v0.22 又把 active Plan Contract 的有界执行视图放入同一条语义轨道；v0.24 继续加入活动 replan trigger、修订预算和 LoopStagnationState：模型看到的不是“最近一次文字说了什么”，而是当前计划、步骤依赖、真实触发来源以及是否必须诊断、恢复、重规划或独立验证。完整 `plan_revisions` 和 `plan_progress_history` 保存在 State，不直接复制进 LLM 上下文；v0.21 的 Trace 对缺失 `todo_revisions` 继续安全降级为空。
+**上下文不是一份存储，而是一个每轮重新计算的视图**。v0.20 还把 Repair Loop 阶段作为不可丢失的关键状态注入，v0.22 又把 active Plan Contract 的有界执行视图放入同一条语义轨道；v0.24 继续加入活动 replan trigger、修订预算和 LoopStagnationState；v0.33 再加入受保护的 crash recovery 摘要：模型看到的不是“最近一次文字说了什么”，而是当前计划、步骤依赖、真实触发来源、未结算 issue 以及是否必须只读调查、重规划或独立验证。完整 `plan_revisions`、`plan_progress_history` 和 crash recovery 记录保存在 State，Structured State 只显示有界摘要；v0.21 的 Trace 对缺失 `todo_revisions` 继续安全降级为空。
 
 ```text
 view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
@@ -64,7 +64,9 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 └──► 两条轨道在下一轮的 ① 重新汇合 —— 循环，直到纯文本收尾或轮次上限
 ```
 
-Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、独占 `recover` 或独占 `request_replan`；failure trigger 进入 Explore 后只允许只读调查或独占 `commit_plan`；`verification_required` 要求下一回合只有一个独立 verification。v0.24 的停滞计数、短 hash、活动 trigger 来源和 gate 合法下一动作也来自同一份 State 快照。上下文压缩只处理协议历史，不能删除计划执行视图、`repair_loop`、活动 failure/recovery、generation、预算或停滞状态。
+恢复时还有一条不可裁剪的交接事实：`crash_recovery` issue 会插入 Structured State，原始参数和 stdin 正文不进入摘要。未结算 issue 存在时，agent loop 只允许只读调查；所有 issue 结算后必须经过新的计划和 verification 才能收口。
+
+Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要求只读调查、独占 `recover` 或独占 `request_replan`；failure trigger 进入 Explore 后只允许只读调查或独占 `commit_plan`；`verification_required` 要求下一回合只有一个独立 verification。v0.24 的停滞计数、短 hash、活动 trigger 来源和 gate 合法下一动作也来自同一份 State 快照。v0.33 未结算 crash issue 会进一步收窄 gate 到无副作用观察，不能被历史裁剪或摘要覆盖。上下文压缩只处理协议历史，不能删除计划执行视图、`repair_loop`、活动 failure/recovery、crash recovery、generation、预算或停滞状态。
 
 ## 2. 关键机制一：双轨记录（本架构的核心取舍）
 
@@ -145,6 +147,8 @@ window = CONTEXT_WINDOW
 5. Runtime Notice 只发一次，且在最终视图构建成功后才消费（context.py:429）——压缩重建消息不会吞掉提醒；v0.20 的阶段性 Notice 会明确指出下一步合法动作，v0.24 的停滞 Notice 还会显示计数、类别和同时满足 Planning / Repair gate 的下一动作。
 6. Trace & Replay 读取独立的 `state.snapshot()` 视图，不进入 LLM 消息，不调用执行链，也不改变上下文或 State。
 7. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
+
+8. v0.33 的 `crash_recoveries`、`crash_issues` 和 `crash_decisions` 是不可裁剪的恢复事实；Structured State 只显示有界摘要，包含 issue ID、工具、分类、准入状态、公开原因和下一动作，不显示原始参数、shell 命令或 stdin。未结算 issue 存在时只允许获准的无副作用观察，所有 issue 结算后仍需新计划和独立 verification。
 
 ## 6. 代码速查
 

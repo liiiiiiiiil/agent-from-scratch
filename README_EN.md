@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: code and tutorials reach `v0.32` (lesson 32: durable tool execution boundaries). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the `v0.33` crash-recovery implementation is still in review remediation (lesson 33: crash recovery and uncertain-effect handoff). The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -68,6 +68,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.30</strong></td><td><a href="./docs/tutorials/30-session-persistence.md">Session persistence and safe points</a></td><td>Opt in with /save, atomically update an active session only at complete safe points, and commit clean after process cleanup; this version validates files but cannot resume a task.</td></tr>
     <tr><td><strong>v0.31</strong></td><td><a href="./docs/tutorials/31-safe-resume.md">Safe resume from a complete safe point</a></td><td>Use --resume to check schema 2, the workspace manifest, and clean handoff before rebuilding a fresh runtime; old verification, process handles, and checkpoint rollback rights are not inherited.</td></tr>
     <tr><td><strong>v0.32</strong></td><td><a href="./docs/tutorials/32-durable-tool-boundaries.md">Durable tool execution boundaries</a></td><td>Commit handler admission, each ordered call result, and the complete round with State and Context in one schema 3 session file; incomplete rounds are diagnostic only and are not resumed.</td></tr>
+    <tr><td><strong>v0.33</strong></td><td><a href="./docs/tutorials/33-crash-recovery.md">Crash recovery and uncertain-effect handoff</a></td><td>Derive a new session from an active pending boundary, classify interrupted calls, never replay them, and require read-only investigation plus an explicit user decision.</td></tr>
     <tr><td>Later versions</td><td>Added as needed</td><td>Continue expanding memory, sandboxing, and related capabilities.</td></tr>
   </tbody>
 </table>

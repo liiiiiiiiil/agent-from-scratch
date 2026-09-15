@@ -115,6 +115,48 @@ def _render_process_wait(state):
     return "\n".join(lines)
 
 
+def _render_crash_recovery(state, *, source_session_id=None, derived_session_id=None,
+                           workspace_report=None):
+    """Render bounded recovery facts without exposing original arguments."""
+    snapshot = state.snapshot()
+    lines = ["检测到未完成的 durable tool boundary，已进入崩溃恢复。"]
+    if source_session_id:
+        lines.append(f"源 session：{source_session_id}")
+    if derived_session_id:
+        lines.append(f"派生 session：{derived_session_id}")
+    if workspace_report:
+        lines.append("工作区变化（仅调查线索，不能证明 handler 是否执行）：")
+        lines.extend(f"- {item}" for item in workspace_report[:20])
+    orphaned = [item for item in snapshot.get("processes", [])
+                if isinstance(item, dict) and item.get("status") == "orphaned"]
+    if orphaned:
+        lines.append("旧进程风险（仅记录，不可控制，也不声称已退出）：")
+        lines.extend(
+            f"- process_id={item.get('process_id')} pid={item.get('pid')} stdin="
+            f"{item.get('stdin_mode', 'closed')}/{item.get('stdin_state', 'disabled')}"
+            for item in orphaned[:16]
+        )
+    lines.append("调用分类：")
+    for issue in snapshot.get("crash_issues", []):
+        lines.append(
+            f"- {issue.get('issue_id')}: {issue.get('tool')} / "
+            f"{issue.get('classification')} / handler_admitted="
+            f"{str(bool(issue.get('handler_admitted'))).lower()} / "
+            f"status={issue.get('status')}"
+        )
+        if issue.get("reason"):
+            lines.append(f"  原因：{_single_line_notice(issue.get('reason'), 300)}")
+    unresolved = [item for item in snapshot.get("crash_issues", [])
+                  if item.get("status") in ("unresolved", "investigating")]
+    if unresolved:
+        lines.append(
+            f"请先只读调查，然后逐项使用 /resolve <issue_id> investigate|continue|block <反馈>。"
+        )
+    else:
+        lines.append("未执行调用已自动补入明确结果；其余恢复义务已结算，下一步必须重新规划并验证。")
+    return "\n".join(lines)
+
+
 def main():
     global registry
     if sys.platform == "win32":
@@ -127,6 +169,8 @@ def main():
     session_id = None
     clean_shutdown = False
     resumed = False
+    recovery_mode = "safe_point"
+    source_session_id = None
     persistence_halted = False
     if argv and argv[0] == "--resume":
         if len(argv) != 2 or not argv[1].strip():
@@ -153,6 +197,9 @@ def main():
         tool_executor = runtime.tool_executor
         protected_messages = runtime.protected_messages
         registry = run_registry
+        source_session_id = runtime.source_session_id
+        session_id = runtime.session_id
+        recovery_mode = runtime.recovery_mode
         resumed = True
         first_task = None
         first_mode = "auto"
@@ -247,7 +294,12 @@ def main():
         return True
 
     if resumed:
-        if state.planning_state.phase == "awaiting_approval":
+        if recovery_mode == "crash_recovery" or state.has_unresolved_crash_recovery():
+            cli_notice(_render_crash_recovery(
+                state, source_session_id=source_session_id,
+                derived_session_id=session_id, workspace_report=runtime.workspace_report,
+            ))
+        elif state.planning_state.phase == "awaiting_approval":
             cli_notice("会话已恢复；" + _render_plan_for_approval(state))
         elif state.status == "blocked":
             cli_notice(
@@ -286,7 +338,7 @@ def main():
             return False
         return True
 
-    def run_task(user_input, mode="auto"):
+    def run_task(user_input, mode="auto", *, crash_investigation=False):
         nonlocal session_id, persistence_halted
         if persistence_halted:
             cli_notice("持久化已停止；请检查当前 session 文件和独占锁后重新启动。")
@@ -296,6 +348,10 @@ def main():
                 state.begin_task(user_input, mode=mode)
             else:
                 state.task = user_input
+        if (hasattr(state, "has_unresolved_crash_recovery")
+                and state.has_unresolved_crash_recovery() and not crash_investigation):
+            cli_notice("崩溃恢复仍有未结算 issue；普通输入被拦截，请先使用 /resolve。")
+            return
         if state.status == "awaiting_process":
             sync_processes()
             if state.status not in ("blocked", "failed"):
@@ -362,7 +418,9 @@ def main():
                 status_notice(f"仍在调查 revision {revision_id}；若原计划可用，输入 /review {revision_id}。")
             else:
                 status_notice("仍在只读调查阶段，请继续调查并提交计划。")
-        elif state.status == "running":
+        elif (state.status == "running"
+              and not (hasattr(state, "has_unresolved_crash_recovery")
+                       and state.has_unresolved_crash_recovery())):
             state.status = "done"
         if session_id is not None:
             save_session("active")
@@ -382,7 +440,43 @@ def main():
             if not user_input or user_input.lower() in ("exit", "quit"):
                 break
             cli_output.input_end()
+            if user_input == "/resolve" or user_input.startswith("/resolve "):
+                parts = user_input.split(maxsplit=3)
+                if len(parts) != 4 or parts[2] not in ("investigate", "continue", "block"):
+                    cli_notice("用法: /resolve <issue_id> investigate|continue|block <反馈>")
+                    continue
+                if not hasattr(state, "resolve_crash_issue"):
+                    cli_notice("当前版本不支持 crash recovery issue。")
+                    continue
+                issue_id, decision, feedback = parts[1], parts[2], parts[3]
+                try:
+                    state.resolve_crash_issue(issue_id, decision, feedback)
+                    if session_id is not None:
+                        save_session("active")
+                    if decision == "investigate":
+                        run_task(
+                            f"只读调查 crash recovery issue {issue_id}。用户反馈：{feedback}。"
+                            "只能使用只读观察工具，不能执行副作用、verification 或重放原调用。",
+                            crash_investigation=True,
+                        )
+                    elif decision == "continue":
+                        if state.has_unresolved_crash_recovery():
+                            cli_notice("该 issue 已结算；请继续处理其他未结算 issue。")
+                        else:
+                            run_task(
+                                "所有 crash recovery issue 已由用户逐项结算。请进入只读 Explore，"
+                                "提交或复核引用 crash_recovery trigger 的新计划，不得沿旧计划直接执行。"
+                            )
+                    else:
+                        cli_notice("该任务已因用户决定 block；后续只允许 /new。")
+                except (ValueError, PlanRejected) as error:
+                    cli_notice(f"crash recovery 决定无效：{_single_line_notice(error, 500)}")
+                continue
             if user_input == "/resume" or user_input.startswith("/resume "):
+                if (hasattr(state, "has_unresolved_crash_recovery")
+                        and state.has_unresolved_crash_recovery()):
+                    cli_notice("崩溃恢复仍有未结算 issue；通用 /resume 被拦截，请先使用 /resolve。")
+                    continue
                 feedback = user_input[len("/resume"):].strip()
                 if not feedback:
                     cli_notice("用法: /resume <反馈>")
@@ -400,6 +494,10 @@ def main():
                 cli_notice("用法: /save")
                 continue
             if user_input.split(maxsplit=1)[0] in ("/approve", "/reject", "/continue", "/review"):
+                if (hasattr(state, "has_unresolved_crash_recovery")
+                        and state.has_unresolved_crash_recovery()):
+                    cli_notice("崩溃恢复仍有未结算 issue；计划审批和复核被拦截，请先使用 /resolve。")
+                    continue
                 parts = user_input.split(maxsplit=2)
                 command = parts[0]
                 needs_feedback = command in ("/reject", "/continue")
@@ -465,6 +563,14 @@ def main():
                     cli_notice(f"Trace 查询失败：{error}")
                     continue
                 cli_notice(render_trace(report))
+                continue
+            if (hasattr(state, "has_unresolved_crash_recovery")
+                    and state.has_unresolved_crash_recovery()
+                    and not (user_input == "/new" or user_input.startswith("/new "))):
+                if state.status in ("blocked", "failed", "done"):
+                    cli_notice("任务已终止且仍有 crash recovery issue；只能使用 /new <任务>。")
+                    continue
+                cli_notice("崩溃恢复仍有未结算 issue；普通输入被拦截，请先使用 /resolve。")
                 continue
             if user_input == "/reset":
                 if not cleanup_task_boundary():
