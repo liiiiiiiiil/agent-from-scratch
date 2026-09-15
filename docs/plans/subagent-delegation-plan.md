@@ -1,15 +1,15 @@
 # 阶段十：受控子代理委派（Controlled Subagent Delegation）实施计划
 
-> 状态：`v0.34` 已实现；`v0.35`–`v0.37` 待实施
-> 建议版本范围：`v0.34`–`v0.37`
+> 状态：`v0.34` 已实现并保留；`v0.35`–`v0.39` 待实施
+> 建议版本范围：`v0.34`–`v0.39`
 > 能力前置：阶段七结构化计划（`v0.22`–`v0.25`）、阶段八任务与进程边界（`v0.26`–`v0.29`）、阶段九的安全恢复与持久化工具边界（`v0.30`–`v0.32`）
 > 关联计划：`adaptive-planning-plan.md`、`process-management-plan.md`、`session-persistence-resume-plan.md`
 
-`v0.33 Crash Recovery` 不是只读 Subagent 的硬前置。`v0.34`–`v0.36` 的子代理不修改文件、不执行 shell、不启动或控制进程，也不调用其他子代理；父进程在子代理运行中崩溃时，最坏结果是未提交的调查结果丢失和一次额外的模型成本，而不是重复工作区副作用。`v0.37` 开始持久化委派生命周期时，才必须与 `v0.33` 的 incomplete invocation、恢复分类和用户交接语义对齐。若阶段九按路线先完成 `v0.33`，阶段十直接复用其边界；若并行推进，则 `v0.37` 在合并前以 `v0.33` 的最终协议为准。
+`v0.33 Crash Recovery` 不是只读 Subagent 的硬前置。`v0.34`–`v0.38` 的子代理不修改文件、不执行 shell、不启动或控制进程，也不调用其他子代理；父进程在子代理运行中崩溃时，最坏结果是未提交的调查结果丢失和一次额外的模型成本，而不是重复工作区副作用。`v0.39` 开始持久化委派生命周期时，才必须与 `v0.33` 的 incomplete invocation、恢复分类和用户交接语义对齐。若阶段九按路线先完成 `v0.33`，阶段十直接复用其边界；若并行推进，则 `v0.39` 在合并前以 `v0.33` 的最终协议为准。
 
 ## 1. 目标与定位
 
-当前 `mini_agent` 只有一个执行上下文。它可以规划、调用多个工具并并发执行同轮的只读调用，但所有调查、判断、修改和验证仍由同一个模型上下文承担。复杂项目任务中，不相关的调查材料会共同占用父上下文，多个独立问题也无法被分配给有明确范围和预算的工作单元。
+进入阶段十之前，`mini_agent` 的调查、判断、修改和验证由同一个模型上下文承担。已实现的 `v0.34` 增加了同步只读子代理和独立上下文，但尚未统一父子控制循环，也没有按实例选择 provider/model 的正式配置能力。
 
 阶段十要回答的问题是：**怎样把认知调查分给多个受控子代理，同时继续由父 Agent 独占执行权、权限边界、主计划和完成判定？**
 
@@ -31,20 +31,26 @@
                                                         用户回复
 ```
 
-四个版本依次解决最小委派合同、生命周期与预算、有界并行，以及可审计的持久交付。第一版即提供完整 Task / Result Contract，不先暴露一个只有自由文本参数的临时工具。
+六个版本依次解决最小委派合同、统一运行循环、多 provider、生命周期与预算、有界并行，以及可审计的持久交付。保留 `v0.34` 的已实现行为，不要求回退；原计划的生命周期、并行、持久化分别顺延至 `v0.37`、`v0.38`、`v0.39`。这些是本计划的后续版本安排，其他路线和导航在对应版本实施时同步。
+
+两条核心原则：
+
+1. Parent Agent 与 Subagent 共享同一个 canonical Agent Runtime / Loop 实现，即唯一维护的 `LLM → Tool → Observation` 控制循环。两者的差异通过 Context、State、Tool View、Model、Budget、Permission 和 Completion Policy 配置表达；实例隔离不意味着复制循环代码。
+2. 支持类似用户所述 opencoder 的多 provider 使用方式：配置多个模型服务提供方，父子可选择不同 provider/model；协议差异由适配器处理，不为每个 provider 新建 Agent Loop。本计划将其落实为下面的能力合同，不以复刻某个外部产品的全部功能为目标。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
 - 父 Agent 通过显式 `delegate_task` 工具创建一个范围清晰的调查任务。
-- 子代理拥有独立的 State、Context、循环控制和提示词，只接收项目指令、委派合同及父 Agent 明确选择的事实。
+- 子代理拥有独立的 State、Context、循环执行状态和提示词，但从 `v0.35` 起与父 Agent 使用同一循环实现；只接收项目指令、委派合同及父 Agent 明确选择的事实。
+- `v0.36` 提供多 provider 配置、显式模型绑定和统一消息适配；同一父任务内的父子模型可以来自不同服务方。
 - 不复制工具定义；共享不可变工具定义，通过只读 `FilteredToolRegistryView` 暴露显式允许的能力子集。
 - 定义可校验、有大小上限的 `DelegatedTask`、`SubagentResult`、`Finding`、`EvidenceRef` 和 `UsageRecord`。
 - 建立单子代理预算和父任务聚合预算，约束轮次、模型调用、工具调用、token、结果大小、墙钟时间、子代理总数和并发数。
 - 将执行结果与结果交付分开：子代理先产生 `result_ready`，只有结果已进入父 State 和对应父 Context 后才是 `committed`。
-- `v0.36` 支持多个只读子代理有界并行；实际完成可以乱序，父工具结果仍按模型调用顺序提交。
-- `v0.37` 将委派状态、结果摘要、Trace 和 session 恢复连接起来，并与 Crash Recovery 的不完整调用分类对齐。
+- `v0.38` 支持多个只读子代理有界并行；实际完成可以乱序，父工具结果仍按模型调用顺序提交。
+- `v0.39` 将委派状态、结果摘要、Trace 和 session 恢复连接起来，并与 Crash Recovery 的不完整调用分类对齐。
 
 ### 2.2 本阶段不做
 
@@ -61,9 +67,9 @@
 
 ### D1：`v0.33` 是持久委派的协议依赖，不是只读委派的功能门槛
 
-`v0.34`–`v0.36` 的子代理只有可重复的认知调查能力。父进程异常中断后，不尝试从内存恢复运行中的子代理，也不声称已收到其结果；重新调查会增加成本，但不会重复工作区副作用。因此这些版本可以建立在 `v0.31` Safe Resume 和 `v0.32` Durable Tool Boundaries 之上。
+`v0.34`–`v0.38` 的子代理只有可重复的认知调查能力。父进程异常中断后，不尝试从内存恢复运行中的子代理，也不声称已收到其结果；重新调查会增加成本，但不会重复工作区副作用。因此这些版本可以建立在 `v0.31` Safe Resume 和 `v0.32` Durable Tool Boundaries 之上。
 
-`v0.37` 必须处理“子代理已产生结果，但父 Context 尚未提交”的窗口，并识别运行中、结果待交付和已经提交三种事实。此时要么先完成 `v0.33`，要么在合并时显式采用它的 crash record、issue、decision 与 incomplete invocation 分类，不能另造一套恢复语义。
+`v0.39` 必须处理“子代理已产生结果，但父 Context 尚未提交”的窗口，并识别运行中、结果待交付和已经提交三种事实。此时要么先完成 `v0.33`，要么在合并时显式采用它的 crash record、issue、decision 与 incomplete invocation 分类，不能另造一套恢复语义。
 
 ### D2：父 Agent 独占执行所有权和最终权威
 
@@ -76,7 +82,9 @@ Execution ownership = 集中在父 Agent
 
 子代理成功不能自动推进父计划。父 Agent 必须读取结果、判断其相关性，并通过现有计划工具明确更新步骤。子代理失败也不自动产生父 FailureEvent；只有父任务真实执行或验证失败时，才沿既有 Failure Model 和 Repair Loop 记录事实。
 
-### D3：隔离可变运行时，共享不可变工具定义
+### D3：共享 canonical Runtime / Loop，隔离可变实例，共享不可变工具定义
+
+父子必须调用同一 `AgentRuntime.run()` 控制循环。不得通过 `loop_impl` 分派到两套循环，也不得在 `SubagentRunner` 中自行编排 LLM 请求、工具执行与 observation 回灌。共用类名、HTTP helper 或协议解析函数不等于共用循环。`v0.34` 的过渡实现由 `v0.35` 收敛，后续能力只能扩展这一实现。
 
 每个子代理必须拥有独立的：
 
@@ -218,22 +226,39 @@ completed | failed | timed_out | cancelled | budget_exhausted
 
 ## 4. 运行时与调用协议
 
-### 4.1 可重入 Runtime
+### 4.1 唯一循环与可重入 Runtime
 
-当前 `agent_loop()` 直接使用模块级 `call_llm`、`MAX_ITERATIONS` 和输出配置，并通过注入的 Context/Executor 获得部分实例状态。`v0.34` 应抽出可实例化的运行时依赖，但保持 HTTP 客户端继续使用 `http.client`，并显式设置 `Accept-Encoding: identity`。
+`v0.34` 实际存在三条路径：`agent_loop()` 通过 `loop_impl` 调用 `_legacy_agent_loop()`；`AgentRuntime._run_common()` 有通用循环；`SubagentRunner.run()` 自行循环并只使用 `runtime.invoke()` 请求模型。这是已实现基线的架构欠账，不能标记为 canonical loop 已完成。`v0.35` 以保留父循环完整语义为前提统一三条路径，不能用简化的通用循环替换后丢失持久化、进程、Plan 或完成提醒边界。
 
 建议边界：
 
 ```python
 class AgentRuntime:
-    def __init__(self, llm_client, context, executor, loop_policy, output): ...
-    def run(self) -> str: ...
+    def __init__(self, context, state, tool_view, model, budget,
+                 permission, completion_policy, output, integrations): ...
+    def run(self) -> RuntimeResult: ...
 
 class SubagentRunner:
     def run(self, task: DelegatedTask, cancel_event) -> SubagentResult: ...
 ```
 
-父 Runtime 使用现有完成规则、TerminalOutput、Plan/Repair/Process/Session 集成；子 Runtime 使用无终端流式输出、只读工具视图、子预算和结果 schema 校验。不要通过递归调用共享全局 `agent_loop()` 状态，也不要让多个子代理共享同一个 ContextManager。
+以上是依赖边界示意，不要求照搬构造器签名。父子均组装独立实例并调用同一 `run()`：
+
+| 配置维度 | Parent Agent | Subagent |
+|---|---|---|
+| Context | 用户任务、主历史、项目指令 | 委派合同、selected facts、独立历史与身份提示 |
+| State | 主任务、Plan、generation、verification | 独立调查状态和观察记录 |
+| Tool View | 当前父任务获准工具 | 冻结的四工具白名单与 scope gate |
+| Model | 本地配置解析的父模型绑定 | 本地配置解析的子模型绑定，可不同 provider |
+| Budget | 父运行限制与委派聚合账本 | 冻结子额度、轮次与格式修正消耗 |
+| Permission | 父 PermissionGate 和用户授权交互 | 独立固定白名单，不继承父授权 |
+| Completion Policy | Plan、进程、验证和 progress marker 条件 | Result Contract 校验和一次格式修正 |
+
+统一循环拥有请求、assistant 入史、整轮准入、工具执行、按序结果提交、下一轮和终止的唯一控制权。策略返回准入决定、完成决定或受保护提醒；不能自行请求 LLM、执行工具或另起重试循环。预算不足或修正阶段出现工具调用时，同样由统一循环为每个已接纳 call 补齐拒绝结果后结束。
+
+父实例通过 integrations 绑定 Plan/Repair/Process/Session 等现有服务，子实例不绑定父资源；输出适配器决定是否流式显示。无持久化时使用内存提交，开启 `/save` 的父实例仍在 handler 前提交 `handler_admitted`，按序原子提交 State、tool result 与 boundary。提交失败立即中断，不得继续 handler 或请求模型。兼容入口 `agent_loop()` 可保留为组装和返回值转换层，但不保留独立控制循环。
+
+`SubagentRunner` 仅负责构造实例、调用 `run()`、在工具 handler 边界将子异常转换为有界结果；父顶层 LLM 异常继续上抛。独立 ContextManager、计数和连接属于实例，共享实现不得变成共享可变全局状态。
 
 ### 4.2 委派调用路径
 
@@ -244,7 +269,7 @@ class SubagentRunner:
   → DelegationManager 原子预留父聚合预算并创建 DelegationRecord
   → 父 durable boundary 提交 handler_admitted（开启 /save 时）
   → SubagentRunner 构造子 State / Context / RegistryView / Prompt
-  → 子 loop 调用 LLM 与只读工具
+  → 子实例进入同一 AgentRuntime.run()，调用其 Model 与只读工具
   → 校验并生成 SubagentResult
   → DelegationRecord = result_ready
   → 父 State + role=tool + boundary 原子提交
@@ -252,13 +277,34 @@ class SubagentRunner:
   → 父 loop 在整轮完成后继续
 ```
 
-`v0.34`–`v0.36` 在未实现 Durable Delegation 时，`result_ready` 主要是内存事实；开启 `/save` 后仍受父 `delegate_task` 的现有 durable tool boundary 保护，活动 handler 不能成为 clean safe point。`v0.37` 才承诺跨进程识别和协调子结果交付状态。
+`v0.34`–`v0.38` 在未实现 Durable Delegation 时，`result_ready` 主要是内存事实；开启 `/save` 后仍受父 `delegate_task` 的现有 durable tool boundary 保护，活动 handler 不能成为 clean safe point。`v0.39` 才承诺跨进程识别和协调子结果交付状态。
 
 ### 4.3 子代理完成协议
 
 子代理仍遵守“无 `tool_calls` 才能结束”以及每个工具调用必须有对应 `role=tool` 结果的核心协议。最终纯文本必须满足 Subagent Result JSON schema；非法结果不会被静默当作 summary。
 
 建议通过子 Runtime 的 completion policy 校验最终内容：第一次非法时注入一次受保护格式提醒并继续；第二次仍非法或预算不足时生成 `outcome=failed` 的 Runtime 结果。不能新增一个调用后立即中止、缺少 `role=tool` 回灌的特殊终止工具。
+
+### 4.4 多 provider 与模型绑定（`v0.36`）
+
+provider 是一个模型服务的配置身份，protocol 是其请求和响应格式，model 是该服务中的模型标识。多个 provider 可以共用同一 protocol adapter，也可以使用不同协议；只把全局 `BASE_URL` 换成可配置字符串，不算完成多 provider。
+
+建议边界：
+
+- `ProviderConfig`：本地 provider ID、protocol、endpoint、凭据和超时配置。
+- `ModelProfile`：本地别名、provider ID、model ID、上下文窗口、输出上限和能力声明。
+- `ModelBinding`：Runtime 创建前解析并冻结的 profile 与客户端绑定；请求期间不改写模块级配置。
+- `ProviderAdapter`：将统一消息和 Tool View schema 编码为请求，将响应归一为 assistant content、稳定 tool-call ID、名称、JSON arguments、finish reason 和 usage。工具结果回传需保持 call ID 对应关系。
+
+本地配置提供 provider/profile 映射、父默认 profile、子默认 profile 和子可选 profile 白名单。选择顺序为：合同显式请求的获准 profile → 子默认 profile → 父 profile。未知或越权 profile 必须在请求前拒绝，不能静默回退；父模型只能提供 profile 别名，不能提供 endpoint、凭据或自定义认证头。父子默认同模型，旧 `BASE_URL` / `API_KEY` / `MODEL` 三元组映射为一个默认 profile，保持原调用入口可用。
+
+首批适配范围明确为 OpenAI-compatible Chat Completions 与 Anthropic Messages 两种协议，并支持同协议多个独立 endpoint/provider。不要求接入其官方 SDK；所有 LLM HTTP 请求继续使用标准库 `http.client` 并显式设置 `Accept-Encoding: identity`。真实 endpoint、API key、model ID 仅存本地 `config_local.py`，提交的配置示例只含占位值。适配器负责认证头、system 消息、工具调用/结果、流式分片与错误格式；内部仍使用统一 `role=tool` 协议，发送时转换为 provider 所需格式。
+
+能力校验在发请求前完成：模型必须支持工具调用和所需上下文/输出限制。报告 JSON 可沿用提示词与 Completion Policy 校验，不强制要求服务方原生 JSON schema。未支持的协议、截断工具参数或不完整流不能作为可执行调用交给 executor；子错误在 Runner 收口，父错误沿现有顶层异常边界传播。适配器不得执行工具、裁决完成、修改 State 或发起隐藏重试；本阶段不做自动跨 provider fallback，以免隐式改变数据接收方和重复计费。
+
+上下文裁剪读取所绑定模型的窗口；摘要等辅助 LLM 请求也须显式绑定模型并纳入对应预算，不能回落到全局模型或形成免费调用。usage 保留 provider/estimated/mixed 来源，流中缺少 usage 时保守估算，异常时记录已发出请求及不确定用量。跨 provider 的 token 总和用于资源限制，不等同于货币成本；不在本阶段承诺价格表或费用结算。并发时只共享不可变配置和适配器定义，每个请求拥有独立连接、流缓冲和计数。
+
+持久化和 Trace 仅记录无凭据的 profile 别名与配置指纹等来源摘要，不写入真实 endpoint、model ID、认证头或 API key。恢复重新从本地配置解析绑定；配置缺失或变化时明确报告，已有结果不重请求，也不自动改用其他 provider。
 
 ## 5. 数据模型
 
@@ -278,6 +324,8 @@ DelegatedTask
 - allowed_tools                 # Runtime 冻结后的实际能力
 - selected_parent_facts         # 有界、脱敏、明确选择的父事实
 - budget                        # Runtime 批准后的单子代理预算
+- model_profile?                # v0.36 起：请求的本地别名，由 Runtime 校验白名单
+- model_binding_ref?            # v0.36 起：冻结的无凭据绑定摘要，不含真实配置
 - depth = 1
 - created_at
 ```
@@ -337,6 +385,7 @@ UsageRecord
 - input_tokens
 - output_tokens
 - token_accounting: provider | estimated | mixed
+- model_profile?, binding_fingerprint?  # v0.36 起：用量来源，不含凭据或真实 model ID
 - elapsed_ms
 - result_bytes
 ```
@@ -422,7 +471,7 @@ delegations
 
 主要工作：
 
-1. 抽取可实例化的 `AgentRuntime` / completion policy，使父、子 loop 共享协议实现但不共享可变状态；保持 LLM HTTP 约束和父 loop 现有行为。
+1. 已引入可实例化的 `AgentRuntime` 协议壳和模型调用适配 helper，保持父行为及子状态隔离；父 legacy loop、通用 loop 和 Runner 内的子 loop 尚未收敛。共享 canonical loop 的验收移至 `v0.35`，不追溯宣称本版已完成。
 2. 定义 `DelegatedTask`、`SubagentResult`、`Finding`、`EvidenceRef`、`UsageRecord` 及严格的长度、数量、枚举和引用校验。
 3. 为工具定义增加显式 delegation capability，并实现只读 `FilteredToolRegistryView`；首版只暴露 calculate、read_file、list_dir、grep。
 4. 新增 `DelegationManager`、`SubagentRunner` 和状态绑定的 `delegate_task` 工具；只允许同时一个同步子代理，depth 固定为 1。
@@ -434,7 +483,7 @@ delegations
 
 | 文件 | 动作 | 内容 |
 |---|---|---|
-| `src/mini_agent/runtime.py` | 新增 | 可实例化 loop 依赖与 completion policy；或从 `agent.py` 提取等价边界 |
+| `src/mini_agent/runtime.py` | 新增 | 已落地的实例协议壳与调用 helper；唯一循环在 v0.35 收敛 |
 | `src/mini_agent/delegation.py` | 新增 | 合同 dataclass、校验、Manager 与 Runner |
 | `src/mini_agent/tools/delegation.py` | 新增 | 状态绑定的 `delegate_task` 工具 |
 | `src/mini_agent/tools/base.py` | 修改 | delegation capability 与过滤视图 |
@@ -445,16 +494,50 @@ delegations
 
 验收重点：子代理能回答一个跨文件调查问题并提供结构化位置证据；它看不到任何写、shell、进程、计划、恢复、验证或委派工具；其结果不自动推进父 Plan 或父 verification。
 
-本次实现固定为单个同步子代理；可配置预算只允许请求更小额度，未实现父任务聚合预算、后台取消、多子代理并行、持久化 DelegationRecord 或跨 session 恢复。后续 `v0.35` 接手生命周期、可配置/聚合预算和取消，`v0.36` 接手有界并行，`v0.37` 接手持久化交付与 crash recovery 协调。
+本次实现固定为单个同步子代理；可配置预算只允许请求更小额度，未实现父任务聚合预算、后台取消、多子代理并行、持久化 DelegationRecord 或跨 session 恢复。先由 `v0.35` 收敛唯一循环、`v0.36` 引入多 provider，再由 `v0.37` 接手生命周期、可配置/聚合预算和取消，`v0.38` 接手有界并行，`v0.39` 接手持久化交付与 crash recovery 协调。原有合同字段和失败结果保持兼容；新增模型绑定字段使用兼容默认值，不改写历史合同 hash。
 
 实施状态：
 
 - [x] `v0.34`：单个、同步、单层、只读委派与 Task / Result Contract。
-- [ ] `v0.35`：生命周期、取消和聚合预算。
-- [ ] `v0.36`：有界并行和按父顺序提交。
-- [ ] `v0.37`：持久委派、Trace、session 与 Crash Recovery 协调。
+- [ ] `v0.35`：共享 canonical Agent Runtime / Loop，父子差异配置化。
+- [ ] `v0.36`：多 provider、协议适配和父子独立模型绑定。
+- [ ] `v0.37`：生命周期、取消和聚合预算。
+- [ ] `v0.38`：有界并行和按父顺序提交。
+- [ ] `v0.39`：持久委派、Trace、session 与 Crash Recovery 协调。
 
-### 8.2 `v0.35` Lifecycle & Budget
+### 8.2 `v0.35` 统一父子运行循环
+
+目标：保留 `v0.34` 对外行为，父子只使用一个 canonical Runtime / Loop。
+
+主要工作：
+
+1. 先为现有父子路径建立行为对照，覆盖消息顺序、准入拒绝、预算耗尽、格式修正、异常、完成提醒及持久化提交失败。
+2. 将父 loop 的完整控制流程收敛至 `AgentRuntime.run()`；抽出第 4.1 节的实例依赖与策略接口，禁止策略内部另写 LLM→Tool→Observation 循环。
+3. 将子预算、scope 检查、观察收集和 Result Contract 接入相同循环的既定边界；Runner 仅组装、运行、转换结果和异常。
+4. 移除 `loop_impl` 双路径及 Runner 自有循环；兼容 `agent_loop()` 与 `call_llm()` 入口和已有测试注入方式，但不保留第二套生产控制流程。
+5. 保持单子代理同步、固定预算和四工具能力；本版不引入多 provider、并发或新持久化协议。
+
+建议新增或修改：`runtime.py`、`agent.py`、`delegation.py`、`context.py`、`tests/test_shared_runtime_v035.py`。
+
+验收重点：父子均实际进入同一个 `run()` 实现；参数化的模拟 LLM/工具测试验证相同协议骨架在不同配置下成立，代码审查确认没有残留第二套循环。完整父回归覆盖 Plan/Repair、progress marker、process/stdin、v0.32 提交失败及 v0.33 恢复；子 v0.34 合同与隔离测试继续通过。只共用 HTTP/helper 或在壳内切换 legacy 路径不能通过验收。
+
+### 8.3 `v0.36` 多 provider 与模型选择
+
+目标：通过本地配置让父子独立选择 provider/model，使用同一 Runtime 和统一工具协议。
+
+主要工作：
+
+1. 实现第 4.4 节的 ProviderConfig、ModelProfile、ModelBinding 和适配器边界；迁移旧三元组为默认 profile。
+2. 实现 OpenAI-compatible Chat Completions 与 Anthropic Messages 适配，覆盖流式/非流式响应、工具调用及结果关联、usage 和服务方错误。
+3. 实现父默认、子默认、合同可选 profile 与白名单校验；绑定在实例创建前冻结，不能通过全局变量切换服务方。
+4. 将模型窗口、输出限制、摘要请求、usage 与现有固定预算连接；为 v0.37 的聚合预算提供统一计数输入。
+5. 统一无凭据来源摘要和错误脱敏，不把 provider 特有参数泄露到 Runtime 控制逻辑。
+
+建议新增或修改：`providers/`（标准库实现）、`config.py`、`config_example.py`、`agent.py`、`runtime.py`、`context.py`、`delegation.py`、`tests/test_providers_v036.py`。
+
+验收重点：用本地模拟 HTTP 服务验证至少两个同协议 provider 的配置隔离，以及父 Chat Completions / 子 Messages 跨协议委派；核对认证与 identity 请求头、消息转换、分片参数重组、唯一 call/result 关联和 usage。覆盖配置缺失、未知模型别名、无工具能力、截断响应、超时、usage 缺失及凭据不进入日志/State/session。默认测试不依赖真实 API key 或付费请求；旧配置仍能运行，切换 provider 不改变权限或完成条件。
+
+### 8.4 `v0.37` Lifecycle & Budget
 
 目标：把一次可用委派升级为有任务身份、可取消、不会无限消耗资源的受控生命周期。
 
@@ -468,11 +551,11 @@ delegations
 6. 将委派摘要和剩余预算注入父 Structured State；compaction 后保持准确且不复制完整子 history。
 7. 将重复相同合同、无新 findings 的连续委派接入停滞判断；新 ID 或预算消耗本身不算进展。
 
-建议新增或修改：`state.py`、`context.py`、`config.py`、`delegation.py`、`__main__.py`、`tests/test_subagent_lifecycle_v035.py`。
+建议新增或修改：`state.py`、`context.py`、`config.py`、`delegation.py`、`__main__.py`、`tests/test_subagent_lifecycle_v037.py`。
 
 验收重点：超时、取消、预算耗尽、非法结果和 LLM 异常都形成唯一结果并到达父 Context；重复委派不能重置聚合预算或通过创建新 ID 制造进展。
 
-### 8.3 `v0.36` Parallel Delegation
+### 8.5 `v0.38` Parallel Delegation
 
 目标：允许多个互不依赖的只读调查并行执行，同时保持预算、隔离和父工具协议确定性。
 
@@ -480,17 +563,17 @@ delegations
 
 1. 增加专用 `DelegationScheduler` 和固定 `max_concurrency`，不要直接让每个父 tool-call 线程各自创建无上限线程池。
 2. 同一父 assistant 回合的多个 `delegate_task` 在原子预留聚合预算后并行启动；无法获得预算的调用在启动子 LLM 前返回确定拒绝结果。
-3. 每个子代理拥有独立可变 Runtime；仅共享冻结工具定义、LLM client 配置和只读项目指令快照。
+3. 每个子代理使用同一 Runtime 实现的独立实例和已冻结 ModelBinding；只共享不可变定义和只读项目指令快照，不共享连接、流解析缓冲、Context 或计数。并行验收包含不同 provider 的子任务。
 4. 完成顺序可以不同，父 State / Context / durable tool result 仍按模型 call 顺序提交；等待较早调用时继续有界收集后续结果，但不提前回灌。
 5. 支持 partial failure：一个子代理失败、超时或取消不取消其他子代理，除非父任务整体取消或聚合预算/安全边界要求停止。
 6. 聚合 usage 线程安全结算；预留与释放不会超发 token、工具或并发额度。
 7. 父任务终止传播到全部活动子代理，并报告未在期限内收束的 subagent ID。
 
-建议新增或修改：`delegation.py`、`agent.py`、`state.py`、`config.py`、`tests/test_parallel_subagents_v036.py`。
+建议新增或修改：`delegation.py`、`agent.py`、`state.py`、`config.py`、`tests/test_parallel_subagents_v038.py`。
 
 验收重点：至少三个调查任务乱序完成，父模型按原调用顺序收到三个唯一结果；部分失败不丢失成功结果；实测活动数和总 usage 从不超过配置上限。
 
-### 8.4 `v0.37` Durable Delegation
+### 8.6 `v0.39` Durable Delegation
 
 目标：让委派创建、子结果产生和父结果提交成为可审计、可恢复协调的事实，并接入 Trace 与 session。
 
@@ -504,7 +587,7 @@ delegations
 6. Trace 只读展示父子关系、合同摘要、生命周期、outcome、usage 和结果提交引用；不加载完整子 history，不调用 LLM，不重放委派。
 7. 在 `running → result_ready`、`result_ready → committed`、同轮多个结果提交和 session 替换前后注入崩溃，验证不会重复交付、遗漏结果或断开父 tool-call 协议。
 
-建议新增或修改：`session.py`、`resume.py`、`state.py`、`context.py`、`trace.py`、`delegation.py`、`tests/test_durable_delegation_v037.py`。
+建议新增或修改：`session.py`、`resume.py`、`state.py`、`context.py`、`trace.py`、`delegation.py`、`tests/test_durable_delegation_v039.py`。
 
 验收重点：子代理已经形成结果但父进程在 Context 提交前崩溃时，恢复能够识别并提交同一 result；运行中崩溃不会伪造结果或自动重复计费调查；每个父 tool call 最终最多一个 committed result。
 
@@ -550,6 +633,9 @@ delegations
 
 ### 10.1 单元与集成测试
 
+- 父子从不同配置进入同一 canonical `AgentRuntime.run()`；不存在 legacy/child 双循环或 provider 专用循环，公共协议测试覆盖两类实例。
+- 多 provider 的同协议多 endpoint、跨协议父子选择、旧配置兼容、profile 白名单、能力校验、独立连接、流式工具参数和 usage 归一均通过本地 HTTP 测试。
+- 辅助摘要请求使用明确模型绑定并计入预算；协议适配不发生隐藏重试或跨 provider fallback，配置与错误不会泄露凭据。
 - Task Contract 拒绝空 goal、越界 scope、未知工具、超长字段、非法预算和 depth 不为 1。
 - Result Contract 拒绝重复/悬空 evidence ID、越界路径、非法行号、未知 outcome、超长 JSON 和 usage 倒退。
 - `FilteredToolRegistryView` 不能注册或修改底层工具；父工具更新后视图行为按冻结策略明确，子代理永远看不到状态绑定或副作用工具。
@@ -585,12 +671,16 @@ delegations
 10. 在子代理仍运行时崩溃；恢复不伪造成功、不继承旧线程，也不把重新调查当作零成本自动 replay。
 11. 至少发生一次父 Context compaction 和一次 session resume 后，委派关系、预算、结果引用和父 Plan/verification 边界保持准确。
 12. `/trace` 能展示“父委派—子结果 ready—父结果 committed—父决策—执行—验证”的因果链，并对断链记录显示 unresolved。
+13. 同一任务中父使用 provider A，子使用不同协议的 provider B；子只读调查返回后父继续原模型，父子均走同一循环且请求配置互不污染。
+14. 只配置旧三元组时父子仍使用默认模型；请求未知或不获准的子 profile 在联网前被拒绝，父收到唯一工具结果。
 
 ### 10.3 阶段完成定义
 
-- [ ] `v0.34`–`v0.37` 各有独立教程、变更记录、测试和可复现验收场景。
+- [ ] `v0.34`–`v0.39` 各有独立教程、变更记录、测试和可复现验收场景。
 - [ ] Task / Result Contract 从第一个版本起就是结构化、可校验且有界的协议。
 - [ ] 可变 Runtime 完全隔离；不可变工具定义共享；子能力通过显式策略过滤。
+- [ ] 父子只有一个 canonical Runtime / Loop；Context、State、Tool View、Model、Budget、Permission、Completion Policy 表达差异，Runner 和适配器不复制控制循环。
+- [ ] 多 provider 支持同协议多配置及两种首批协议，父子模型可独立绑定；旧单模型配置兼容，来源可审计且不泄露真实配置。
 - [ ] 子代理始终只读、单层，不能修改父状态、权限、计划、generation 或 verification。
 - [ ] 单子代理预算与父聚合预算在串行、并行、失败、取消和恢复路径上都不超发。
 - [ ] 所有 execution outcome 都形成结果，并经历可审计的 `result_ready → committed` 交付。
@@ -611,19 +701,25 @@ v0.25 Plan Contract / Trace
   + v0.32 Durable Tool Boundaries
                 ↓
 v0.34 Minimal Delegation
-单个同步只读子代理、Runtime 隔离、Task / Result Contract、depth=1
+已实现：单个同步只读子代理、Runtime 协议壳、Task / Result Contract、depth=1
                 ↓
-v0.35 Lifecycle & Budget
+v0.35 统一父子运行循环
+唯一 canonical Runtime / Loop、实例配置、保留父安全语义
+                ↓
+v0.36 多 provider 与模型选择
+统一协议适配、父子独立模型绑定、旧配置兼容
+                ↓
+v0.37 Lifecycle & Budget
 父子身份、交付状态、取消/超时、单体与聚合预算
                 ↓
-v0.36 Parallel Delegation
+v0.38 Parallel Delegation
 专用调度器、有界并发、结果顺序、partial failure
                 ↓
-v0.37 Durable Delegation ←→ v0.33 Crash Recovery
+v0.39 Durable Delegation ←→ v0.33 Crash Recovery
 result_ready / committed、session、Trace、崩溃协调
 ```
 
-不要在 `v0.34` 同时加入并行，不要在 `v0.35` 提前持久化运行中的子 Context，不要在 `v0.36` 允许子代理修改工作区，也不要在 `v0.37` 自动恢复旧线程或无条件重跑调查。每版只增加一个主要概念，使相邻 tag 的行为差异可教学。
+保留 `v0.34`，无需回退。`v0.35` 必须先完成循环收敛，再在 `v0.36` 接入多 provider；后续调度和生命周期只扩展统一实现。不要在 `v0.37` 提前持久化运行中的子 Context，不要在 `v0.38` 允许子代理修改工作区，也不要在 `v0.39` 自动恢复旧线程或无条件重跑调查。每版聚焦一个主要概念，使相邻版本的行为差异可教学。
 
 ## 12. 文档与发布同步
 
@@ -631,14 +727,16 @@ result_ready / committed、session、Trace、崩溃协调
 
 - `README.md` 与 `README_EN.md` 的阶段十学习路径和当前版本
 - `docs/tutorials/README.md` 的阶段十导航
-- 对应版本教程：`34-minimal-delegation.md`、`35-subagent-lifecycle-budget.md`、`36-parallel-delegation.md`、`37-durable-delegation.md`
+- 对应版本教程：保留 `34-minimal-delegation.md`；新增 `35-shared-agent-runtime.md`、`36-multi-provider.md`、`37-subagent-lifecycle-budget.md`、`38-parallel-delegation.md`、`39-durable-delegation.md`（后续文件名建议）
 - `docs/operation/manual.md` 的委派工具、配置、输出、取消和恢复说明
 - `CHANGELOG.md`
 - `pyproject.toml` 版本信息
 - `docs/plans/README.md` 与本计划的实施状态
 - 真正新增全仓运行、授权或修改硬约束时更新 `AGENTS.md`
 
-教程先解释“工具并发”和“子代理委派”的区别，再解释为什么隔离 State/Context、共享工具定义、过滤能力视图；随后引入 Task / Result Contract、两级预算、结果顺序和 durable delivery。首次出现 Subagent、delegation、result_ready、committed、aggregate budget 和 authoritative verification 时必须就近用直观中文解释，不能只列字段。
+本次仅调整本计划，不修改代码、当前版本号、其他路线或既有教程；上述同步工作属于未来各版实施范围，需要同步核对顺延版本与其他计划是否冲突。
+
+教程先解释“工具并发”和“子代理委派”的区别，再解释为什么独立 State/Context 可以共用同一循环、如何通过配置限制能力；随后解释服务方、协议和模型的区别，再引入两级预算、结果顺序和 durable delivery。首次出现 canonical Runtime、provider、ModelBinding、Subagent、delegation、result_ready、committed、aggregate budget 和 authoritative verification 时必须就近用直观中文解释，不能只列字段。
 
 每版交付前运行：
 
@@ -652,6 +750,6 @@ PYTHONPATH=src python scripts/check_readme.py
 
 ## 13. 阶段完成后的能力边界
 
-阶段十完成后，`mini_agent` 可以把多个独立调查问题交给只读、有预算、单层的子代理，在隔离上下文中并行收集结构化发现和证据，并以确定顺序、耐久边界交还父 Agent。父 Agent 仍是唯一修改者、权限请求者、主计划维护者和完成判定者。
+阶段十完成后，`mini_agent` 的父子共享同一个 canonical Runtime / Loop，并可通过本地配置使用不同 provider/model。它可以把多个独立调查问题交给只读、有预算、单层的子代理，在隔离上下文中并行收集结构化发现和证据，并以确定顺序、耐久边界交还父 Agent。父 Agent 仍是唯一修改者、权限请求者、主计划维护者和完成判定者。
 
 这个阶段建立的是“受控认知委派”，不是多代理共同写代码。若后续需要让子代理执行修改，应另设阶段，先解决 workspace/worktree 隔离、变更所有权、权限继承与衰减、冲突合并、跨代理 verification、rollback 和 durable execution；不能通过扩大 `allowed_tools` 偷渡这些能力。
