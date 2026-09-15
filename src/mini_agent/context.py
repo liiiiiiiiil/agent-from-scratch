@@ -264,6 +264,11 @@ class TrimPolicy:
 class ContextManager:
     """Prepare a budgeted LLM context while preserving full local history."""
 
+    @staticmethod
+    def count_tokens(value: object) -> int:
+        """Expose the conservative estimator to child runtimes."""
+        return count_tokens(value)
+
     def __init__(
         self,
         state: AgentState,

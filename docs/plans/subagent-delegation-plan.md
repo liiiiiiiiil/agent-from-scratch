@@ -1,6 +1,6 @@
 # 阶段十：受控子代理委派（Controlled Subagent Delegation）实施计划
 
-> 状态：待实施
+> 状态：`v0.34` 已实现；`v0.35`–`v0.37` 待实施
 > 建议版本范围：`v0.34`–`v0.37`
 > 能力前置：阶段七结构化计划（`v0.22`–`v0.25`）、阶段八任务与进程边界（`v0.26`–`v0.29`）、阶段九的安全恢复与持久化工具边界（`v0.30`–`v0.32`）
 > 关联计划：`adaptive-planning-plan.md`、`process-management-plan.md`、`session-persistence-resume-plan.md`
@@ -416,7 +416,7 @@ delegations
 
 ## 8. 版本切片
 
-### 8.1 `v0.34` Minimal Delegation
+### 8.1 `v0.34` Minimal Delegation（已实现）
 
 目标：父 Agent 能把一个明确的只读调查任务同步交给单个、单层、隔离的子代理，并收到通过正式合同校验的结构化结果。
 
@@ -444,6 +444,15 @@ delegations
 | `tests/test_subagent_v034.py` | 新增 | 合同、隔离、只读能力和单次委派 E2E |
 
 验收重点：子代理能回答一个跨文件调查问题并提供结构化位置证据；它看不到任何写、shell、进程、计划、恢复、验证或委派工具；其结果不自动推进父 Plan 或父 verification。
+
+本次实现固定为单个同步子代理；可配置预算只允许请求更小额度，未实现父任务聚合预算、后台取消、多子代理并行、持久化 DelegationRecord 或跨 session 恢复。后续 `v0.35` 接手生命周期、可配置/聚合预算和取消，`v0.36` 接手有界并行，`v0.37` 接手持久化交付与 crash recovery 协调。
+
+实施状态：
+
+- [x] `v0.34`：单个、同步、单层、只读委派与 Task / Result Contract。
+- [ ] `v0.35`：生命周期、取消和聚合预算。
+- [ ] `v0.36`：有界并行和按父顺序提交。
+- [ ] `v0.37`：持久委派、Trace、session 与 Crash Recovery 协调。
 
 ### 8.2 `v0.35` Lifecycle & Budget
 

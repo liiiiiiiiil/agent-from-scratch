@@ -15,6 +15,7 @@ from mini_agent.tools.file_errors import EditMultipleMatchesError, EditNoMatchEr
 RESULT_BRIEF_MAX_LENGTH = 200
 RESULT_BRIEF_FALLBACK = "<unavailable>"
 ResultCallback = Callable[[str, dict[str, Any], bool, str], None]
+DelegationCapability = Literal["unavailable", "readonly_workspace", "pure_compute"]
 
 
 def format_tool_result(value: Any, max_chars: int = 4000) -> str:
@@ -41,6 +42,7 @@ class Tool:
     effect_class: EffectClass = "none"
     internal: bool = False
     argument_validator: Callable[[dict[str, Any]], None] | None = None
+    delegation_capability: DelegationCapability = "unavailable"
 
     def to_llm_schema(self):
         return {"type": "function", "function": {
@@ -86,6 +88,8 @@ class ExecutionResult:
     def tool_content(self) -> str:
         if self.tool in {"get_process", "read_process", "list_processes", "wait_process"}:
             return format_tool_result(self.output, max_chars=8000)
+        if self.tool == "delegate_task":
+            return format_tool_result(self.output, max_chars=12 * 1024)
         return format_tool_result(self.output)
 
 
@@ -111,6 +115,9 @@ class ToolRegistry:
             raise ValueError(f"Tool 已经存在: {tool.name}")
         if tool.effect_class not in ("none", "possible"):
             raise ValueError(f"非法 effect_class: {tool.effect_class}")
+        if tool.delegation_capability not in (
+                "unavailable", "readonly_workspace", "pure_compute"):
+            raise ValueError(f"非法 delegation_capability: {tool.delegation_capability}")
         if internal is not None:
             tool.internal = internal
         self._tools[tool.name] = tool
@@ -128,6 +135,101 @@ class ToolRegistry:
 
     def effect_for(self, name: str, arguments: dict[str, Any]) -> EffectClass:
         return self.get(name).effect_for(arguments)
+
+    def validate_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Normalize and validate one call through the registry boundary."""
+        tool = self.get(name)
+        normalized = validate_arguments(tool.parameters, arguments)
+        if tool.argument_validator is not None:
+            tool.argument_validator(normalized)
+        return normalized
+
+    def filtered_for_subagent(self, allowed: set[str] | frozenset[str],
+                              scope_gate: Any = None):
+        """Return a frozen, capability-based view for a read-only child runtime."""
+        return FilteredToolRegistryView(self, allowed, scope_gate=scope_gate)
+
+
+class FilteredToolRegistryView:
+    """Read-only registry view with frozen tool metadata.
+
+    The view deliberately copies schemas and Tool metadata at construction time.
+    It never exposes the parent's mutable mapping and cannot register or replace
+    tools.  ``scope_gate`` is an optional validator used by workspace readers.
+    """
+
+    def __init__(self, parent: ToolRegistry, allowed: set[str] | frozenset[str],
+                 scope_gate: Any = None):
+        allowed = set(allowed)
+        frozen: dict[str, Tool] = {}
+        for name, tool in parent._tools.items():
+            if name not in allowed:
+                continue
+            if tool.delegation_capability == "unavailable":
+                continue
+            cloned = Tool(
+                name=tool.name,
+                description=str(tool.description),
+                parameters=deepcopy(tool.parameters),
+                handler=(scope_gate.wrap_handler(tool.name, tool.handler)
+                         if scope_gate is not None and hasattr(scope_gate, "wrap_handler")
+                         else tool.handler),
+                effect_class=tool.effect_class,
+                internal=tool.internal,
+                argument_validator=tool.argument_validator,
+                delegation_capability=tool.delegation_capability,
+            )
+            frozen[name] = cloned
+        self._tools = frozen
+        self._schemas = tuple(deepcopy(tool.to_llm_schema()) for tool in frozen.values())
+        self._scope_gate = scope_gate
+
+    @staticmethod
+    def _copy_tool(tool: Tool) -> Tool:
+        """Return a defensive definition copy, never the view's executable entry."""
+        return Tool(
+            name=tool.name,
+            description=tool.description,
+            parameters=deepcopy(tool.parameters),
+            handler=tool.handler,
+            effect_class=tool.effect_class,
+            internal=tool.internal,
+            argument_validator=tool.argument_validator,
+            delegation_capability=tool.delegation_capability,
+        )
+
+    def get(self, name: str) -> Tool:
+        if name not in self._tools:
+            raise ValueError(f"未知或禁止的 Subagent Tool: {name}")
+        return self._copy_tool(self._tools[name])
+
+    def list_tools(self) -> list[Tool]:
+        return [self._copy_tool(tool) for tool in self._tools.values()]
+
+    def schemas(self) -> list[dict[str, Any]]:
+        return deepcopy(list(self._schemas))
+
+    def effect_for(self, name: str, arguments: dict[str, Any]) -> EffectClass:
+        if name not in self._tools:
+            raise ValueError(f"未知或禁止的 Subagent Tool: {name}")
+        return self._tools[name].effect_for(arguments)
+
+    def validate_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name not in self._tools:
+            raise ValueError(f"未知或禁止的 Subagent Tool: {name}")
+        tool = self._tools[name]
+        normalized = validate_arguments(tool.parameters, arguments)
+        if self._scope_gate is not None:
+            normalized = self._scope_gate.normalize_tool_call(name, normalized)
+        if tool.argument_validator is not None:
+            tool.argument_validator(normalized)
+        return normalized
+
+    def register(self, *_args, **_kwargs):
+        raise TypeError("FilteredToolRegistryView 不允许注册或替换工具")
+
+    def replace(self, *_args, **_kwargs):
+        raise TypeError("FilteredToolRegistryView 不允许注册或替换工具")
 
 
 def _json_type_matches(value: Any, expected: str) -> bool:
@@ -479,9 +581,7 @@ class ToolExecutor:
                     error_kind="planning_phase_gate",
                 )
         try:
-            normalized = validate_arguments(tool.parameters, arguments)
-            if tool.argument_validator is not None:
-                tool.argument_validator(normalized)
+            normalized = self.registry.validate_call(name, arguments)
         except (TypeError, ValueError) as error:
             if is_plan_tool:
                 return plan_rejected(error)
@@ -501,6 +601,14 @@ class ToolExecutor:
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
                                    text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
+        if state is not None and hasattr(state, "delegation_gate"):
+            delegation_error = state.delegation_gate(name, normalized, effect_class)
+            if delegation_error:
+                return ExecutionResult(
+                    name, normalized, "not_checked", False, "invalid", 0,
+                    effect_class, delegation_error, _brief(delegation_error),
+                    error_kind="delegation_gate",
+                )
         if state is not None and hasattr(state, "crash_recovery_gate"):
             crash_error = state.crash_recovery_gate(name, normalized, effect_class)
             if crash_error:

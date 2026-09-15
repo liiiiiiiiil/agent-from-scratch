@@ -62,6 +62,7 @@ read_file_tool = Tool(
         "required": ["path"],
     },
     handler=read_file,
+    delegation_capability="readonly_workspace",
 )
 
 
@@ -199,6 +200,7 @@ list_dir_tool = Tool(
         "required": [],
     },
     handler=list_dir,
+    delegation_capability="readonly_workspace",
 )
 
 
@@ -255,4 +257,5 @@ grep_tool = Tool(
         "required": ["pattern"],
     },
     handler=grep,
+    delegation_capability="readonly_workspace",
 )

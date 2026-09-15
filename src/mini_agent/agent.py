@@ -3,6 +3,7 @@
 import http.client
 import hashlib
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -151,7 +152,7 @@ def _stable_observation_hash(execution):
 
 
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
-             on_content=None):
+             on_content=None, timeout=None):
     """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
 
     用 http.client + Accept-Encoding: identity 绕过网关 502。
@@ -162,11 +163,17 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
     """
     if stream_output is None:
         stream_output = OUTPUT_MODE != "quiet"
+    request_timeout = 120 if timeout is None else timeout
+    if (isinstance(request_timeout, bool)
+            or not isinstance(request_timeout, (int, float))
+            or not math.isfinite(request_timeout)
+            or request_timeout <= 0):
+        raise ValueError("timeout 必须是正数")
     p = urlparse(BASE_URL)
     if p.scheme == "https":
-        conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=120)
+        conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=request_timeout)
     else:
-        conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=120)
+        conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=request_timeout)
     request_body = {"model": MODEL, "messages": messages, "stream": True}
     if include_tools:
         request_body["tools"] = (
@@ -303,7 +310,8 @@ def summarize_messages(messages):
     return call_llm(messages, include_tools=False, stream_output=False).get("content", "") or ""
 
 
-def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
+def _legacy_agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor,
+                       llm_client=None, max_rounds=None):
     """循环调用 LLM，并通过注入的 executor 回灌工具结果。
 
     ContextManager 拥有并维护 history；本函数只向其 history 追加
@@ -320,6 +328,7 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     internal_retry = False
     output = TerminalOutput(OUTPUT_MODE)
     session_boundary = getattr(tool_executor, "session_boundary", None)
+    llm_client = llm_client or call_llm
 
     def _finish(value):
         output.close()
@@ -355,7 +364,8 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
             getattr(getattr(initial_state, "planning_state", None), "phase", None) == "awaiting_approval"):
         return _finish("计划等待用户决定")
 
-    for i in range(MAX_ITERATIONS):
+    round_limit = MAX_ITERATIONS if max_rounds is None else max_rounds
+    for i in range(round_limit):
         status_before_sync = getattr(getattr(context_manager, "state", None), "status", None)
         _sync_processes()
         terminal_result = _terminal_state_result(getattr(context_manager, "state", None))
@@ -367,9 +377,9 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
         internal_retry = False
         run_registry = getattr(tool_executor, "registry", None)
         if run_registry is None:
-            msg = call_llm(prepared_messages, on_content=output.assistant_delta)
+            msg = llm_client(prepared_messages, on_content=output.assistant_delta)
         else:
-            msg = call_llm(
+            msg = llm_client(
                 prepared_messages,
                 tool_registry=run_registry,
                 on_content=output.assistant_delta,
@@ -550,6 +560,14 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 "commit_plan 必须独占一个工具回合"
             )
             planning_batch_errors = {index: detail for index in range(len(parsed_calls))}
+        delegation_batch_errors = {}
+        delegation_indexes = [
+            index for index, (name, _) in enumerate(parsed_calls)
+            if name == "delegate_task"
+        ]
+        if delegation_indexes and len(parsed_calls) != 1:
+            detail = "工具调用拒绝: delegate_task 必须独占一个工具回合"
+            delegation_batch_errors = {index: detail for index in range(len(parsed_calls))}
         has_other_possible = any(
             effect == "possible" and not (
                 name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -625,6 +643,17 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
                 return tool_call_id, text, invalid, invalid
 
             name, args = parsed_calls[index]
+            if index in delegation_batch_errors:
+                text = json.dumps({
+                    "status": "error",
+                    "error_kind": "delegation_batch_gate",
+                    "message": delegation_batch_errors[index],
+                }, ensure_ascii=False)
+                invalid = ExecutionResult(
+                    name, args, "not_checked", False, "invalid", 0,
+                    effects[index], text, text[:200], error_kind="delegation_batch_gate",
+                ) if structured else None
+                return tool_call_id, text, None, invalid
             if index in wait_batch_errors:
                 text = json.dumps({"status": "error", "error_kind": "wait_batch_gate",
                                    "message": wait_batch_errors[index]}, ensure_ascii=False)
@@ -898,3 +927,25 @@ def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):
         state.status = "failed"
     return _finish("达到最大迭代次数")
+
+
+def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
+    """Compatibility entry point assembled through :class:`AgentRuntime`."""
+    from mini_agent.runtime import AgentRuntime
+    runtime_ref = {}
+
+    def run_legacy(context, executor):
+        runtime = runtime_ref["runtime"]
+        return _legacy_agent_loop(
+            context, executor, runtime.llm_client, runtime.max_rounds,
+        )
+
+    runtime = AgentRuntime(
+        llm_client=call_llm,
+        context=context_manager,
+        executor=tool_executor,
+        max_rounds=MAX_ITERATIONS,
+        loop_impl=run_legacy,
+    )
+    runtime_ref["runtime"] = runtime
+    return runtime.run()

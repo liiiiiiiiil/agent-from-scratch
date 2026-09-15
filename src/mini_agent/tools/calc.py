@@ -27,4 +27,5 @@ calculate_tool = Tool(
         "required": ["expression"],
     },
     handler=calculate,
+    delegation_capability="pure_compute",
 )

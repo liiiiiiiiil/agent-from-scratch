@@ -1,6 +1,26 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.33**（崩溃恢复与不确定副作用交接；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.34**（最小受控子代理委派；含此前可靠执行能力）。
+
+## v0.34 最小受控子代理委派
+
+父 Agent 可以通过 `delegate_task` 同步委派一个单层只读调查。子代理拥有独立的 State、Context、loop、项目提示词和固定 PermissionGate；它只看见 `calculate`、`read_file`、`list_dir`、`grep`，不能写文件、运行 shell、操作进程、调用计划/恢复/验证工具或再次委派。父 Agent 仍独占工作区修改、主 Plan、权限、generation、权威 verification 和完成判定。
+
+工具参数为：`goal`（必填字符串）、`scope`（1–8 个工作区相对路径）、`constraints`、`expected_findings`、`requested_tools`（非空且只能是四个只读工具）、`selected_parent_facts`、`purpose`（`investigation` / `diagnosis` / `crash_investigation`），诊断或崩溃调查还必须带正确的 `source_id`；可选 `budget` 包含 `max_rounds`、`max_llm_calls`、`max_tool_calls`、`max_tokens`、`max_result_bytes`、`timeout_seconds`。
+
+scope 会拒绝绝对路径、`..`、`config_local.py`、符号链接逃逸和工作区外路径；每一次子文件工具调用都会再次检查。selected facts 不得包含明显的 API key、Authorization、Bearer、token、secret 或 password 内容。父任务处于 `awaiting_approval`、`verification_required`、`blocked` 或 `failed` 时拒绝委派；诊断和 crash investigation 必须精确引用当前活动事实。
+
+v0.34 固定护栏为 8 rounds、8 次 LLM calls、24 次 tool calls、32,000 个保守估算 token、12 KiB 最终 JSON 和 120 秒墙钟时间。超限返回 `budget_exhausted`；超时只在同步边界检查，不强制中断已经发出的 HTTP 请求。子代理的失败、超时或预算耗尽也会返回一个结构化 tool result，不自动创建父 FailureEvent。
+
+子代理最终只允许输出以下报告体：
+
+```json
+{"summary":"...","findings":[],"evidence":[],"limitations":[]}
+```
+
+Runtime 会补充 UUID、父子 ID、`outcome`、usage、时间戳和合同 hash，并校验证据 ID 唯一、finding 引用不悬空、scope 内路径、正行号、合法工具名和 SHA-256 observation hash。非法报告只获得一次受保护格式修正；再次非法或修正阶段再次调用工具时返回 `failed/invalid_result`。子 evidence 不写入父 `verification_evidence`，只能作为父 Agent 的调查输入。
+
+v0.34 每个父工具回合只允许一个 `delegate_task`，同步等待后父 Context 只收到一个按模型顺序提交的 `role=tool` JSON 结果。未实现多子代理并行、后台取消、父任务聚合预算、持久化 DelegationRecord 或跨 session 恢复；`/new`、`/reset` 和退出会在当前同步 handler 返回后才继续处理。
 
 ## v0.33 会话持久化、崩溃恢复与安全交接
 
@@ -343,7 +363,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.33，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.34，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

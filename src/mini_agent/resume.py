@@ -478,10 +478,12 @@ def prepare_resume(store: SessionStore, session_id: str,
     )
     historical_process_ids = [item.process_id for item in state.processes]
     process_manager = ProcessManager(historical_process_ids=historical_process_ids)
-    # The restored State already owns the metadata-only checkpoint store rooted
-    # at the validated workspace.  Leaving workspace_root unset preserves that
-    # store instead of asking the normal fresh-runtime path to create another.
-    registry = create_registry(state, process_manager=process_manager)
+    # create_registry preserves the restored metadata-only checkpoint store;
+    # workspace_root is still passed so delegation uses the validated session
+    # workspace rather than the caller's ambient current directory.
+    registry = create_registry(
+        state, workspace_root=root, process_manager=process_manager,
+    )
     permission_gate = PermissionGate()
     tool_executor = ToolExecutor(
         registry, gate=permission_gate, on_result=state.record_tool,

@@ -13,7 +13,7 @@
 - [`session-persistence-resume-plan.md`](session-persistence-resume-plan.md) — 阶段九会话持久化与恢复实施计划（v0.30 会话持久化 / v0.31 安全恢复 / v0.32 持久工具边界 / v0.33 崩溃恢复）。
 
 阶段九已完成：v0.30–v0.33 已实现安全点保存、跨进程恢复、持久工具边界和崩溃后的不确定调用交接；源 session 不覆盖，旧调用不自动 replay。
-- [`subagent-delegation-plan.md`](subagent-delegation-plan.md) — 阶段十受控子代理委派实施计划（v0.34 最小委派 / v0.35 生命周期与预算 / v0.36 有界并行 / v0.37 持久委派）；保持子代理只读、单层，由父 Agent 独占修改和完成判定。
+- [`subagent-delegation-plan.md`](subagent-delegation-plan.md) — 阶段十受控子代理委派实施计划；v0.34 最小同步只读委派已实现，v0.35 生命周期与预算、v0.36 有界并行、v0.37 持久委派待实施。保持子代理只读、单层，由父 Agent 独占修改和完成判定。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

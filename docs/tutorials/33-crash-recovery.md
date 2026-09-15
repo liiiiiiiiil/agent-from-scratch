@@ -169,6 +169,8 @@ PYTHONPATH=src python -m mini_agent --resume <source_session_id>
 
 本版新增的是“崩溃后的可解释交接”，不是无限可靠的外部事务恢复。后续课程如继续扩展，应沿用源 session 不覆盖、不自动 replay、重新授权和独立 verification 这些边界。
 
+下一课：[第 34 课：最小受控子代理委派](34-minimal-delegation.md)。
+
 - [State 恢复记录（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/state.py)
 - [Session claim 与派生 session（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/session.py)
 - [恢复候选分流（v0.33）](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.33/src/mini_agent/resume.py)

@@ -32,6 +32,7 @@ PERMISSION_RULES = {
     "commit_plan": ALLOW,
     "update_plan_progress": ALLOW,
     "request_replan": ALLOW,
+    "delegate_task": ALLOW,
     "read_file": ALLOW,
     "calculate": ALLOW,
     "list_dir": ALLOW,  # 只读，放行

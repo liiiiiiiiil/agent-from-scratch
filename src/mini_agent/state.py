@@ -805,8 +805,51 @@ class AgentState:
                 "read_file", "list_dir", "grep", "calculate",
                 "get_process", "read_process", "list_processes", "wait_process",
             }
+            if name == "delegate_task" and isinstance(arguments, dict):
+                if arguments.get("purpose") == "crash_investigation":
+                    return None
             if name not in allowed or effect_class != "none":
                 return "工具调用拒绝: crash recovery 仍有未结算 issue；当前只允许只读调查"
+            return None
+
+    def delegation_gate(self, name: str, arguments: dict[str, Any] | None = None,
+                        effect_class: EffectClass = "none") -> str | None:
+        """Gate the parent-only delegate_task contract before its handler."""
+        if name != "delegate_task":
+            return None
+        arguments = arguments if isinstance(arguments, dict) else {}
+        with self._lock:
+            if self.status in ("blocked", "failed"):
+                return "工具调用拒绝: blocked/failed 状态不能委派"
+            if self.status != "running":
+                return "工具调用拒绝: 当前任务不在 idle/running 委派状态"
+            if effect_class != "none":
+                return "工具调用拒绝: delegate_task 必须是无副作用调用"
+            phase = self.planning_state.phase
+            repair = self._repair_phase
+            purpose = arguments.get("purpose")
+            source_id = arguments.get("source_id")
+            if phase == "awaiting_approval" or repair == "verification_required":
+                return "工具调用拒绝: 当前阶段不能委派调查"
+            unresolved = [item for item in self.crash_issues
+                          if item.status in ("unresolved", "investigating")]
+            if unresolved:
+                investigating = [item for item in unresolved if item.status == "investigating"]
+                if purpose != "crash_investigation" or not investigating:
+                    return "工具调用拒绝: crash recovery 只允许调查当前 investigating issue"
+                if source_id not in {
+                        item.issue_id for item in investigating
+                    } | {item.recovery_id for item in investigating}:
+                    return "工具调用拒绝: crash_investigation 必须引用当前 issue"
+                return None
+            if repair == "diagnosis_required":
+                if purpose != "diagnosis" or source_id != self._active_failure_id:
+                    return "工具调用拒绝: diagnosis 必须引用当前 active_failure_id"
+                return None
+            if purpose != "investigation":
+                return "工具调用拒绝: 当前空闲阶段只允许 investigation"
+            if phase not in ("direct", "exploring", "executing"):
+                return "工具调用拒绝: 当前计划阶段不能委派调查"
             return None
 
     def begin_crash_recovery(

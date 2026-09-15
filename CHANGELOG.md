@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [v0.34.0] - Minimal controlled subagent delegation
+
+- Added synchronous, single-level `delegate_task` with isolated child State/Context, fixed read-only capabilities, workspace scope checks, bounded budgets, and a strict structured result contract.
+- Added immutable delegation dataclasses, evidence/reference validation, one format-correction attempt, estimated usage accounting, and deterministic single-child busy rejection.
+- Kept the parent Agent as the only owner of permissions, Plan, workspace changes, generation, authoritative verification, and completion; parallel delegation, cancellation, aggregate budgets, and durable delegation records remain future work.
+
 ## [v0.33.0] - Crash recovery and uncertain-effect handoff
 
 - Added schema 3 crash recovery for active pending tool boundaries. Recovery derives a new session, preserves the source byte-for-byte, and uses a private atomic claim sidecar to prevent duplicate branches.

@@ -206,7 +206,9 @@ def main():
     else:
         state = AgentState()
         process_manager = ProcessManager()
-        run_registry = create_registry(state, process_manager=process_manager)
+        run_registry = create_registry(
+            state, workspace_root=os.getcwd(), process_manager=process_manager,
+        )
         registry = run_registry
         instructions = InstructionLoader(os.getcwd()).load()
         history = []
