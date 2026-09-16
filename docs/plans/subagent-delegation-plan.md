@@ -1,6 +1,6 @@
 # 阶段十：受控子代理委派（Controlled Subagent Delegation）实施计划
 
-> 状态：`v0.34` 已实现并保留；`v0.35`–`v0.39` 待实施
+> 状态：`v0.34`、`v0.35` 已实现并保留；`v0.36`–`v0.39` 待实施
 > 建议版本范围：`v0.34`–`v0.39`
 > 能力前置：阶段七结构化计划（`v0.22`–`v0.25`）、阶段八任务与进程边界（`v0.26`–`v0.29`）、阶段九的安全恢复与持久化工具边界（`v0.30`–`v0.32`）
 > 关联计划：`adaptive-planning-plan.md`、`process-management-plan.md`、`session-persistence-resume-plan.md`
@@ -499,7 +499,7 @@ delegations
 实施状态：
 
 - [x] `v0.34`：单个、同步、单层、只读委派与 Task / Result Contract。
-- [ ] `v0.35`：共享 canonical Agent Runtime / Loop，父子差异配置化。
+- [x] `v0.35`：共享 canonical Agent Runtime / Loop，父子差异配置化。
 - [ ] `v0.36`：多 provider、协议适配和父子独立模型绑定。
 - [ ] `v0.37`：生命周期、取消和聚合预算。
 - [ ] `v0.38`：有界并行和按父顺序提交。
@@ -520,6 +520,10 @@ delegations
 建议新增或修改：`runtime.py`、`agent.py`、`delegation.py`、`context.py`、`tests/test_shared_runtime_v035.py`。
 
 验收重点：父子均实际进入同一个 `run()` 实现；参数化的模拟 LLM/工具测试验证相同协议骨架在不同配置下成立，代码审查确认没有残留第二套循环。完整父回归覆盖 Plan/Repair、progress marker、process/stdin、v0.32 提交失败及 v0.33 恢复；子 v0.34 合同与隔离测试继续通过。只共用 HTTP/helper 或在壳内切换 legacy 路径不能通过验收。
+
+实施记录（v0.35）：最终接口为 `AgentRuntime(*, llm_client, context, executor, policy, max_rounds, output=None, session_boundary=None).run()`，返回包含内容、停止原因、轮次、LLM 调用数、工具调用数和估算 token 数的 `RuntimeResult`。`RuntimePolicy` 只负责决定、拒绝结果、提示和 observation 格式化；Runtime 独占 LLM 请求、assistant/tool 消息追加、handler 准入、按模型顺序提交和整轮完成。`normalize_tool_calls()` 返回 `NormalizedToolRound`，为坏调用分配唯一 `local-error-N` 并闭合协议。
+
+与原建议的差异：`output` 和 `session_boundary` 保留为可选依赖；父策略把 v0.33 的 process sync、Plan/Repair gate、progress marker 和 terminal 语义接入统一 Runtime；子策略保留 v0.34 的固定预算、scope observation、Result Contract 和一次格式修正。纯只读工具仍可并行执行，但 durable admission 和结果提交由 Runtime 统一按模型顺序收口。本版不引入 provider 选择、生命周期/聚合预算、取消、多个子代理或新的 session/State/tool schema。
 
 ### 8.3 `v0.36` 多 provider 与模型选择
 

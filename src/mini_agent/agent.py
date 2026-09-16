@@ -1,19 +1,18 @@
-"""带工具的 Agent Loop（流式）：调 LLM -> 若要工具则执行 -> 结果回灌 -> 再调，循环到纯文本回复或上限。"""
+"""带工具的 Agent 入口与父 Agent 策略。"""
 
-import http.client
 import hashlib
+import http.client
 import json
 import math
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
+from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
 from mini_agent.context import ContextManager
 from mini_agent.output import TerminalOutput
-from mini_agent.tools import registry
-from mini_agent.tools.base import ExecutionResult, ToolAdmission, ToolExecutor
+from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
 from mini_agent.state import canonical_arguments_hash
-from mini_agent.tools.base import validate_arguments
-from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
+from mini_agent.tools import registry
+from mini_agent.tools.base import ExecutionResult, ToolExecutor, validate_arguments
 
 
 _MAX_PROVIDER_ERROR_LENGTH = 1000
@@ -77,7 +76,7 @@ def _safe_print(*args, **kwargs):
 
 
 def _recovery_rejection_content(state, arguments, detail):
-    """Record one identifiable rejected recover call and return its tool result."""
+    """Record one identifiable rejected recover call and return its result."""
     if state is None or not hasattr(state, "reject_recovery"):
         return json.dumps({"status": "rejected", "message": str(detail)[:1200]}, ensure_ascii=False)
     arguments = arguments if isinstance(arguments, dict) else {}
@@ -105,22 +104,20 @@ _PLAN_CONTROL_TOOLS = {
     "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress",
     "request_replan",
 }
-_STAGNATION_EXCLUDED_TOOLS = _PLAN_CONTROL_TOOLS | {
-    "recover", "rollback_checkpoint",
-}
+_STAGNATION_EXCLUDED_TOOLS = _PLAN_CONTROL_TOOLS | {"recover", "rollback_checkpoint"}
 
 
-def _normalized_action_arguments(registry, name, arguments):
+def _normalized_action_arguments(tool_registry, name, arguments):
     try:
-        return validate_arguments(registry.get(name).parameters, arguments)
+        return validate_arguments(tool_registry.get(name).parameters, arguments)
     except (TypeError, ValueError):
         return arguments
 
 
-def _round_fingerprint(registry, parsed_calls):
+def _round_fingerprint(tool_registry, parsed_calls):
     parts = [
         (name, canonical_arguments_hash(
-            _normalized_action_arguments(registry, name, arguments),
+            _normalized_action_arguments(tool_registry, name, arguments),
         ))
         for name, arguments in parsed_calls
     ]
@@ -153,14 +150,7 @@ def _stable_observation_hash(execution):
 
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
              on_content=None, timeout=None):
-    """流式调用 LLM。逐 chunk 累积，返回与非流式格式一致的 message dict。
-
-    用 http.client + Accept-Encoding: identity 绕过网关 502。
-    按 BASE_URL 的 scheme 选 HTTP/HTTPSConnection（https 网关如 api.deepseek.com）。
-    ``stream_output`` 为真时，正文通过 ``on_content`` 逐 chunk 观察；没有
-    回调时保留独立调用的 print 行为。为假时既不调用回调也不打印正文。
-    tool_calls 的 arguments 跨 chunk 拼接。
-    """
+    """流式调用 LLM，使用标准库 HTTP 和 ``Accept-Encoding: identity``。"""
     if stream_output is None:
         stream_output = OUTPUT_MODE != "quiet"
     request_timeout = 120 if timeout is None else timeout
@@ -226,9 +216,6 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
         if not choices:
             continue
         delta = choices[0].get("delta", {})
-
-        # content 边收边输出（打字机效果）；回调是观察能力，失败不能
-        # 影响 SSE 累积和后续协议解析。
         if delta.get("content"):
             content = delta["content"]
             content_parts.append(content)
@@ -240,8 +227,6 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
                         on_content(content)
                     except Exception:
                         pass
-
-        # tool_calls 的 arguments 跨 chunk 拼接
         for tc in delta.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 idx = len(tool_calls_acc)
@@ -253,7 +238,6 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
                 })
                 slot["function"] = tc
                 continue
-
             idx = tc.get("index", 0)
             try:
                 hash(idx)
@@ -287,7 +271,6 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
                     slot["function"]["arguments"] = raw_arguments
 
     conn.close()
-
     if stream_error:
         raise LLMResponseError(f"服务商返回错误：{stream_error}")
     if not saw_sse_event:
@@ -299,9 +282,7 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
 
     message = {"role": "assistant", "content": "".join(content_parts) or None}
     if tool_calls_acc:
-        message["tool_calls"] = [
-            tool_calls_acc[i] for i in sorted(tool_calls_acc)
-        ]
+        message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
     return message
 
 
@@ -310,48 +291,15 @@ def summarize_messages(messages):
     return call_llm(messages, include_tools=False, stream_output=False).get("content", "") or ""
 
 
-def _legacy_agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor,
-                       llm_client=None, max_rounds=None):
-    """循环调用 LLM，并通过注入的 executor 回灌工具结果。
+class ParentRuntimePolicy:
+    """Parent-only state, process, planning, repair, and completion policy."""
 
-    ContextManager 拥有并维护 history；本函数只向其 history 追加
-    assistant 和 tool 消息，不把 AgentState 序列化到 messages。Executor
-    Runtime 将结构化 ExecutionResult 记录到 AgentState。每个带
-    tool_calls 的 assistant 消息在下一次 LLM 调用或本函数返回前，都会
-    追加全部对应的 tool result，且结果保持 tool_calls 的原始顺序。
-    """
-    # Remind once for each observable progress state. Old/custom State
-    # implementations without ``progress_marker`` retain one-reminder
-    # compatibility behavior.
-    reminded_progress_marker = None
-    legacy_reminded = False
-    internal_retry = False
-    output = TerminalOutput(OUTPUT_MODE)
-    session_boundary = getattr(tool_executor, "session_boundary", None)
-    llm_client = llm_client or call_llm
+    def __init__(self) -> None:
+        self.reminded_progress_marker = None
+        self.legacy_reminded = False
 
-    def _finish(value):
-        output.close()
-        return value
-
-    def _sync_processes():
-        state = getattr(context_manager, "state", None)
-        manager = getattr(getattr(tool_executor, "registry", None), "_process_manager", None)
-        if state is None or manager is None or not hasattr(state, "sync_processes"):
-            return
-        task_id = getattr(state, "task_id", "")
-        if not task_id:
-            return
-        facts = manager.sync_processes(task_id)
-        events = state.sync_processes(facts)
-        if session_boundary is not None and facts:
-            # Natural process exits are durable State facts without a new
-            # role=tool message.  A storage error intentionally bubbles out.
-            session_boundary.persist_process_sync(state, context_manager)
-        return events
-
+    @staticmethod
     def _terminal_state_result(state):
-        """Return the loop result for a terminal State, if it became terminal."""
         status = getattr(state, "status", None) if state is not None else None
         if status == "blocked":
             return f"任务已阻塞：{getattr(state, 'terminal_reason', '') or '任务已阻塞'}"
@@ -359,215 +307,156 @@ def _legacy_agent_loop(context_manager: ContextManager, tool_executor: ToolExecu
             return f"任务已失败：{getattr(state, 'terminal_reason', '') or '任务已失败'}"
         return None
 
-    initial_state = getattr(context_manager, "state", None)
-    if (initial_state is not None and
-            getattr(getattr(initial_state, "planning_state", None), "phase", None) == "awaiting_approval"):
-        return _finish("计划等待用户决定")
+    @staticmethod
+    def _sync_processes(runtime):
+        context = runtime.context
+        executor = runtime.executor
+        state = getattr(context, "state", None)
+        manager = getattr(getattr(executor, "registry", None), "_process_manager", None)
+        if state is None or manager is None or not hasattr(state, "sync_processes"):
+            return
+        task_id = getattr(state, "task_id", "")
+        if not task_id:
+            return
+        facts = manager.sync_processes(task_id)
+        state.sync_processes(facts)
+        if runtime.session_boundary is not None and facts:
+            runtime.session_boundary.persist_process_sync(state, context)
 
-    round_limit = MAX_ITERATIONS if max_rounds is None else max_rounds
-    for i in range(round_limit):
-        status_before_sync = getattr(getattr(context_manager, "state", None), "status", None)
-        _sync_processes()
-        terminal_result = _terminal_state_result(getattr(context_manager, "state", None))
-        if status_before_sync not in ("blocked", "failed") and terminal_result is not None:
-            return _finish(terminal_result)
-        prepared_messages = context_manager.prepare_messages()
-        if not internal_retry:
-            output.round_start(i + 1)
-        internal_retry = False
-        run_registry = getattr(tool_executor, "registry", None)
-        if run_registry is None:
-            msg = llm_client(prepared_messages, on_content=output.assistant_delta)
-        else:
-            msg = llm_client(
-                prepared_messages,
-                tool_registry=run_registry,
-                on_content=output.assistant_delta,
+    def before_run(self, runtime):
+        state = getattr(runtime.context, "state", None)
+        if (state is not None and
+                getattr(getattr(state, "planning_state", None), "phase", None) == "awaiting_approval"):
+            return RuntimeDecision("finish", "计划等待用户决定", "awaiting_approval")
+        return None
+
+    def before_prepare(self, runtime):
+        state = getattr(runtime.context, "state", None)
+        status_before_sync = getattr(state, "status", None)
+        self._sync_processes(runtime)
+        terminal = self._terminal_state_result(state)
+        if (terminal is not None
+                and status_before_sync not in ("blocked", "failed")):
+            return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
+        return None
+
+    def before_llm(self, runtime):
+        return None
+
+    def llm_options(self, runtime):
+        options = {"stream_output": True}
+        if runtime.output is not None and hasattr(runtime.output, "assistant_delta"):
+            options["on_content"] = runtime.output.assistant_delta
+        return options
+
+    @staticmethod
+    def _rejection(runtime, index, text, error_kind, *, wrapped=None):
+        name, arguments = runtime.parsed_calls[index]
+        if wrapped is not None:
+            text = json.dumps(wrapped, ensure_ascii=False)
+        return ExecutionResult(
+            name, arguments, "not_checked", False, "invalid", 0,
+            runtime.effects[index], text, text[:200], error_kind=error_kind,
+        )
+
+    def on_text(self, runtime, content):
+        state = getattr(runtime.context, "state", None)
+        self._sync_processes(runtime)
+        terminal = self._terminal_state_result(state)
+        if terminal is not None:
+            return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
+        if (state is not None and hasattr(state, "active_process_records")
+                and state.active_process_records()):
+            state.enter_awaiting_process("still_running")
+            return RuntimeDecision("finish", content, "awaiting_process")
+        if (state is not None
+                and getattr(getattr(state, "planning_state", None), "phase", None) == "exploring"
+                and getattr(state, "repair_phase", "idle") == "idle"
+                and getattr(state, "user_plan_decisions", None)
+                and state.user_plan_decisions[-1].decision == "continue_exploring"
+                and state.user_plan_decisions[-1].revision_id == state.planning_state.active_revision_id):
+            return RuntimeDecision("finish", content, "continue_exploring")
+        reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
+        if reminder:
+            if "progress_marker" not in reminder:
+                if self.legacy_reminded:
+                    if state is not None:
+                        state.status = "blocked"
+                    return RuntimeDecision("finish", content, "blocked")
+                self.legacy_reminded = True
+            else:
+                marker = reminder.get("progress_marker")
+                if marker == self.reminded_progress_marker:
+                    if state is not None:
+                        state.status = "blocked"
+                    return RuntimeDecision("finish", content, "blocked")
+                self.reminded_progress_marker = marker
+            # A Runtime Notice retry is an internal continuation of the same
+            # round from the terminal user's point of view.
+            runtime.suppress_next_round_output = True
+            return RuntimeDecision(
+                "continue",
+                notice=str(reminder.get(
+                    "message",
+                    "请在下一条回复中调用推进任务的工具；确实无法继续时说明具体阻塞原因。",
+                )),
             )
-        output.assistant_end()
+        return RuntimeDecision("finish", content, "text")
 
-        tool_calls = msg.get("tool_calls", [])
-        invalid_tool_call_ids = set()
-        if tool_calls:
-            original_ids = {
-                tc.get("id")
-                for tc in tool_calls
-                if (
-                    isinstance(tc, dict)
-                    and isinstance(tc.get("id"), str)
-                    and tc.get("id").strip()
-                )
-            }
-            used_ids = set()
-            next_local_id = 0
-            normalized_tool_calls = []
-            invalid_tool_call_errors = {}
-
-            for tc in tool_calls:
-                raw_id = tc.get("id") if isinstance(tc, dict) else None
-                raw_type = tc.get("type") if isinstance(tc, dict) else None
-                raw_function = tc.get("function") if isinstance(tc, dict) else None
-                raw_name = raw_function.get("name") if isinstance(raw_function, dict) else None
-                raw_arguments = (
-                    raw_function.get("arguments")
-                    if isinstance(raw_function, dict)
-                    else None
-                )
-
-                errors = []
-                if not isinstance(raw_id, str) or not raw_id.strip():
-                    errors.append("无效的 tool_call_id")
-                elif raw_id in used_ids:
-                    errors.append("重复的 tool_call_id")
-                if raw_type != "function":
-                    errors.append("非法的 tool_call.type")
-
-                valid_name = isinstance(raw_name, str) and bool(raw_name.strip())
-                if not valid_name:
-                    errors.append("非法的 function.name")
-
-                valid_arguments = isinstance(raw_arguments, str)
-                if valid_arguments:
-                    try:
-                        parsed_arguments = json.loads(raw_arguments)
-                    except json.JSONDecodeError:
-                        valid_arguments = False
-                    else:
-                        valid_arguments = isinstance(parsed_arguments, dict)
-                if not valid_arguments:
-                    errors.append("非法的 function.arguments")
-
-                if not errors:
-                    tool_call_id = raw_id
-                else:
-                    while True:
-                        tool_call_id = f"local-error-{next_local_id}"
-                        next_local_id += 1
-                        if tool_call_id not in used_ids and tool_call_id not in original_ids:
-                            break
-                    invalid_tool_call_errors[tool_call_id] = (
-                        f"工具调用失败: {'; '.join(errors)}"
-                    )
-
-                used_ids.add(tool_call_id)
-                normalized_tool_calls.append({
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": raw_name if valid_name else "invalid_tool_call",
-                        "arguments": raw_arguments if valid_arguments else "{}",
-                    },
-                })
-
-            msg = dict(msg)
-            msg["tool_calls"] = normalized_tool_calls
-
-        context_manager.history.append(msg)
-
-        # 无 tool_calls = 模型给出最终文本回复，结束
-        if not msg.get("tool_calls"):
-            state = getattr(context_manager, "state", None)
-            _sync_processes()
-            terminal_result = _terminal_state_result(state)
-            if terminal_result is not None:
-                return _finish(terminal_result)
-            if (state is not None and hasattr(state, "active_process_records")
-                    and state.active_process_records()):
-                state.enter_awaiting_process("still_running")
-                return _finish(msg.get("content", ""))
-            if (state is not None and
-                    getattr(getattr(state, "planning_state", None), "phase", None) == "exploring" and
-                    getattr(state, "repair_phase", "idle") == "idle" and
-                    getattr(state, "user_plan_decisions", None) and
-                    state.user_plan_decisions[-1].decision == "continue_exploring" and
-                    state.user_plan_decisions[-1].revision_id == state.planning_state.active_revision_id):
-                # The user may review the unchanged revision after more
-                # investigation; this text pauses at the CLI handoff.
-                return _finish(msg.get("content", ""))
-            reminder = state.completion_reminder() if state is not None and hasattr(state, "completion_reminder") else None
-            if reminder:
-                if "progress_marker" not in reminder:
-                    # Compatibility for old/custom State objects.
-                    if legacy_reminded:
-                        if state is not None:
-                            state.status = "blocked"
-                        return _finish(msg.get("content", ""))
-                    legacy_reminded = True
-                else:
-                    marker = reminder.get("progress_marker")
-                    if marker == reminded_progress_marker:
-                        if state is not None:
-                            state.status = "blocked"
-                        return _finish(msg.get("content", ""))
-                    reminded_progress_marker = marker
-                if hasattr(context_manager, "set_runtime_notice"):
-                    context_manager.set_runtime_notice(str(reminder.get(
-                        "message", "请在下一条回复中调用推进任务的工具；确实无法继续时说明具体阻塞原因。"
-                    )))
-                internal_retry = True
-                continue
-            return _finish(msg.get("content", ""))
-
-        # 只有全 effect_class=none 的回合可以并发。任何 possible effect
-        # 都令整轮按模型顺序执行和提交，保证 generation 的确定性。
-        tool_calls = msg["tool_calls"]
-        state = getattr(context_manager, "state", None)
-        structured = hasattr(tool_executor, "execute_result") and run_registry is not None
-
-        parsed_calls = []
-        effects = []
-        for tc in tool_calls:
-            function = tc.get("function", {}) if isinstance(tc, dict) else {}
-            try:
-                args = json.loads(function.get("arguments", "{}"))
-                if not isinstance(args, dict):
-                    raise TypeError("tool arguments 必须是 JSON object")
-            except (TypeError, json.JSONDecodeError):
-                args = {}
-            name = function.get("name", "invalid_tool_call")
-            parsed_calls.append((name, args))
-            try:
-                effect = run_registry.effect_for(name, args) if structured else "none"
-            except (TypeError, ValueError):
-                effect = "none"
-            effects.append(effect)
+    def prepare_tool_round(self, runtime, calls):
+        parsed_calls = runtime.parsed_calls
+        effects = runtime.effects
+        state = getattr(runtime.context, "state", None)
+        process_observation_tools = {"get_process", "read_process", "list_processes", "wait_process"}
         has_possible = "possible" in effects or any(name == "recover" for name, _ in parsed_calls)
-        has_serial_plan_write = any(
-            name in _PLAN_CONTROL_TOOLS for name, _ in parsed_calls
-        )
-        process_observation_tools = {
-            "get_process", "read_process", "list_processes", "wait_process",
-        }
-        has_serial_process_observation = any(
-            name in process_observation_tools for name, _ in parsed_calls
-        )
-        wait_batch_errors = {}
+        has_serial_plan_write = any(name in _PLAN_CONTROL_TOOLS for name, _ in parsed_calls)
+        has_serial_process_observation = any(name in process_observation_tools for name, _ in parsed_calls)
+        rejections = {}
+
         if len(parsed_calls) != 1 and any(name == "wait_process" for name, _ in parsed_calls):
-            wait_batch_errors = {
-                index: "工具调用拒绝: wait_process 必须独占一个工具回合"
-                for index in range(len(parsed_calls))
-            }
-        planning_batch_errors = {}
+            for index in range(len(parsed_calls)):
+                rejections[index] = self._rejection(
+                    runtime, index,
+                    "工具调用拒绝: wait_process 必须独占一个工具回合",
+                    "wait_batch_gate",
+                    wrapped={"status": "error", "error_kind": "wait_batch_gate",
+                             "message": "工具调用拒绝: wait_process 必须独占一个工具回合"},
+                )
+
         planning_phase = getattr(getattr(state, "planning_state", None), "phase", "direct")
         plan_controls = {"begin_plan", "cancel_planning"}
         if (len(parsed_calls) != 1 and
-                (any(name in plan_controls for name, _ in parsed_calls) or
-                 any(name == "request_replan" for name, _ in parsed_calls) or
-                 (planning_phase == "exploring" and
-                  any(name == "commit_plan" for name, _ in parsed_calls)))):
+                (any(name in plan_controls for name, _ in parsed_calls)
+                 or any(name == "request_replan" for name, _ in parsed_calls)
+                 or (planning_phase == "exploring"
+                     and any(name == "commit_plan" for name, _ in parsed_calls)))):
             detail = (
                 "工具调用拒绝: request_replan、规划阶段切换或 exploring 中的 "
                 "commit_plan 必须独占一个工具回合"
             )
-            planning_batch_errors = {index: detail for index in range(len(parsed_calls))}
-        delegation_batch_errors = {}
-        delegation_indexes = [
-            index for index, (name, _) in enumerate(parsed_calls)
-            if name == "delegate_task"
-        ]
-        if delegation_indexes and len(parsed_calls) != 1:
+            for index in range(len(parsed_calls)):
+                if index not in rejections:
+                    name = parsed_calls[index][0]
+                    if name in _PLAN_CONTROL_TOOLS:
+                        rejections[index] = self._rejection(
+                            runtime, index,
+                            json.dumps({"status": "plan_rejected", "message": detail}, ensure_ascii=False),
+                            "plan_rejected",
+                        )
+                    else:
+                        rejections[index] = self._rejection(runtime, index, detail, "planning_phase_gate")
+
+        if any(name == "delegate_task" for name, _ in parsed_calls) and len(parsed_calls) != 1:
             detail = "工具调用拒绝: delegate_task 必须独占一个工具回合"
-            delegation_batch_errors = {index: detail for index in range(len(parsed_calls))}
+            for index in range(len(parsed_calls)):
+                if index not in rejections:
+                    rejections[index] = self._rejection(
+                        runtime, index,
+                        json.dumps({"status": "error", "error_kind": "delegation_batch_gate",
+                                    "message": detail}, ensure_ascii=False),
+                        "delegation_batch_gate",
+                    )
+
         has_other_possible = any(
             effect == "possible" and not (
                 name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -576,322 +465,91 @@ def _legacy_agent_loop(context_manager: ContextManager, tool_executor: ToolExecu
         )
         invalid_verifications = {
             index for index, (name, args) in enumerate(parsed_calls)
-            if has_other_possible and name == "run_shell" and args.get("purpose", "execution") == "verification"
+            if has_other_possible and name == "run_shell"
+            and args.get("purpose", "execution") == "verification"
         }
-        durable_invocations = {
-            index: f"r-{sum(1 for item in context_manager.history
-                              if isinstance(item, dict) and item.get("role") == "assistant"
-                              and item.get("tool_calls"))}-c-{index}"
-            for index in range(len(tool_calls))
-        }
-        if session_boundary is not None:
-            session_boundary.start_round(
-                max(1, sum(1 for item in context_manager.history
-                           if isinstance(item, dict) and item.get("role") == "assistant"
-                           and item.get("tool_calls"))),
-                msg,
-                [{
-                    "invocation_id": durable_invocations[index],
-                    "tool_call_id": tc.get("id"),
-                    "tool": parsed_calls[index][0],
-                    "arguments": parsed_calls[index][1],
-                    "effect_class": effects[index],
-                } for index, tc in enumerate(tool_calls)],
-                state, context_manager,
+        for index in invalid_verifications:
+            if index not in rejections:
+                rejections[index] = self._rejection(
+                    runtime, index,
+                    "工具调用失败: verification 不能与 possible effect 处于同一回合",
+                    "mixed_verification",
+                )
+
+        repair_phase = getattr(state, "repair_phase", "idle") if state is not None else "idle"
+        recovery_indexes = [index for index, (name, _) in enumerate(parsed_calls) if name == "recover"]
+        if repair_phase == "diagnosis_required" and recovery_indexes and len(parsed_calls) != 1:
+            detail = "工具调用失败: diagnosis_required 阶段的 recover 必须独占一个工具回合"
+            for index in range(len(parsed_calls)):
+                if index not in rejections:
+                    kind = "recovery_rejected" if parsed_calls[index][0] == "recover" else "repair_phase_gate"
+                    rejections[index] = self._rejection(runtime, index, detail, kind)
+        elif repair_phase == "verification_required":
+            valid_single = (
+                len(parsed_calls) == 1
+                and parsed_calls[0][0] == "run_shell"
+                and parsed_calls[0][1].get("purpose", "execution") == "verification"
             )
-        repair_batch_errors = {}
-        if state is not None and hasattr(state, "repair_phase"):
-            repair_phase = state.repair_phase
-            recovery_indexes = [
-                index for index, (name, _) in enumerate(parsed_calls)
-                if name == "recover"
-            ]
-            if repair_phase == "diagnosis_required" and recovery_indexes and len(parsed_calls) != 1:
-                detail = "工具调用失败: diagnosis_required 阶段的 recover 必须独占一个工具回合"
-                repair_batch_errors = {index: detail for index in range(len(parsed_calls))}
-            elif repair_phase == "verification_required":
-                valid_single_verification = (
-                    len(parsed_calls) == 1
-                    and parsed_calls[0][0] == "run_shell"
-                    and parsed_calls[0][1].get("purpose", "execution") == "verification"
-                )
-                if not valid_single_verification:
-                    detail = "工具调用失败: verification_required 阶段下一工具回合只能是单个独立 verification"
-                    repair_batch_errors = {index: detail for index in range(len(parsed_calls))}
-
-        def _run(index_tc, pre_admission=None, admit_only=False):
-            index, tc = index_tc
-            tool_call_id = tc.get("id") if isinstance(tc, dict) else None
-            if structured and state is not None and getattr(state, "is_terminal", lambda: False)():
-                name, args = parsed_calls[index]
-                terminal = tool_executor.execute_result(name, args, state, notify=False)
-                return tool_call_id, terminal.tool_content(), None, terminal
-            if tool_call_id in invalid_tool_call_errors:
-                text = invalid_tool_call_errors[tool_call_id]
-                if structured and state is not None and parsed_calls[index][0] == "recover":
-                    content = _recovery_rejection_content(state, parsed_calls[index][1], text)
-                    display = ExecutionResult(
-                        "recover", parsed_calls[index][1], "not_checked", False,
-                        "invalid", 0, "none", content, content[:200],
-                        error_kind="malformed_tool_call",
-                    )
-                    return tool_call_id, content, None, display
-                invalid = ExecutionResult(
-                    "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
-                    "none", text, text[:200], error_kind="malformed_tool_call",
-                ) if structured else None
-                return tool_call_id, text, invalid, invalid
-
-            name, args = parsed_calls[index]
-            if index in delegation_batch_errors:
-                text = json.dumps({
-                    "status": "error",
-                    "error_kind": "delegation_batch_gate",
-                    "message": delegation_batch_errors[index],
-                }, ensure_ascii=False)
-                invalid = ExecutionResult(
-                    name, args, "not_checked", False, "invalid", 0,
-                    effects[index], text, text[:200], error_kind="delegation_batch_gate",
-                ) if structured else None
-                return tool_call_id, text, None, invalid
-            if index in wait_batch_errors:
-                text = json.dumps({"status": "error", "error_kind": "wait_batch_gate",
-                                   "message": wait_batch_errors[index]}, ensure_ascii=False)
-                invalid = ExecutionResult(
-                    name, args, "not_checked", False, "invalid", 0, "none",
-                    text, text[:200], error_kind="wait_batch_gate",
-                ) if structured else None
-                return tool_call_id, text, None, invalid
-            if index in planning_batch_errors:
-                text = planning_batch_errors[index]
-                is_plan = name in _PLAN_CONTROL_TOOLS
-                if is_plan:
-                    text = json.dumps({"status": "plan_rejected", "message": text}, ensure_ascii=False)
-                invalid = ExecutionResult(
-                    name, args, "not_checked", False, "invalid", 0, effects[index],
-                    text, text[:200],
-                    error_kind="plan_rejected" if is_plan else "planning_phase_gate",
-                ) if structured else None
-                return tool_call_id, text, None, invalid
-            if index in repair_batch_errors:
-                text = repair_batch_errors[index]
-                if parsed_calls[index][0] in _PLAN_CONTROL_TOOLS:
-                    text = json.dumps({
-                        "status": "plan_rejected",
-                        "message": text,
-                    }, ensure_ascii=False)
-                    invalid = ExecutionResult(
-                        parsed_calls[index][0], parsed_calls[index][1], "not_checked", False,
-                        "invalid", 0, "none", text, text[:200], error_kind="plan_rejected",
-                    ) if structured else None
-                    return tool_call_id, text, None, invalid
-                if structured and state is not None and name == "recover":
-                    content = _recovery_rejection_content(state, args, text)
-                    invalid = ExecutionResult(
-                        name, args, "not_checked", False, "invalid", 0, "none",
-                        content, content[:200], error_kind="recovery_rejected",
-                    )
-                    return tool_call_id, content, None, invalid
-                invalid = ExecutionResult(
-                    name, args, "not_checked", False, "invalid", 0, "none",
-                    text, text[:200], error_kind="repair_phase_gate",
-                ) if structured else None
-                return tool_call_id, text, invalid, invalid
-            if index in invalid_verifications:
-                text = "工具调用失败: verification 不能与 possible effect 处于同一回合"
-                invalid = ExecutionResult(
-                    name, args, "not_checked", False, "invalid", 0, "none",
-                    text, text[:200], error_kind="mixed_verification",
-                ) if structured else None
-                return tool_call_id, text, invalid, invalid
-
-            try:
-                function = tc["function"]
-                name = function["name"]
-                raw_arguments = function["arguments"]
-                args = json.loads(raw_arguments)
-                if not isinstance(args, dict):
-                    raise TypeError("tool arguments 必须是 JSON object")
-            except (KeyError, TypeError, json.JSONDecodeError) as error:
-                text = f"工具调用失败: {type(error).__name__}"
-                display = ExecutionResult(
-                    "invalid_tool_call", {}, "not_checked", False, "invalid", 0,
-                    "none", text, text[:200], error_kind="malformed_tool_call",
-                ) if structured else None
-                return tool_call_id, text, None, display
-
-            # Durable calls finish admission in the caller's thread.  A
-            # storage error from record_admission is deliberately outside the
-            # ordinary handler-error conversion below.
-            if structured and session_boundary is not None:
-                admission = pre_admission
-                if admission is None:
-                    admission = tool_executor.admit(name, args, state)
-                    if isinstance(admission, ToolAdmission):
-                        session_boundary.record_admission(
-                            durable_invocations[index], admission, state, context_manager,
+            if not valid_single:
+                detail = "工具调用失败: verification_required 阶段下一工具回合只能是单个独立 verification"
+                for index in range(len(parsed_calls)):
+                    if index not in rejections:
+                        kind = "plan_rejected" if parsed_calls[index][0] in _PLAN_CONTROL_TOOLS else (
+                            "recovery_rejected" if parsed_calls[index][0] == "recover" else "repair_phase_gate"
                         )
-                if isinstance(admission, ExecutionResult):
-                    execution = admission
-                else:
-                    if admit_only:
-                        return tool_call_id, None, admission, None
-                    execution = tool_executor.execute_admitted(admission, notify=False)
-                if admit_only:
-                    return tool_call_id, execution.tool_content(), execution, execution
-                if name == "recover":
-                    if execution.error_kind in ("task_terminal", "recovery_rejected"):
-                        content = execution.tool_content()
-                    elif execution.outcome != "succeeded":
-                        content = _recovery_rejection_content(state, args, execution.output_excerpt)
-                    else:
-                        content = execution.tool_content()
-                    return tool_call_id, content, None, execution
-                if execution.error_kind == "plan_rejected":
-                    return tool_call_id, execution.tool_content(), None, execution
-                if execution.error_kind == "task_terminal":
-                    return tool_call_id, execution.tool_content(), None, execution
-                return tool_call_id, execution.tool_content(), execution, execution
+                        rejections[index] = self._rejection(runtime, index, detail, kind)
+        return ToolRoundPlan(
+            serial=has_possible or has_serial_plan_write or has_serial_process_observation,
+            rejection_by_index=rejections,
+        )
 
-            # Isolate only this tool boundary so pool.map still returns one
-            # protocol result per call; LLM and CLI exceptions remain uncaught.
+    def after_tool_result(self, runtime, call, execution):
+        name, arguments = runtime.parsed_calls[next(
+            index for index, candidate in enumerate(runtime.normalized.calls)
+            if candidate["id"] == call["id"]
+        )]
+        if name == "recover":
+            if execution.error_kind == "recovery_rejected":
+                try:
+                    payload = json.loads(execution.output)
+                except (TypeError, ValueError):
+                    payload = None
+                if isinstance(payload, dict) and payload.get("recovery_id"):
+                    return execution.tool_content()
+                return _recovery_rejection_content(runtime.context.state, arguments, execution.output_excerpt)
+            if execution.error_kind == "malformed_tool_call":
+                return _recovery_rejection_content(runtime.context.state, arguments, execution.output_excerpt)
+            if execution.error_kind not in ("task_terminal",) and execution.outcome != "succeeded":
+                return _recovery_rejection_content(runtime.context.state, arguments, execution.output_excerpt)
+        return execution.tool_content()
+
+    def after_tool_round(self, runtime, calls, results):
+        state = getattr(runtime.context, "state", None)
+        self._sync_processes(runtime)
+        terminal = self._terminal_state_result(state)
+        if terminal is not None:
+            return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
+        if (len(runtime.parsed_calls) == 1 and runtime.parsed_calls[0][0] == "wait_process"
+                and results and results[0].outcome == "succeeded"):
             try:
-                if structured:
-                    execution = tool_executor.execute_result(name, args, state, notify=False)
-                    if name == "recover":
-                        if execution.error_kind in ("task_terminal", "recovery_rejected"):
-                            content = execution.tool_content()
-                        elif execution.outcome != "succeeded":
-                            content = _recovery_rejection_content(state, args, execution.output_excerpt)
-                        else:
-                            content = execution.tool_content()
-                        return tool_call_id, content, None, execution
-                    if execution.error_kind in ("plan_rejected", "task_terminal"):
-                        return tool_call_id, execution.tool_content(), None, execution
-                    return tool_call_id, execution.tool_content(), execution, execution
-                result = tool_executor.execute(name, args)
-                return tool_call_id, str(result), None, None
-            except Exception as error:
-                text = f"工具调用失败: {type(error).__name__}"
-                display = ExecutionResult(
-                    name, args, "not_checked", False, "failed", 0, "none",
-                    text, text[:200], error_kind="executor_exception",
-                )
-                return tool_call_id, text, None, display
-
-        indexed_calls = list(enumerate(tool_calls))
-        output.tools_start(tool_calls)
-
-        def _commit_one(index: int, result):
-            """Commit State, one protocol result, and the durable call ledger."""
-            tool_call_id, content, execution, display = result
-            committed_attempt = None
-            if (structured and state is not None and execution is not None
-                    and parsed_calls[index][0] != "recover"):
-                committed_attempt = state.record_execution_result(execution)
-            context_manager.history.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": content,
-            })
-            if session_boundary is not None:
-                boundary_execution = execution or display
-                if not isinstance(boundary_execution, ExecutionResult):
-                    raise RuntimeError("durable tool call 缺少 ExecutionResult")
-                session_boundary.record_execution_result(
-                    durable_invocations[index], boundary_execution, str(content),
-                    state, context_manager, committed_attempt,
-                )
-
-        if has_possible or has_serial_plan_write or has_serial_process_observation:
-            results = []
-            for item in indexed_calls:
-                result = _run(item)
-                results.append(result)
-                _commit_one(item[0], result)
-        else:
-            if session_boundary is not None and structured:
-                # Admission is deliberately serialized.  Once every call has
-                # its durable admission, handler bodies may run concurrently.
-                staged: dict[int, ToolAdmission] = {}
-                immediate: dict[int, tuple] = {}
-                for item in indexed_calls:
-                    prepared = _run(item, admit_only=True)
-                    if isinstance(prepared[2], ToolAdmission):
-                        staged[item[0]] = prepared[2]
-                    else:
-                        immediate[item[0]] = prepared
-                with ThreadPoolExecutor(max_workers=max(1, len(staged))) as pool:
-                    futures = {
-                        index: pool.submit(_run, (index, tool_calls[index]), admission)
-                        for index, admission in staged.items()
-                    }
-                    results = []
-                    # Persist every completed model-order prefix immediately;
-                    # a later result never overtakes an earlier pending call.
-                    for index, _ in indexed_calls:
-                        result = (
-                            immediate[index] if index in immediate
-                            else futures[index].result()
-                        )
-                        results.append(result)
-                        _commit_one(index, result)
-            else:
-                with ThreadPoolExecutor(max_workers=len(tool_calls)) as pool:
-                    results = list(pool.map(_run, indexed_calls))
-                # Concurrent handlers finish in arbitrary order; facts commit
-                # in model order so attempt ids and snapshots stay deterministic.
-                for index, result in enumerate(results):
-                    _commit_one(index, result)
-
-        # Threads execute concurrently, but terminal output follows tool-call order.
-        for tc, (tool_call_id, content, _, display) in zip(tool_calls, results):
-            function = tc.get("function", {}) if isinstance(tc, dict) else {}
-            name = function.get("name", "<missing>") if isinstance(function, dict) else "<missing>"
-            arguments = function.get("arguments", {}) if isinstance(function, dict) else {}
-            output.tool_result(name, arguments, content, display)
-        output.close()
-
-        if session_boundary is not None:
-            session_boundary.complete_round(state, context_manager)
-
-        # A process can exit while the tool round is being committed.  Sync
-        # only after every role=tool result is in history so the next context
-        # view sees one complete protocol round plus the lifecycle fact.
-        _sync_processes()
-
-        # A tool handler may exhaust a budget or apply a recovery strategy
-        # that makes the task terminal.  All results above must still be
-        # visible to the model protocol, but no additional LLM call may
-        # overwrite that terminal fact.
-        terminal_result = _terminal_state_result(state)
-        if terminal_result is not None:
-            return _finish(terminal_result)
-        if (len(parsed_calls) == 1 and parsed_calls[0][0] == "wait_process"
-                and results[0][2] is not None and results[0][2].outcome == "succeeded"):
-            try:
-                wait_result = json.loads(results[0][2].output)
+                wait_result = json.loads(results[0].output)
             except (TypeError, ValueError):
                 wait_result = {}
             if (wait_result.get("reason") == "still_running" and state is not None
-                    and hasattr(state, "active_process_records")
-                    and state.active_process_records()):
+                    and hasattr(state, "active_process_records") and state.active_process_records()):
                 state.enter_awaiting_process("still_running")
-                return _finish("后台进程或 stdin 写入仍未收束；可在 CLI 继续当前任务。")
-
-        # Observe only after every call has been executed or rejected, its
-        # State fact has been committed in model order, and its tool result is
-        # visible in history.  This keeps stagnation detection from creating a
-        # second, partial tool-round protocol.
+                return RuntimeDecision(
+                    "finish", "后台进程或 stdin 写入仍未收束；可在 CLI 继续当前任务。",
+                    "awaiting_process",
+                )
         if (state is not None and hasattr(state, "observe_tool_round")
-                and structured):
-            action_fingerprint = _round_fingerprint(run_registry, parsed_calls)
+                and getattr(runtime.executor, "registry", None) is not None
+                and hasattr(runtime.executor, "execute_result")):
+            tool_registry = getattr(runtime.executor, "registry", None)
+            action_fingerprint = _round_fingerprint(tool_registry, runtime.parsed_calls)
             observations = []
             effect_actions = []
-            for execution in (
-                item[2] for item in results
-                if isinstance(item[2], ExecutionResult)
-            ):
+            for execution in results:
                 if (execution.outcome != "succeeded" or not execution.handler_admitted
                         or execution.permission != "allowed"):
                     continue
@@ -905,47 +563,42 @@ def _legacy_agent_loop(context_manager: ContextManager, tool_executor: ToolExecu
                 elif execution.effect_class == "possible" and not is_verification:
                     if execution.tool not in _STAGNATION_EXCLUDED_TOOLS:
                         effect_actions.append(canonical_arguments_hash({
-                            "tool": execution.tool,
-                            "arguments": execution.arguments,
+                            "tool": execution.tool, "arguments": execution.arguments,
                         }))
             observation = state.observe_tool_round(
                 action_fingerprint, observations, effect_actions,
-                tuple(name for name, _ in parsed_calls),
+                tuple(name for name, _ in runtime.parsed_calls),
             )
-            if observation.get("warning") and hasattr(context_manager, "set_runtime_notice"):
-                context_manager.set_runtime_notice(str(observation["warning"]))
+            if observation.get("warning") and hasattr(runtime.context, "set_runtime_notice"):
+                runtime.context.set_runtime_notice(str(observation["warning"]))
             if observation.get("blocked"):
                 reason = observation.get("terminal_reason") or getattr(state, "terminal_reason", "")
-                return _finish(f"任务已阻塞：{reason}")
-            terminal_result = _terminal_state_result(state)
-            if terminal_result is not None:
-                return _finish(terminal_result)
-        if state is not None and getattr(state.planning_state, "phase", None) == "awaiting_approval":
-            return _finish("计划等待用户决定")
+                return RuntimeDecision("finish", f"任务已阻塞：{reason}", "blocked")
+            terminal = self._terminal_state_result(state)
+            if terminal is not None:
+                return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
+        if (state is not None
+                and getattr(getattr(state, "planning_state", None), "phase", None) == "awaiting_approval"):
+            return RuntimeDecision("finish", "计划等待用户决定", "awaiting_approval")
+        return None
 
-    state = getattr(context_manager, "state", None)
-    if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):
-        state.status = "failed"
-    return _finish("达到最大迭代次数")
+    def on_round_limit(self, runtime):
+        state = getattr(runtime.context, "state", None)
+        if state is not None and getattr(state, "status", None) not in ("blocked", "failed"):
+            state.status = "failed"
+        return RuntimeDecision("finish", "达到最大迭代次数", "round_limit")
 
 
 def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
-    """Compatibility entry point assembled through :class:`AgentRuntime`."""
-    from mini_agent.runtime import AgentRuntime
-    runtime_ref = {}
-
-    def run_legacy(context, executor):
-        runtime = runtime_ref["runtime"]
-        return _legacy_agent_loop(
-            context, executor, runtime.llm_client, runtime.max_rounds,
-        )
-
+    """Compatibility entry point assembled through the canonical Runtime."""
+    output = TerminalOutput(OUTPUT_MODE)
     runtime = AgentRuntime(
-        llm_client=call_llm,
+        llm_client=lambda messages, **kwargs: call_llm(messages, **kwargs),
         context=context_manager,
         executor=tool_executor,
+        policy=ParentRuntimePolicy(),
         max_rounds=MAX_ITERATIONS,
-        loop_impl=run_legacy,
+        output=output,
+        session_boundary=getattr(tool_executor, "session_boundary", None),
     )
-    runtime_ref["runtime"] = runtime
-    return runtime.run()
+    return runtime.run().content

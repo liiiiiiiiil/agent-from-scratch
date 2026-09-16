@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.34` are complete (lesson 34: minimal controlled subagent delegation), beginning Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.35` are complete (lesson 35: shared parent/child runtime loop), continuing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -71,7 +71,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.33</strong></td><td><a href="./docs/tutorials/33-crash-recovery.md">Crash recovery and uncertain-effect handoff</a></td><td>Derive a new session from an active pending boundary, classify interrupted calls, never replay them, and require read-only investigation plus an explicit user decision.</td></tr>
     <tr><th colspan="3"><a id="stage-10"></a>Stage 10 · Controlled subagent delegation</th></tr>
     <tr><td><strong>v0.34</strong></td><td><a href="./docs/tutorials/34-minimal-delegation.md">Minimal controlled subagent delegation</a></td><td>Synchronously delegate one isolated, single-level, read-only subagent with explicit capabilities, scope, and a structured result contract.</td></tr>
-    <tr><td>v0.35–v0.37</td><td>Delegation lifecycle, parallelism, and durable delivery</td><td>Later versions add configurable and aggregate budgets, cancellation, bounded parallelism, and durable delegation records.</td></tr>
+    <tr><td><strong>v0.35</strong></td><td><a href="./docs/tutorials/35-shared-agent-runtime.md">Shared parent/child runtime loop</a></td><td>The parent Agent and read-only Subagent use one AgentRuntime.run() protocol skeleton; policies express their Context, tools, budgets, and completion differences.</td></tr>
+    <tr><td>v0.36–v0.39</td><td>Models, lifecycle, parallelism, and durable delivery</td><td>Later versions add multiple providers, lifecycle and aggregate budgets, bounded parallelism, and durable delegation records.</td></tr>
   </tbody>
 </table>
 

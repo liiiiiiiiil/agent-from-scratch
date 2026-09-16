@@ -1,6 +1,12 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.34**（最小受控子代理委派；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.35**（共享父子 Agent Runtime；含此前可靠执行能力）。
+
+## v0.35 共享父子运行循环
+
+父 Agent 和只读 Subagent 现在都通过同一个 `AgentRuntime.run()` 驱动“请求 LLM → 规范化 tool call → 执行或拒绝工具 → 按模型顺序回灌结果 → 判断完成”的循环。父侧使用 `ParentRuntimePolicy` 继续管理 Plan、Repair、进程、session、verification 和完成提醒；子侧使用 `SubagentRuntimePolicy` 管理固定预算、scope 观察、结果合同和一次格式修正。策略不能请求 LLM 或进入 handler。
+
+这次收敛不改变 v0.34 的外部委派能力：仍然只能同步创建一个 depth=1 子代理，子代理只能使用 `calculate`、`read_file`、`list_dir`、`grep`，父 Agent 仍独占修改、权限、主计划、generation、权威 verification 和完成判定。非法 tool call 也会获得唯一的规范化 ID 和对应 `role=tool` 结果；持久化回合仍须先提交 `handler_admitted`，整轮提交完成前不会请求下一次 LLM。
 
 ## v0.34 最小受控子代理委派
 
@@ -363,7 +369,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.34，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.35，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

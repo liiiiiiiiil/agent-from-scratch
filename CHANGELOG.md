@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.35.0] - Shared parent and subagent runtime
+
+- Converged the parent Agent and synchronous read-only Subagent onto one canonical `AgentRuntime.run()` loop.
+- Added policy-based parent and child boundaries for planning, repair, processes, durable rounds, budgets, observations, and the child result contract.
+- Unified malformed tool-call normalization and ordered `role=tool` closure, while preserving the v0.34 delegation contract and four-tool read-only surface.
+- Added shared-runtime protocol and isolation regression coverage; multiple providers, lifecycle/cancellation, parallel delegation, and durable delegation records remain future work.
+
 ## [v0.34.0] - Minimal controlled subagent delegation
 
 - Added synchronous, single-level `delegate_task` with isolated child State/Context, fixed read-only capabilities, workspace scope checks, bounded budgets, and a strict structured result contract.

@@ -509,6 +509,18 @@ class ContextManager:
     def set_runtime_notice(self, notice: str | None) -> None:
         self._runtime_notice = notice
 
+    def append_assistant(self, message: Message) -> None:
+        """Append one provider-normalized assistant protocol message."""
+        self.history.append(message)
+
+    def append_tool_result(self, tool_call_id: str, content: str) -> None:
+        """Append one tool result without applying runtime policy."""
+        self.history.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        })
+
     def stats_snapshot(self) -> ContextStats | None:
         return self.last_stats
 

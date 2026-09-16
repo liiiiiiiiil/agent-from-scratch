@@ -26,7 +26,7 @@ from mini_agent.context import ContextManager, count_tokens
 from mini_agent.instructions import InstructionLoader
 from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
 from mini_agent.prompt import build_subagent_prompt
-from mini_agent.runtime import AgentRuntime
+from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
 from mini_agent.state import AgentState
 from mini_agent.tools.base import (
     ExecutionResult,
@@ -642,96 +642,6 @@ class SubagentRunner:
         from mini_agent.agent import call_llm
         return call_llm
 
-    @staticmethod
-    def _normalize_calls(message: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, str]]:
-        """Normalize every advertised call and retain one error per bad call.
-
-        Invalid calls receive synthetic unique IDs, matching the parent loop's
-        protocol behavior, so the child can always append a corresponding
-        ``role=tool`` result before it terminates.
-        """
-        calls = message.get("tool_calls") or []
-        if not isinstance(calls, list):
-            raise DelegationError("子 LLM tool_calls 格式非法")
-        normalized = []
-        errors: dict[str, str] = {}
-        seen_ids: set[str] = set()
-        original_ids = {
-            call.get("id") for call in calls
-            if isinstance(call, dict) and isinstance(call.get("id"), str)
-            and call.get("id").strip()
-        }
-        next_local_id = 0
-        for index, call in enumerate(calls):
-            call_errors: list[str] = []
-            function = call.get("function") if isinstance(call, dict) else None
-            raw_id = call.get("id") if isinstance(call, dict) else None
-            if not isinstance(call, dict):
-                call_errors.append("tool_call 格式非法")
-            elif call.get("type") != "function":
-                call_errors.append("tool_call.type 非法")
-            if not isinstance(function, dict):
-                call_errors.append("tool_call 缺少 function")
-                function = {}
-            name = function.get("name")
-            raw = function.get("arguments", "{}")
-            if not isinstance(name, str) or not name.strip():
-                call_errors.append("tool_call 名称非法")
-                name = "invalid_tool_call"
-            if isinstance(raw, str):
-                try:
-                    args = json.loads(raw)
-                except json.JSONDecodeError:
-                    call_errors.append("tool_call 参数不是 JSON")
-                    args = {}
-            else:
-                args = raw
-            if not isinstance(args, dict):
-                call_errors.append("tool_call 参数必须是对象")
-                args = {}
-            if not isinstance(raw_id, str) or not raw_id.strip():
-                call_errors.append("tool_call_id 非法")
-            elif raw_id in seen_ids:
-                call_errors.append("tool_call_id 重复")
-            if call_errors:
-                while True:
-                    call_id = f"local-error-{next_local_id}"
-                    next_local_id += 1
-                    if call_id not in seen_ids and call_id not in original_ids:
-                        break
-                errors[call_id] = "; ".join(call_errors)
-            else:
-                call_id = raw_id
-            seen_ids.add(call_id)
-            normalized.append({
-                "id": call_id,
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
-            })
-        return normalized, errors
-
-    @staticmethod
-    def _append_rejected_tool_results(context: ContextManager, child_state: AgentState,
-                                      calls: list[dict[str, Any]], error_kind: str,
-                                      detail: str) -> None:
-        """Close a child tool round without entering any advertised handler."""
-        for call in calls:
-            function = call["function"]
-            arguments = json.loads(function["arguments"])
-            content = json.dumps({
-                "status": "error", "error_kind": error_kind,
-                "message": detail,
-            }, ensure_ascii=False)
-            execution = ExecutionResult(
-                function["name"], arguments, "not_checked", False, "invalid",
-                0, "none", content, content[:200], error_kind=error_kind,
-            )
-            child_state.record_execution_result(execution)
-            context.history.append({
-                "role": "tool", "tool_call_id": call["id"],
-                "content": execution.tool_content(),
-            })
-
     def _make_result(self, task: DelegatedTask, outcome: str, summary: str,
                      findings: tuple[Finding, ...] = (), evidence: tuple[EvidenceRef, ...] = (),
                      limitations: tuple[str, ...] = (), usage: UsageRecord | None = None,
@@ -934,6 +844,7 @@ class SubagentRunner:
         return observations
 
     def run(self, task: DelegatedTask) -> SubagentResult:
+        """Assemble an isolated child and delegate control to AgentRuntime."""
         started_clock = time.monotonic()
         started_at = _utc_now()
         budget = task.budget
@@ -950,130 +861,287 @@ class SubagentRunner:
         else:
             parent = self.parent_registry
         view = parent.filtered_for_subagent(set(task.allowed_tools), scope_gate=scope_gate)
-        policy = PermissionPolicy({name: ALLOW for name in task.allowed_tools})
-        executor = ToolExecutor(view, gate=PermissionGate(policy))
-        instructions = InstructionLoader(self.workspace_root).load()
-        system = build_subagent_prompt(task, instructions, self.workspace_root)
+        executor = ToolExecutor(
+            view, gate=PermissionGate(PermissionPolicy({name: ALLOW for name in task.allowed_tools})),
+        )
+        system = build_subagent_prompt(
+            task, InstructionLoader(self.workspace_root).load(), self.workspace_root,
+        )
         history: list[dict[str, Any]] = [{
             "role": "user",
-            "content": json.dumps({"contract": task.to_dict(), "selected_parent_facts": list(task.selected_parent_facts)},
-                                   ensure_ascii=False, sort_keys=True),
+            "content": json.dumps(
+                {"contract": task.to_dict(), "selected_parent_facts": list(task.selected_parent_facts)},
+                ensure_ascii=False, sort_keys=True,
+            ),
         }]
         context = ContextManager(
             child_state, history, observability=False,
             protected_messages=[{"role": "system", "content": system}],
         )
         self.last_context = context
-        llm = self._llm_callable()
-        runtime = AgentRuntime(
-            llm_client=llm, context=context, executor=executor,
-            max_rounds=budget.max_rounds,
+        policy = SubagentRuntimePolicy(
+            runner=self,
+            task=task,
+            scope_gate=scope_gate,
+            started_clock=started_clock,
+            started_at=started_at,
+            state=child_state,
         )
-        llm_calls = tool_calls = rounds = tokens = 0
-        correction_used = False
-        limitations: list[str] = []
-        observations: list[dict[str, Any]] = []
-        while True:
-            if time.monotonic() - started_clock > budget.timeout_seconds:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "timed_out", "子代理达到墙钟时间上限", limitations=limitations + ["timeout"], usage=usage, started_at=started_at, error_kind="timeout")
-            if rounds >= budget.max_rounds or llm_calls >= budget.max_llm_calls:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "budget_exhausted", "子代理预算耗尽", limitations=limitations + ["round_or_llm_budget"], usage=usage, started_at=started_at, error_kind="budget_exhausted")
-            prepared = context.prepare_messages()
-            request_tokens = count_tokens(prepared)
-            if tokens + request_tokens >= budget.max_tokens:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "budget_exhausted", "子代理 token 预算耗尽", limitations=limitations + ["token_budget"], usage=usage, started_at=started_at, error_kind="budget_exhausted")
-            remaining_timeout = max(
-                0.001, budget.timeout_seconds - (time.monotonic() - started_clock),
+        runtime = AgentRuntime(
+            llm_client=self._llm_callable(),
+            context=context,
+            executor=executor,
+            policy=policy,
+            max_rounds=budget.max_rounds,
+            output=None,
+        )
+        try:
+            runtime_result = runtime.run()
+        except (TimeoutError, socket.timeout) as error:
+            return policy.make_result(
+                "timed_out", "子代理 LLM 请求超时", error_kind="timeout",
+                detail=_safe_error_detail(error),
             )
-            llm_calls += 1
-            rounds += 1
-            try:
-                message = runtime.invoke(prepared, remaining_timeout)
-            except (TimeoutError, socket.timeout) as error:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens + request_tokens,
-                                    "estimated", 0, int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "timed_out", "子代理 LLM 请求超时", limitations=limitations + [_safe_error_detail(error)], usage=usage, started_at=started_at, error_kind="timeout")
-            except Exception as error:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens + request_tokens,
-                                    "estimated", 0, int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "failed", "子代理 LLM 调用失败", limitations=limitations + [_safe_error_detail(error)], usage=usage, started_at=started_at, error_kind="llm_error")
-            tokens += request_tokens + count_tokens(message)
-            if time.monotonic() - started_clock > budget.timeout_seconds:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "timed_out", "子代理达到墙钟时间上限", limitations=limitations + ["timeout"], usage=usage, started_at=started_at, error_kind="timeout")
-            if tokens > budget.max_tokens:
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "budget_exhausted", "子代理 token 预算耗尽", limitations=limitations + ["token_budget"], usage=usage, started_at=started_at, error_kind="budget_exhausted")
-            try:
-                calls, call_errors = self._normalize_calls(message)
-            except DelegationError as error:
-                return self._make_result(task, "failed", "子代理工具调用协议非法", limitations=limitations + [_safe_error_detail(error)], usage=UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0, int((time.monotonic() - started_clock) * 1000)), started_at=started_at, error_kind="invalid_tool_call")
-            assistant = {"role": "assistant", "content": message.get("content"), **({"tool_calls": calls} if calls else {})}
-            context.history.append(assistant)
-            if call_errors:
-                self._append_rejected_tool_results(
-                    context, child_state, calls, "invalid_tool_call",
-                    "子代理工具调用协议非法: " + "; ".join(call_errors.values()),
+        except Exception as error:
+            return policy.make_result(
+                "failed", "子代理 LLM 调用失败", error_kind="llm_error",
+                detail=_safe_error_detail(error),
+            )
+        return policy.result_from_runtime(runtime_result)
+
+
+class SubagentRuntimePolicy:
+    """Child-only budget, observation, and Result Contract policy."""
+
+    _FORMAT_NOTICE = (
+        "Runtime Notice：格式修正：上一次输出不是合法报告。下一次必须只输出严格 JSON，"
+        "字段恰为 summary、findings、evidence、limitations；不得调用工具。"
+    )
+
+    def __init__(self, *, runner: SubagentRunner, task: DelegatedTask,
+                 scope_gate: ScopeGate, started_clock: float, started_at: str,
+                 state: AgentState) -> None:
+        self.runner = runner
+        self.task = task
+        self.scope_gate = scope_gate
+        self.started_clock = started_clock
+        self.started_at = started_at
+        self.state = state
+        self.correction_used = False
+        self.invalid_tool_call = False
+        self.observations: list[dict[str, Any]] = []
+        self.limitations: list[str] = []
+        self.final_report: tuple[str, tuple[Finding, ...], tuple[EvidenceRef, ...], tuple[str, ...]] | None = None
+        self.terminal: tuple[str, str, str, str | None] | None = None
+        self.runtime: AgentRuntime | None = None
+
+    def _usage(self, runtime: AgentRuntime) -> UsageRecord:
+        return UsageRecord(
+            runtime.rounds,
+            runtime.llm_calls,
+            runtime.tool_calls,
+            runtime.estimated_tokens,
+            "estimated",
+            0,
+            int((time.monotonic() - self.started_clock) * 1000),
+        )
+
+    def _set_terminal(self, outcome: str, summary: str, error_kind: str,
+                      detail: str | None = None, *limitations: str) -> None:
+        self.terminal = (outcome, summary, error_kind, detail)
+        for item in limitations:
+            if item not in self.limitations:
+                self.limitations.append(item)
+
+    def make_result(self, outcome: str, summary: str, *, error_kind: str,
+                    detail: str | None = None,
+                    findings: tuple[Finding, ...] = (),
+                    evidence: tuple[EvidenceRef, ...] = (),
+                    limitations: tuple[str, ...] = ()) -> SubagentResult:
+        runtime = self.runtime
+        usage = self._usage(runtime) if runtime is not None else UsageRecord(
+            token_accounting="estimated",
+        )
+        combined = tuple(self.limitations) + tuple(limitations)
+        return self.runner._make_result(
+            self.task, outcome, summary, findings, evidence, combined,
+            usage, self.started_at, error_kind, detail,
+        )
+
+    def result_from_runtime(self, runtime_result) -> SubagentResult:
+        self.runtime = self.runtime or getattr(runtime_result, "runtime", None)
+        if self.final_report is not None:
+            summary, findings, evidence, report_limitations = self.final_report
+            return self.make_result(
+                "completed", summary, error_kind=None,
+                findings=findings, evidence=evidence,
+                limitations=report_limitations,
+            )
+        if self.terminal is not None:
+            outcome, summary, error_kind, detail = self.terminal
+            return self.make_result(
+                outcome, summary, error_kind=error_kind, detail=detail,
+            )
+        return self.make_result(
+            "failed", runtime_result.content or "子代理运行结束",
+            error_kind=runtime_result.stop_reason or "runtime_error",
+        )
+
+    def before_run(self, runtime):
+        self.runtime = runtime
+        return self._budget_check(runtime)
+
+    def before_prepare(self, runtime):
+        self.runtime = runtime
+        return None
+
+    def _budget_check(self, runtime):
+        elapsed = time.monotonic() - self.started_clock
+        if elapsed > self.task.budget.timeout_seconds:
+            self._set_terminal("timed_out", "子代理达到墙钟时间上限", "timeout", "timeout")
+            return RuntimeDecision("finish", "子代理达到墙钟时间上限", "timeout")
+        if runtime.rounds >= self.task.budget.max_rounds or runtime.llm_calls >= self.task.budget.max_llm_calls:
+            self._set_terminal(
+                "budget_exhausted", "子代理预算耗尽", "budget_exhausted",
+                "round_or_llm_budget", "round_or_llm_budget",
+            )
+            return RuntimeDecision("finish", "子代理预算耗尽", "budget_exhausted")
+        if runtime.estimated_tokens + runtime.request_tokens >= self.task.budget.max_tokens:
+            self._set_terminal(
+                "budget_exhausted", "子代理 token 预算耗尽", "budget_exhausted",
+                "token_budget", "token_budget",
+            )
+            return RuntimeDecision("finish", "子代理 token 预算耗尽", "budget_exhausted")
+        return None
+
+    def before_llm(self, runtime):
+        self.runtime = runtime
+        return self._budget_check(runtime)
+
+    def after_llm(self, runtime, _message):
+        self.runtime = runtime
+        elapsed = time.monotonic() - self.started_clock
+        if elapsed > self.task.budget.timeout_seconds:
+            self._set_terminal("timed_out", "子代理达到墙钟时间上限", "timeout", "timeout")
+            return RuntimeDecision("finish", "子代理达到墙钟时间上限", "timeout")
+        if runtime.estimated_tokens > self.task.budget.max_tokens:
+            self._set_terminal(
+                "budget_exhausted", "子代理 token 预算耗尽", "budget_exhausted",
+                "token_budget", "token_budget",
+            )
+            return RuntimeDecision("finish", "子代理 token 预算耗尽", "budget_exhausted")
+        return None
+
+    def llm_options(self, runtime):
+        remaining = max(
+            0.001,
+            self.task.budget.timeout_seconds - (time.monotonic() - self.started_clock),
+        )
+        return {"stream_output": False, "timeout": remaining}
+
+    def on_text(self, runtime, content):
+        self.runtime = runtime
+        try:
+            report = json.loads(content) if isinstance(content, str) else None
+            self.final_report = self.runner._parse_report(
+                self.task, report, self.scope_gate, self.observations,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, DelegationError) as error:
+            detail = _safe_error_detail(error)
+            if self.correction_used:
+                self._set_terminal(
+                    "failed", "子代理最终报告非法", "invalid_result", detail,
+                    "invalid_result",
                 )
-                return self._make_result(task, "failed", "子代理工具调用协议非法", limitations=limitations + list(call_errors.values()), usage=UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0, int((time.monotonic() - started_clock) * 1000)), started_at=started_at, error_kind="invalid_tool_call")
-            if not calls:
-                content = message.get("content")
-                try:
-                    report = json.loads(content) if isinstance(content, str) else None
-                    summary, findings, evidence, report_limitations = self._parse_report(
-                        task, report, scope_gate, observations,
+                return RuntimeDecision("finish", "子代理最终报告非法", "invalid_result")
+            self.correction_used = True
+            return RuntimeDecision("continue", notice=self._FORMAT_NOTICE)
+        return RuntimeDecision("finish", self.final_report[0], "completed")
+
+    @staticmethod
+    def _rejection(runtime, index, error_kind, message):
+        name, arguments = runtime.parsed_calls[index]
+        content = json.dumps({
+            "status": "error", "error_kind": error_kind, "message": message,
+        }, ensure_ascii=False)
+        return ExecutionResult(
+            name, arguments, "not_checked", False, "invalid", 0,
+            runtime.effects[index], content, content[:200], error_kind=error_kind,
+        )
+
+    def prepare_tool_round(self, runtime, calls):
+        self.runtime = runtime
+        if runtime.normalized and runtime.normalized.errors_by_call_id:
+            self.invalid_tool_call = True
+            detail = "子代理工具调用协议非法: " + "; ".join(
+                runtime.normalized.errors_by_call_id.values()
+            )
+            return ToolRoundPlan(
+                True,
+                {
+                    index: self._rejection(
+                        runtime, index, "invalid_tool_call", detail,
                     )
-                except (TypeError, ValueError, json.JSONDecodeError, DelegationError) as error:
-                    if calls or correction_used:
-                        return self._make_result(task, "failed", "子代理最终报告非法", limitations=limitations + ["invalid_result", _safe_error_detail(error)], usage=UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0, int((time.monotonic() - started_clock) * 1000)), started_at=started_at, error_kind="invalid_result")
-                    correction_used = True
-                    context.set_runtime_notice(
-                        "Runtime Notice：格式修正：上一次输出不是合法报告。下一次必须只输出严格 JSON，字段恰为 summary、findings、evidence、limitations；不得调用工具。"
+                    for index in range(len(calls))
+                },
+            )
+        if self.correction_used:
+            self._set_terminal(
+                "failed", "格式修正阶段再次发起工具调用", "invalid_result",
+                "invalid_result",
+            )
+            return ToolRoundPlan(
+                True,
+                {
+                    index: self._rejection(
+                        runtime, index, "invalid_result", "格式修正阶段不得再次发起工具调用",
                     )
-                    continue
-                usage = UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0,
-                                    int((time.monotonic() - started_clock) * 1000))
-                return self._make_result(task, "completed", summary, findings, evidence,
-                                         limitations + list(report_limitations), usage, started_at)
-            if correction_used:
-                self._append_rejected_tool_results(
-                    context, child_state, calls, "invalid_result",
-                    "格式修正阶段不得再次发起工具调用",
-                )
-                return self._make_result(task, "failed", "格式修正阶段再次发起工具调用", limitations=limitations + ["invalid_result"], usage=UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0, int((time.monotonic() - started_clock) * 1000)), started_at=started_at, error_kind="invalid_result")
-            if tool_calls + len(calls) > budget.max_tool_calls:
-                self._append_rejected_tool_results(
-                    context, child_state, calls, "budget_exhausted",
-                    "子代理工具调用预算耗尽，当前回合未进入 handler",
-                )
-                return self._make_result(task, "budget_exhausted", "子代理工具调用预算耗尽", limitations=limitations + ["tool_budget"], usage=UsageRecord(rounds, llm_calls, tool_calls, tokens, "estimated", 0, int((time.monotonic() - started_clock) * 1000)), started_at=started_at, error_kind="budget_exhausted")
-            tool_calls += len(calls)
-            for call in calls:
-                function = call["function"]
-                name = function["name"]
-                try:
-                    args = json.loads(function["arguments"])
-                except json.JSONDecodeError:
-                    args = {}
-                result = executor.execute_result(name, args, state=child_state, notify=False)
-                if isinstance(result, ExecutionResult):
-                    child_state.record_execution_result(result)
-                    content = result.tool_content()
-                    if result.ok and result.handler_admitted:
-                        derived = self._observations_for_execution(result, scope_gate)
-                        observations.extend(derived)
-                        content += "\n[observation_hash=" + derived[0]["hash"] + "]"
-                else:
-                    content = str(result)
-                context.history.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+                    for index in range(len(calls))
+                },
+            )
+        if runtime.tool_calls + len(calls) > self.task.budget.max_tool_calls:
+            self._set_terminal(
+                "budget_exhausted", "子代理工具调用预算耗尽", "budget_exhausted",
+                "tool_budget",
+            )
+            return ToolRoundPlan(
+                True,
+                {
+                    index: self._rejection(
+                        runtime, index, "budget_exhausted",
+                        "子代理工具调用预算耗尽，当前回合未进入 handler",
+                    )
+                    for index in range(len(calls))
+                },
+            )
+        return ToolRoundPlan(True)
+
+    def after_tool_result(self, runtime, call, execution):
+        if execution.outcome == "succeeded" and execution.handler_admitted:
+            derived = self.runner._observations_for_execution(execution, self.scope_gate)
+            self.observations.extend(derived)
+            return execution.tool_content() + "\n[observation_hash=" + derived[0]["hash"] + "]"
+        return execution.tool_content()
+
+    def after_tool_round(self, runtime, calls, results):
+        self.runtime = runtime
+        if self.invalid_tool_call:
+            self._set_terminal(
+                "failed", "子代理工具调用协议非法", "invalid_tool_call",
+                "invalid_tool_call",
+            )
+            return RuntimeDecision("finish", "子代理工具调用协议非法", "invalid_tool_call")
+        if self.terminal is not None:
+            return RuntimeDecision("finish", self.terminal[1], self.terminal[2])
+        return None
+
+    def on_round_limit(self, runtime):
+        self.runtime = runtime
+        self._set_terminal(
+            "budget_exhausted", "子代理预算耗尽", "budget_exhausted",
+            "round_or_llm_budget", "round_or_llm_budget",
+        )
+        return RuntimeDecision("finish", "子代理预算耗尽", "budget_exhausted")
 
 
 class DelegationManager:
