@@ -190,6 +190,7 @@ class AnthropicMessagesAdapter:
         stream_output: bool = False,
         on_content: Any = None,
         timeout: float | None = None,
+        max_output_tokens: int | None = None,
         strict_tool_calls: bool = True,
     ) -> ProviderResponse:
         if not isinstance(messages, list):
@@ -199,7 +200,8 @@ class AnthropicMessagesAdapter:
         payload: dict[str, Any] = {
             "model": self.profile.model_id,
             "messages": converted,
-            "max_tokens": self.profile.max_output_tokens,
+            "max_tokens": min(self.profile.max_output_tokens, max_output_tokens)
+            if max_output_tokens is not None else self.profile.max_output_tokens,
             "stream": stream,
         }
         if system is not None:

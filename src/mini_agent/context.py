@@ -311,6 +311,9 @@ class ContextManager:
                     from mini_agent.agent import summarize_messages
                     return summarize_messages(messages)
         self.summarizer = summarizer
+        # A child Runtime may gate an auxiliary summary before it spends model
+        # budget. Parent contexts keep the existing unrestricted behavior.
+        self.before_summary: Callable[[list[Message]], dict[str, object]] | None = None
         self.keep_rounds = keep_rounds
         self._summary = ""
         self._compacted = False
@@ -754,6 +757,49 @@ class ContextManager:
         if snapshot["files_changed"]:
             base_lines.append("Files changed: " + bounded(", ".join(snapshot["files_changed"]), 600))
         base_lines.append(f"Status: {snapshot['status']}; generation: {snapshot.get('current_generation_id', 0)}")
+        delegation_budget = snapshot.get("delegation_budget", {})
+        delegations = snapshot.get("delegations", [])
+        # Keep the established emergency view for very small windows.  The
+        # regular state view still exposes the aggregate ledger, while a tiny
+        # context must leave room for protocol-complete history rounds.
+        if self.budget.window >= 512 and (delegation_budget or delegations):
+            base_lines.append(
+                "Delegation budget: "
+                f"subagents={delegation_budget.get('remaining_subagents', '?')}/"
+                f"{delegation_budget.get('max_subagents', '?')}; "
+                f"llm={delegation_budget.get('remaining_llm_calls', '?')}/"
+                f"{delegation_budget.get('max_total_llm_calls', '?')}; "
+                f"tools={delegation_budget.get('remaining_tool_calls', '?')}/"
+                f"{delegation_budget.get('max_total_tool_calls', '?')}; "
+                f"tokens={delegation_budget.get('remaining_tokens', '?')}/"
+                f"{delegation_budget.get('max_total_tokens', '?')}"
+            )
+            active_delegations = [
+                item for item in delegations
+                if isinstance(item, dict) and item.get("delivery_status") != "committed"
+            ]
+            if active_delegations:
+                base_lines.append(
+                    "Active delegations: " + bounded("; ".join(
+                        f"{item.get('delegation_id', '?')} goal="
+                        f"{item.get('contract_summary', {}).get('goal', '')} "
+                        f"status={item.get('delivery_status', '?')} outcome={item.get('outcome', '?')}"
+                        for item in active_delegations[:8]
+                    ), 1800)
+                )
+            committed = [
+                item for item in delegations
+                if isinstance(item, dict) and item.get("delivery_status") == "committed"
+            ]
+            if committed:
+                base_lines.append(
+                    "Recent committed delegations: " + bounded("; ".join(
+                        f"{item.get('delegation_id', '?')}="
+                        f"{item.get('outcome', '?')}: "
+                        f"{item.get('result_summary') or item.get('diagnostic_reason') or 'result committed'}"
+                        for item in committed[-3:]
+                    ), 1200)
+                )
         process_records = snapshot.get("processes", [])
         if process_records:
             base_lines.append("Background processes:")
@@ -1071,7 +1117,8 @@ class ContextManager:
             "历史：\n" + "\n\n".join(_serialize_message(message) for message in old_messages)
         )}]
         try:
-            summary = self.summarizer(prompt)
+            options = self.before_summary(prompt) if self.before_summary is not None else {}
+            summary = self.summarizer(prompt, **options) if options else self.summarizer(prompt)
             if not isinstance(summary, str) or not summary.strip():
                 return False
         except Exception:

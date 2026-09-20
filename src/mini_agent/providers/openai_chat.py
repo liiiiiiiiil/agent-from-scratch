@@ -158,12 +158,14 @@ class OpenAIChatAdapter:
             redactions=(self.provider.api_key, self.provider.endpoint, self.profile.model_id),
         )
 
-    def _request(self, messages, *, include_tools, tool_registry, stream, timeout):
+    def _request(self, messages, *, include_tools, tool_registry, stream, timeout,
+                 max_output_tokens=None):
         payload: dict[str, Any] = {
             "model": self.profile.model_id,
             "messages": messages,
             "stream": stream,
-            "max_tokens": self.profile.max_output_tokens,
+            "max_tokens": min(self.profile.max_output_tokens, max_output_tokens)
+            if max_output_tokens is not None else self.profile.max_output_tokens,
         }
         if include_tools:
             tools = _tools(tool_registry)
@@ -185,6 +187,7 @@ class OpenAIChatAdapter:
         stream_output: bool = False,
         on_content: Any = None,
         timeout: float | None = None,
+        max_output_tokens: int | None = None,
         strict_tool_calls: bool = True,
     ) -> ProviderResponse:
         if not isinstance(messages, list):
@@ -192,7 +195,7 @@ class OpenAIChatAdapter:
         stream = bool(stream_output and self.profile.supports_streaming)
         client, body, headers = self._request(
             messages, include_tools=include_tools, tool_registry=tool_registry,
-            stream=stream, timeout=timeout,
+            stream=stream, timeout=timeout, max_output_tokens=max_output_tokens,
         )
         if not stream:
             return _message_from_payload(

@@ -284,6 +284,23 @@ def main():
             return
         state.sync_processes(process_manager.sync_processes(task_id))
 
+    def cleanup_delegation_boundary() -> bool:
+        """Cancel the one synchronous child before a task boundary or clean save."""
+        manager = getattr(run_registry, "_delegation_manager", None)
+        if manager is None or not manager.active_info().get("active"):
+            return True
+        task_id = getattr(state, "task_id", "") or None
+        manager.cancel(task_id, "task_boundary")
+        if manager.wait(2.0):
+            return True
+        info = manager.active_info()
+        cli_notice(
+            "子代理取消未在限定时间内收束；旧任务已保留，"
+            f"delegation_id={info.get('delegation_id') or '-'}；"
+            f"原因={_single_line_notice(info.get('cancel_reason') or 'timeout', 300)}。"
+        )
+        return False
+
     def save_session(handoff_status="active", manual=False):
         """Save only a complete safe point; failed saves leave State untouched."""
         nonlocal session_id, persistence_halted
@@ -359,6 +376,8 @@ def main():
             return False
         if not getattr(state, "task_id", ""):
             return True
+        if not cleanup_delegation_boundary():
+            return False
         sync_processes()
         report = process_manager.cleanup(state.task_id)
         if hasattr(state, "record_process_cleanup"):
@@ -450,6 +469,10 @@ def main():
                 status_notice(f"仍在调查 revision {revision_id}；若原计划可用，输入 /review {revision_id}。")
             else:
                 status_notice("仍在只读调查阶段，请继续调查并提交计划。")
+        elif (state.status == "running"
+              and hasattr(state, "has_active_delegations")
+              and state.has_active_delegations()):
+            cli_notice("委派结果尚未提交；当前任务保持活动状态。")
         elif (state.status == "running"
               and not (hasattr(state, "has_unresolved_crash_recovery")
                        and state.has_unresolved_crash_recovery())):
@@ -637,13 +660,14 @@ def main():
         clean_shutdown = True
     finally:
         if getattr(state, "task_id", ""):
+            delegation_clean = cleanup_delegation_boundary()
             sync_processes()
             report = process_manager.cleanup(state.task_id)
             if hasattr(state, "record_process_cleanup"):
                 state.record_process_cleanup(report)
             if not report.complete:
                 cli_notice(report.render())
-            elif clean_shutdown and session_id is not None and not persistence_halted:
+            elif delegation_clean and clean_shutdown and session_id is not None and not persistence_halted:
                 save_session("clean")
 
 

@@ -47,6 +47,7 @@ def create_registry(state: AgentState | None = None,
             subagent_llm=subagent_llm,
             parent_registry=result,
             provider_catalog=provider_catalog,
+            parent_state=state,
         )
         result._delegation_manager = manager
         result.register(make_delegate_task_tool(state, manager))

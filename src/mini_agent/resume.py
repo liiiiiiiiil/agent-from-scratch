@@ -441,6 +441,7 @@ def prepare_resume(store: SessionStore, session_id: str,
     if crash_mode:
         pending_calls = [deepcopy(item) for item in envelope["tool_boundary"]["calls"]
                          if item.get("status") == "pending"]
+        state.reconcile_pending_delegation_boundary(envelope["tool_boundary"]["calls"])
         state.begin_crash_recovery(
             envelope["session_id"], envelope["session_generation"],
             envelope["session_generation"], envelope["integrity"]["sha256"],

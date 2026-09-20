@@ -81,6 +81,12 @@ def _stable_observation_hash(execution):
             return [scrub(item) for item in value]
         return value
 
+    if execution.tool == "delegate_task":
+        try:
+            from mini_agent.state import delegation_progress_hash
+            return delegation_progress_hash(execution.output)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     payload = {
         "tool": execution.tool,
         "outcome": execution.outcome,
@@ -93,7 +99,7 @@ def _stable_observation_hash(execution):
 
 
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
-             on_content=None, timeout=None, binding=None):
+             on_content=None, timeout=None, binding=None, max_output_tokens=None):
     """Compatibility façade for the historical parent LLM entry point.
 
     New Runtime instances pass a frozen ``ModelBinding``.  The legacy path
@@ -125,6 +131,7 @@ def call_llm(messages, include_tools=True, stream_output=None, tool_registry=Non
             stream_output=True,
             on_content=callback,
             timeout=timeout,
+            max_output_tokens=max_output_tokens,
             strict_tool_calls=binding is not None,
         )
     except (ProviderHTTPError, ProviderProtocolError, ProviderStreamError) as error:
@@ -183,6 +190,10 @@ class ParentRuntimePolicy:
         state = getattr(runtime.context, "state", None)
         status_before_sync = getattr(state, "status", None)
         self._sync_processes(runtime)
+        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+            return RuntimeDecision(
+                "finish", "委派结果尚未提交，当前任务不能继续请求模型。", "delegation_pending",
+            )
         terminal = self._terminal_state_result(state)
         if (terminal is not None
                 and status_before_sync not in ("blocked", "failed")):
@@ -221,6 +232,10 @@ class ParentRuntimePolicy:
                 and state.active_process_records()):
             state.enter_awaiting_process("still_running")
             return RuntimeDecision("finish", content, "awaiting_process")
+        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+            return RuntimeDecision(
+                "finish", content, "delegation_pending",
+            )
         if (state is not None
                 and getattr(getattr(state, "planning_state", None), "phase", None) == "exploring"
                 and getattr(state, "repair_phase", "idle") == "idle"
@@ -377,10 +392,19 @@ class ParentRuntimePolicy:
 
     def after_tool_round(self, runtime, calls, results):
         state = getattr(runtime.context, "state", None)
+        manager = getattr(getattr(runtime.executor, "registry", None), "_delegation_manager", None)
+        if manager is not None and manager.consume_interrupt():
+            # The cancelled child already has its ordered parent tool result.
+            # Return user interruption to the CLI before another parent call.
+            raise KeyboardInterrupt
         self._sync_processes(runtime)
         terminal = self._terminal_state_result(state)
         if terminal is not None:
             return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
+        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+            return RuntimeDecision(
+                "finish", "委派结果尚未提交，当前任务不能继续请求模型。", "delegation_pending",
+            )
         if (len(runtime.parsed_calls) == 1 and runtime.parsed_calls[0][0] == "wait_process"
                 and results and results[0].outcome == "succeeded"):
             try:

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.37.0] - Subagent lifecycle and aggregate budgets
+
+- Added parent-side `DelegationRecord` lifecycle facts with ordered `created → running → result_ready → committed` delivery and independent execution outcomes.
+- Added bounded parent aggregate budgets for child count, LLM calls, tool calls, and tokens; reservations are made before child execution and settled with actual usage.
+- Added cooperative Event cancellation, bounded task-boundary cleanup, timeout/error accounting, output caps, and cancellation-aware child Runtime policy checks.
+- Propagated child user interrupts after the parent tool result is committed, and gated auxiliary child summaries against the same call, token, and time budgets.
+- Added delegation summaries, remaining aggregate budgets, normalized finding/evidence stagnation hashes, safe-point guards, and schema-3 recovery reservation reconciliation.
+- Kept v0.37 synchronous with one child at a time; parallel delegation and durable cross-process result delivery remain future work.
+
 ## [v0.36.0] - Multiple providers and unified protocol adapters
 
 - Added standard-library provider catalog, frozen parent/child model bindings, profile allowlists, legacy configuration compatibility, safe binding fingerprints, and redacted provider errors.

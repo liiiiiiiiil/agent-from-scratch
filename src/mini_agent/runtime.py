@@ -468,6 +468,11 @@ class AgentRuntime:
                 self.context,
                 attempt,
             )
+        state = getattr(self.context, "state", None)
+        if name == "delegate_task" and state is not None and hasattr(state, "commit_delegation_tool_result"):
+            # The role=tool message has been appended (and, when enabled,
+            # durably recorded) before the parent lifecycle becomes committed.
+            state.commit_delegation_tool_result(content)
 
     def _start_durable_round(self, calls: tuple[dict[str, Any], ...]) -> None:
         if self.session_boundary is None:

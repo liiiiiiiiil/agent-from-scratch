@@ -112,6 +112,7 @@ class ProviderAdapter(Protocol):
         stream_output: bool = False,
         on_content: Any = None,
         timeout: float | None = None,
+        max_output_tokens: int | None = None,
         strict_tool_calls: bool = True,
     ) -> ProviderResponse: ...
 

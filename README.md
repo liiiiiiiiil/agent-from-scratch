@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程已完成 `v0.36`（第 36 课：多 provider 与统一协议适配），阶段十继续推进。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程已完成 `v0.37`（第 37 课：子代理生命周期与聚合预算），阶段十继续推进。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -73,7 +73,8 @@
     <tr><td><strong>v0.34</strong></td><td><a href="./docs/tutorials/34-minimal-delegation.md">最小受控子代理委派</a></td><td>父 Agent 同步委派单个、单层、只读 Subagent；用隔离 Context、能力过滤、scope 和结构化结果合同收集调查材料。</td></tr>
     <tr><td><strong>v0.35</strong></td><td><a href="./docs/tutorials/35-shared-agent-runtime.md">共享父子运行循环</a></td><td>父 Agent 与只读 Subagent 共用唯一的 AgentRuntime.run() 协议骨架，差异由策略、Context、工具面和预算表达。</td></tr>
     <tr><td><strong>v0.36</strong></td><td><a href="./docs/tutorials/36-multi-provider.md">多 provider 与统一协议适配</a></td><td>用本地 profile 绑定父子模型，接入 OpenAI-compatible Chat Completions 与 Anthropic Messages，并把 provider 差异收进适配层。</td></tr>
-    <tr><td>v0.37–v0.39</td><td>生命周期、并行与持久交付</td><td>后续版本再加入生命周期与聚合预算、有界并行和持久化委派记录；这些能力本版不提前引入。</td></tr>
+    <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">子代理生命周期与聚合预算</a></td><td>记录委派交付状态，按父任务聚合预算预留与结算，并用协作式取消收束同步子代理。</td></tr>
+    <tr><td>v0.38–v0.39</td><td>并行与持久交付</td><td>后续版本再加入多个子代理并行和跨进程持久交付。</td></tr>
   </tbody>
 </table>
 

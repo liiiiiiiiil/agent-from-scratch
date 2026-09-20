@@ -12,12 +12,13 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import fnmatch
 import hashlib
+import inspect
 import json
 import ntpath
 import os
 import re
 import socket
-from threading import Lock
+from threading import Event, Lock
 import time
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -690,18 +691,26 @@ class SubagentRunner:
         from mini_agent.agent import call_llm
         return call_llm
 
-    def _summarizer(self) -> Callable[[list[dict[str, Any]]], str]:
+    def _summarizer(self) -> Callable[..., str]:
         if self.model_binding is not None and self.llm is None:
-            def summarize(messages):
+            def summarize(messages, *, max_output_tokens=None, timeout=None):
                 response = self.model_binding.complete(
                     messages, include_tools=False, stream_output=False,
+                    max_output_tokens=max_output_tokens, timeout=timeout,
                 )
                 return response.message.get("content", "") or ""
             return summarize
         llm = self._llm_callable()
 
-        def summarize(messages):
-            response = llm(messages, include_tools=False, stream_output=False)
+        def summarize(messages, *, max_output_tokens=None, timeout=None):
+            options = {"include_tools": False, "stream_output": False,
+                       "max_output_tokens": max_output_tokens, "timeout": timeout}
+            signature = inspect.signature(llm)
+            if not any(item.kind == inspect.Parameter.VAR_KEYWORD
+                       for item in signature.parameters.values()):
+                options = {name: value for name, value in options.items()
+                           if name in signature.parameters}
+            response = llm(messages, **options)
             if isinstance(response, ProviderResponse):
                 return response.message.get("content", "") or ""
             if isinstance(response, dict) and "choices" in response:
@@ -932,7 +941,8 @@ class SubagentRunner:
                 })
         return observations
 
-    def run(self, task: DelegatedTask) -> SubagentResult:
+    def run(self, task: DelegatedTask, *, cancel_event: Event | None = None,
+            cancellation_reason: Callable[[], str] | None = None) -> SubagentResult:
         """Assemble an isolated child and delegate control to AgentRuntime."""
         started_clock = time.monotonic()
         started_at = _utc_now()
@@ -963,6 +973,12 @@ class SubagentRunner:
                 ensure_ascii=False, sort_keys=True,
             ),
         }]
+        policy = SubagentRuntimePolicy(
+            runner=self, task=task, scope_gate=scope_gate,
+            started_clock=started_clock, started_at=started_at,
+            state=child_state, cancel_event=cancel_event,
+            cancellation_reason=cancellation_reason,
+        )
         context = ContextManager(
             child_state, history, observability=False,
             budget=ContextBudget(
@@ -971,20 +987,13 @@ class SubagentRunner:
                 output_reserve_tokens=(self.model_binding.profile.max_output_tokens
                                        if self.model_binding is not None else None),
             ),
-            summarizer=self._summarizer(),
+            summarizer=policy.summarize,
             protected_messages=[{"role": "system", "content": system}],
             model_binding=self.model_binding,
             usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
         )
+        context.before_summary = policy.before_summary
         self.last_context = context
-        policy = SubagentRuntimePolicy(
-            runner=self,
-            task=task,
-            scope_gate=scope_gate,
-            started_clock=started_clock,
-            started_at=started_at,
-            state=child_state,
-        )
         runtime = AgentRuntime(
             llm_client=self._llm_callable(),
             context=context,
@@ -996,12 +1005,31 @@ class SubagentRunner:
         )
         try:
             runtime_result = runtime.run()
+        except KeyboardInterrupt as error:
+            policy._set_terminal(
+                "cancelled", "子代理收到取消请求", "cancelled",
+                (cancellation_reason() if cancellation_reason is not None else "interrupt"),
+            )
+            return policy.make_result(
+                "cancelled", "子代理收到取消请求", error_kind="cancelled",
+                detail="user_interrupt",
+            )
         except (TimeoutError, socket.timeout) as error:
+            if cancel_event is not None and cancel_event.is_set():
+                return policy.make_result(
+                    "cancelled", "子代理收到取消请求", error_kind="cancelled",
+                    detail=policy._cancel_detail(),
+                )
             return policy.make_result(
                 "timed_out", "子代理 LLM 请求超时", error_kind="timeout",
                 detail=_safe_error_detail(error),
             )
         except Exception as error:
+            if cancel_event is not None and cancel_event.is_set():
+                return policy.make_result(
+                    "cancelled", "子代理收到取消请求", error_kind="cancelled",
+                    detail=policy._cancel_detail(),
+                )
             return policy.make_result(
                 "failed", "子代理 LLM 调用失败", error_kind="llm_error",
                 detail=_safe_error_detail(error),
@@ -1019,13 +1047,16 @@ class SubagentRuntimePolicy:
 
     def __init__(self, *, runner: SubagentRunner, task: DelegatedTask,
                  scope_gate: ScopeGate, started_clock: float, started_at: str,
-                 state: AgentState) -> None:
+                 state: AgentState, cancel_event: Event | None = None,
+                 cancellation_reason: Callable[[], str] | None = None) -> None:
         self.runner = runner
         self.task = task
         self.scope_gate = scope_gate
         self.started_clock = started_clock
         self.started_at = started_at
         self.state = state
+        self.cancel_event = cancel_event
+        self.cancellation_reason = cancellation_reason
         self.correction_used = False
         self.invalid_tool_call = False
         self.observations: list[dict[str, Any]] = []
@@ -1033,6 +1064,25 @@ class SubagentRuntimePolicy:
         self.final_report: tuple[str, tuple[Finding, ...], tuple[EvidenceRef, ...], tuple[str, ...]] | None = None
         self.terminal: tuple[str, str, str, str | None] | None = None
         self.runtime: AgentRuntime | None = None
+
+    def _cancel_detail(self) -> str:
+        if self.cancellation_reason is not None:
+            try:
+                value = self.cancellation_reason()
+                if value:
+                    return _safe_error_detail(value, 240)
+            except Exception:
+                pass
+        return "cooperative_cancel"
+
+    def _cancel_check(self) -> RuntimeDecision | None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            detail = self._cancel_detail()
+            self._set_terminal(
+                "cancelled", "子代理收到取消请求", "cancelled", detail, "cancelled",
+            )
+            return RuntimeDecision("finish", "子代理收到取消请求", "cancelled")
+        return None
 
     def _usage(self, runtime: AgentRuntime) -> UsageRecord:
         return UsageRecord(
@@ -1089,11 +1139,50 @@ class SubagentRuntimePolicy:
 
     def before_run(self, runtime):
         self.runtime = runtime
-        return self._budget_check(runtime)
+        return self._cancel_check() or self._budget_check(runtime)
 
     def before_prepare(self, runtime):
         self.runtime = runtime
-        return None
+        return self._cancel_check()
+
+    def before_summary(self, prompt: list[dict[str, Any]]) -> dict[str, object]:
+        """Admit an auxiliary model call before ContextManager invokes it."""
+        runtime = self.runtime
+        if runtime is None:
+            raise ValueError("子代理 Runtime 尚未启动")
+        runtime._refresh_usage()
+        cancelled = self._cancel_check()
+        if cancelled is not None:
+            raise ValueError("子代理已取消")
+        remaining_time = self.task.budget.timeout_seconds - (time.monotonic() - self.started_clock)
+        request_tokens = count_tokens(prompt)
+        remaining_tokens = self.task.budget.max_tokens - runtime.estimated_tokens - request_tokens
+        if remaining_time <= 0:
+            self._set_terminal("timed_out", "子代理达到墙钟时间上限", "timeout", "timeout")
+            raise ValueError("摘要请求超时")
+        if runtime.llm_calls >= self.task.budget.max_llm_calls or remaining_tokens <= 0:
+            self._set_terminal("budget_exhausted", "子代理摘要预算耗尽", "budget_exhausted",
+                               "summary_budget")
+            raise ValueError("摘要请求预算不足")
+        return {"max_output_tokens": remaining_tokens, "timeout": remaining_time}
+
+    def summarize(self, prompt: list[dict[str, Any]], *, max_output_tokens: int,
+                  timeout: float) -> str:
+        runtime = self.runtime
+        if runtime is None:
+            raise ValueError("子代理 Runtime 尚未启动")
+        summarizer = self.runner._summarizer()
+        if runtime.usage_meter is not None:
+            return summarizer(prompt, max_output_tokens=max_output_tokens, timeout=timeout)
+        # Injected test clients have no provider meter. Count their summary
+        # request even if it raises, just as the normal Runtime counts calls.
+        runtime.llm_calls += 1
+        runtime.input_tokens += count_tokens(prompt)
+        runtime.estimated_tokens = runtime.input_tokens + runtime.output_tokens
+        summary = summarizer(prompt, max_output_tokens=max_output_tokens, timeout=timeout)
+        runtime.output_tokens += count_tokens(summary)
+        runtime.estimated_tokens = runtime.input_tokens + runtime.output_tokens
+        return summary
 
     def _budget_check(self, runtime):
         elapsed = time.monotonic() - self.started_clock
@@ -1116,10 +1205,15 @@ class SubagentRuntimePolicy:
 
     def before_llm(self, runtime):
         self.runtime = runtime
-        return self._budget_check(runtime)
+        if self.terminal is not None:
+            return RuntimeDecision("finish", self.terminal[1], self.terminal[2])
+        return self._cancel_check() or self._budget_check(runtime)
 
     def after_llm(self, runtime, _message):
         self.runtime = runtime
+        cancelled = self._cancel_check()
+        if cancelled is not None:
+            return cancelled
         elapsed = time.monotonic() - self.started_clock
         if elapsed > self.task.budget.timeout_seconds:
             self._set_terminal("timed_out", "子代理达到墙钟时间上限", "timeout", "timeout")
@@ -1137,7 +1231,13 @@ class SubagentRuntimePolicy:
             0.001,
             self.task.budget.timeout_seconds - (time.monotonic() - self.started_clock),
         )
-        return {"stream_output": False, "timeout": remaining}
+        remaining_tokens = max(
+            1, self.task.budget.max_tokens - runtime.estimated_tokens - runtime.request_tokens,
+        )
+        return {
+            "stream_output": False, "timeout": remaining,
+            "max_output_tokens": remaining_tokens,
+        }
 
     def on_text(self, runtime, content):
         self.runtime = runtime
@@ -1171,6 +1271,17 @@ class SubagentRuntimePolicy:
 
     def prepare_tool_round(self, runtime, calls):
         self.runtime = runtime
+        cancelled = self._cancel_check()
+        if cancelled is not None:
+            self._set_terminal("cancelled", cancelled.content, "cancelled", self._cancel_detail())
+            return ToolRoundPlan(
+                True,
+                {
+                    index: self._rejection(
+                        runtime, index, "cancelled", "子代理收到取消请求",
+                    ) for index in range(len(calls))
+                },
+            )
         if runtime.normalized and runtime.normalized.errors_by_call_id:
             self.invalid_tool_call = True
             detail = "子代理工具调用协议非法: " + "; ".join(
@@ -1217,6 +1328,10 @@ class SubagentRuntimePolicy:
         return ToolRoundPlan(True)
 
     def after_tool_result(self, runtime, call, execution):
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            self._set_terminal(
+                "cancelled", "子代理收到取消请求", "cancelled", self._cancel_detail(), "cancelled",
+            )
         if execution.outcome == "succeeded" and execution.handler_admitted:
             derived = self.runner._observations_for_execution(execution, self.scope_gate)
             self.observations.extend(derived)
@@ -1251,15 +1366,25 @@ class DelegationManager:
                  subagent_llm: Callable | None = None, llm: Callable | None = None,
                  llm_callable: Callable | None = None,
                  parent_registry: ToolRegistry | None = None,
-                 provider_catalog: ProviderCatalog | None = None):
+                 provider_catalog: ProviderCatalog | None = None,
+                 parent_state: AgentState | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root or os.getcwd())))
         self.subagent_llm = subagent_llm if subagent_llm is not None else (
             llm if llm is not None else llm_callable
         )
         self.parent_registry = parent_registry
         self.provider_catalog = provider_catalog
+        self.parent_state = parent_state
         self._lock = Lock()
-        self._active = False
+        self._active_task_id: str | None = None
+        self._active_delegation_id: str | None = None
+        self._cancel_event = Event()
+        self._cancel_reason = ""
+        self._done_event = Event()
+        self._done_event.set()
+        self._reservation_state: AgentState | None = None
+        self._reservation: Any = None
+        self._interrupted = False
         self.last_task: DelegatedTask | None = None
         self.last_result: SubagentResult | None = None
 
@@ -1269,8 +1394,66 @@ class DelegationManager:
             provider_catalog=self.provider_catalog,
         )
 
+    @property
+    def active_task_id(self) -> str | None:
+        with self._lock:
+            return self._active_task_id
+
+    @property
+    def active_delegation_id(self) -> str | None:
+        with self._lock:
+            return self._active_delegation_id
+
+    def active_info(self) -> dict[str, str | bool | None]:
+        with self._lock:
+            return {
+                "active": self._active_task_id is not None,
+                "task_id": self._active_task_id,
+                "delegation_id": self._active_delegation_id,
+                "cancel_requested": self._cancel_event.is_set(),
+                "cancel_reason": self._cancel_reason or None,
+            }
+
+    def consume_interrupt(self) -> bool:
+        with self._lock:
+            interrupted = self._interrupted
+            self._interrupted = False
+            return interrupted
+
+    def cancel(self, task_id: str | None = None, reason: str = "task_boundary") -> bool:
+        """Request cooperative cancellation; an in-flight HTTP call is not killed."""
+        with self._lock:
+            if self._active_task_id is None:
+                return False
+            if task_id is not None and task_id != self._active_task_id:
+                return False
+            self._cancel_reason = _safe_error_detail(reason, 240)
+            self._cancel_event.set()
+            state = self._reservation_state
+            delegation_id = self._active_delegation_id
+        if state is not None and delegation_id is not None:
+            try:
+                state.note_delegation_cancellation(delegation_id, self._cancel_reason)
+            except ValueError:
+                pass
+        return True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for a child call to reach its manager boundary."""
+        return self._done_event.wait(timeout)
+
+    @staticmethod
+    def _rejected_result(task: DelegatedTask, outcome: str, detail: str) -> SubagentResult:
+        now = _utc_now()
+        return SubagentResult(
+            str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
+            outcome, detail, (), (), (detail,), UsageRecord(token_accounting="estimated"),
+            task.contract_hash, now, now, "aggregate_budget" if outcome == "budget_exhausted" else "lifecycle_rejected",
+        )
+
     def run(self, arguments: dict[str, Any] | DelegatedTask,
             state: AgentState | None = None) -> SubagentResult:
+        state = state or self.parent_state
         try:
             task = arguments if isinstance(arguments, DelegatedTask) else self.create_task(arguments, state)
         except Exception as error:
@@ -1280,7 +1463,7 @@ class DelegationManager:
                                   "failed", "委派合同非法", (), (), (_safe_error_detail(error),),
                                   UsageRecord(token_accounting="estimated"), "", now, now, "invalid_contract")
         with self._lock:
-            if self._active:
+            if self._active_task_id is not None:
                 result = SubagentResult(
                     str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
                     "failed", "当前已有子代理运行", (), (), ("delegation_busy",),
@@ -1289,7 +1472,41 @@ class DelegationManager:
                 )
                 self.last_result = result
                 return result
-            self._active = True
+            self._active_task_id = getattr(state, "task_id", None) or task.parent_task_id
+            self._active_delegation_id = task.delegation_id
+            self._cancel_event = Event()
+            self._cancel_reason = ""
+            self._done_event.clear()
+            self._reservation_state = state
+            self._reservation = None
+            self._interrupted = False
+        reservation = None
+        if state is not None:
+            try:
+                reservation = state.reserve_delegation(task)
+                state.start_delegation(task.delegation_id)
+                with self._lock:
+                    self._reservation = reservation
+            except Exception as error:
+                result = self._rejected_result(
+                    task, "budget_exhausted", _safe_error_detail(error),
+                )
+                self.last_task = task
+                self.last_result = result
+                if state is not None:
+                    try:
+                        state.record_delegation_rejection(task, result, result.error_detail)
+                    except Exception:
+                        # The deterministic tool result remains authoritative
+                        # if the bounded audit list itself is full.
+                        pass
+                with self._lock:
+                    self._active_task_id = None
+                    self._active_delegation_id = None
+                    self._reservation_state = None
+                    self._reservation = None
+                    self._done_event.set()
+                return result
         self.last_task = task
         try:
             binding = (
@@ -1300,7 +1517,28 @@ class DelegationManager:
             result = SubagentRunner(
                 self.workspace_root, llm=self.subagent_llm,
                 parent_registry=self.parent_registry, model_binding=binding,
-            ).run(task)
+            ).run(
+                task, cancel_event=self._cancel_event,
+                cancellation_reason=lambda: self._cancel_reason,
+            )
+            if result.outcome == "cancelled" and result.error_detail == "user_interrupt":
+                with self._lock:
+                    self._interrupted = True
+            if state is not None:
+                state.delegation_result_ready(task.delegation_id, result)
+            self.last_result = result
+            return result
+        except KeyboardInterrupt as error:
+            with self._lock:
+                self._interrupted = True
+            result = SubagentResult(
+                str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
+                "cancelled", "子代理收到取消请求", (), (), ("cancelled",),
+                UsageRecord(token_accounting="estimated"), task.contract_hash,
+                _utc_now(), _utc_now(), "cancelled", _safe_error_detail(error),
+            )
+            if state is not None:
+                state.delegation_result_ready(task.delegation_id, result)
             self.last_result = result
             return result
         except Exception as error:
@@ -1310,10 +1548,16 @@ class DelegationManager:
                 UsageRecord(token_accounting="estimated"), task.contract_hash,
                 _utc_now(), _utc_now(), "runner_error",
             )
+            if state is not None:
+                state.delegation_result_ready(task.delegation_id, result)
             self.last_result = result
             return result
         finally:
             with self._lock:
-                self._active = False
+                self._active_task_id = None
+                self._active_delegation_id = None
+                self._reservation_state = None
+                self._reservation = None
+                self._done_event.set()
 
     delegate = run

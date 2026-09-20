@@ -671,6 +671,16 @@ class SessionStore:
             AgentState.validate_session_export(state, allow_pending=save_kind == "tool_boundary")
         except (SessionExportError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"State 导出校验失败: {error}") from error
+        if save_kind == "safe_point":
+            active_delegations = [
+                item.get("delegation_id", "?")
+                for item in state.get("delegation_records", [])
+                if isinstance(item, dict) and item.get("delivery_status") != "committed"
+            ]
+            if active_delegations:
+                raise SessionValidationError(
+                    "safe_point 不能包含活动或待提交委派: " + ", ".join(active_delegations)
+                )
         boundary = deepcopy(tool_boundary) if tool_boundary is not None else _empty_tool_boundary()
         _validate_context_export(
             context,
