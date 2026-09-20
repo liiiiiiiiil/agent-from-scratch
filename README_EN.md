@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.38` are complete (lesson 38: bounded parallel subagents), continuing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.39` are complete (lesson 39: durable delegation delivery), completing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -75,7 +75,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.36</strong></td><td><a href="./docs/tutorials/36-multi-provider.md">Multiple providers and one protocol boundary</a></td><td>Bind parent and child models through local profiles, support OpenAI-compatible Chat Completions and Anthropic Messages, and keep protocol differences in adapters.</td></tr>
     <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">Subagent lifecycle and aggregate budgets</a></td><td>Track delegation delivery, reserve and settle parent aggregate budgets, and cooperatively cancel the synchronous child.</td></tr>
     <tr><td><strong>v0.38</strong></td><td><a href="./docs/tutorials/38-parallel-delegation.md">Bounded parallel subagents</a></td><td>Run multiple read-only investigations under a fixed concurrency limit and deliver parent results in model tool-call order.</td></tr>
-    <tr><td>v0.39</td><td>Durable delegation delivery</td><td>Later work will persist and recover delegation results across processes.</td></tr>
+    <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">Durable delegation delivery</a></td><td>Persist validated child results, deliver them in parent call order atomically, and recover them across processes.</td></tr>
   </tbody>
 </table>
 

@@ -105,6 +105,14 @@ _CRASH_DECISION_FIELDS = (
     "decision_id", "recovery_id", "issue_id", "decision", "feedback",
     "generation_id", "investigation_attempt_id",
 )
+_DELEGATION_FIELDS = (
+    "delegation_id", "subagent_id", "parent_task_id", "parent_generation_id",
+    "parent_attempt_id",
+    "task_contract_hash", "delivery_status", "outcome", "result_id", "result_hash",
+    "usage", "created_at", "started_at", "result_ready_at", "committed_at",
+    "cancellation_reason", "diagnostic_reason", "result_summary", "contract_summary",
+    "reserved_usage", "progress_hash",
+)
 
 _ACCEPTED_RECOVERY_STATUSES = {"reserved", "executed", "terminal"}
 _STATE_STATUSES = {"running", "awaiting_process", "done", "blocked", "failed", "idle"}
@@ -306,6 +314,23 @@ def _safe_checkpoint(record: Any, issues: list[str], label: str) -> dict[str, An
             result[field] = _safe_text(value)
         else:
             result[field] = _jsonish(value)
+    return result
+
+
+def _safe_delegation(record: Any, issues: list[str], label: str) -> dict[str, Any]:
+    """Expose parent delegation facts without child history or result bodies."""
+    if not isinstance(record, Mapping):
+        issues.append(f"{label} 不是对象")
+        return {}
+    result = _safe_record(record, _DELEGATION_FIELDS, issues, label)
+    for field in ("diagnostic_reason", "result_summary", "cancellation_reason"):
+        if field in record:
+            result[field] = _safe_text(_bounded_text(record[field], 1200))
+    for field in ("contract_summary", "usage", "reserved_usage"):
+        if field in record:
+            result[field] = _jsonish(record[field])
+    # The result reference is intentionally retained; the result JSON itself
+    # is never read from State or a session by Trace & Replay.
     return result
 
 
@@ -1121,6 +1146,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     raw_crash_recoveries = _records(snapshot, "crash_recoveries", issues) if "crash_recoveries" in snapshot else []
     raw_crash_issues = _records(snapshot, "crash_issues", issues) if "crash_issues" in snapshot else []
     raw_crash_decisions = _records(snapshot, "crash_decisions", issues) if "crash_decisions" in snapshot else []
+    raw_delegations = _records(snapshot, "delegations", issues) if "delegations" in snapshot else []
 
     generations = [_safe_record(item, _GENERATION_FIELDS, issues, f"generations[{i}]")
                    for i, item in enumerate(raw_generations)]
@@ -1155,6 +1181,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
     crash_decisions_list = [
         _safe_record(item, _CRASH_DECISION_FIELDS, issues, f"crash_decisions[{i}]")
         for i, item in enumerate(raw_crash_decisions)
+    ]
+    delegations_list = [
+        _safe_delegation(item, issues, f"delegations[{i}]")
+        for i, item in enumerate(raw_delegations)
     ]
     trace_events = [_safe_trace_event(item, issues, f"trace_events[{i}]")
                     for i, item in enumerate(raw_trace_events)]
@@ -1589,6 +1619,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             deepcopy(item) for item in crash_decisions_list
             if item.get("generation_id") == gid
         ]
+        grouped_delegations = [
+            deepcopy(item) for item in delegations_list
+            if item.get("parent_generation_id") == gid
+        ]
         local_edges = [deepcopy(edge) for edge in all_edges
                        if edge.get("generation_id") == gid
                        or edge.get("from") == _node("generation", gid)
@@ -1615,6 +1649,7 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
             "crash_recoveries": grouped_crash_recoveries,
             "crash_issues": grouped_crash_issues,
             "crash_decisions": grouped_crash_decisions,
+            "delegations": grouped_delegations,
             "causal_edges": local_edges,
             "edges": local_edges,
             "conclusion": conclusion,
@@ -1660,6 +1695,10 @@ def _build_generation_trace(snapshot: Mapping[str, Any], generation_id: int | No
         "crash_decisions": [
             deepcopy(item) for item in crash_decisions_list
             if generation_id is None or item.get("generation_id") == generation_id
+        ],
+        "delegations": [
+            deepcopy(item) for item in delegations_list
+            if generation_id is None or item.get("parent_generation_id") == generation_id
         ],
         "causal_edges": all_edges if generation_id is None else [
             deepcopy(edge) for edge in all_edges
@@ -1732,6 +1771,10 @@ def build_trace(
     raw_crash_recoveries = raw_records("crash_recoveries") if "crash_recoveries" in snapshot else []
     raw_crash_issues = raw_records("crash_issues") if "crash_issues" in snapshot else []
     raw_crash_decisions = raw_records("crash_decisions") if "crash_decisions" in snapshot else []
+    delegation_records = {
+        item["delegation_id"]: item for item in base.get("delegations", [])
+        if isinstance(item, Mapping) and isinstance(item.get("delegation_id"), str)
+    }
 
     plan_records = [
         _safe_plan_revision(item, issues, f"plan_revisions[{index}]")
@@ -1904,6 +1947,7 @@ def build_trace(
         "crash_recovery": crash_recovery_map,
         "crash_issue": crash_issue_map,
         "crash_decision": crash_decision_map,
+        "delegation": delegation_records,
     }
     for index, event in enumerate(event_records):
         sequence_id = event.get("sequence_id")
@@ -1934,6 +1978,8 @@ def build_trace(
                     event_by_target.setdefault((record_type, record_id), []).append(event)
                 if record_type in {"crash_recovery", "crash_issue"}:
                     target_generation = target.get("recovery_generation_id") if isinstance(target, Mapping) else None
+                elif record_type == "delegation":
+                    target_generation = target.get("parent_generation_id") if isinstance(target, Mapping) else None
                 else:
                     target_generation = target.get("generation_id") if isinstance(target, Mapping) else None
                 # Recovery events point at the final RecoveryAction record;
@@ -1946,7 +1992,15 @@ def build_trace(
                     and not isinstance(event_generation, bool)
                     and target_generation == event_generation + 1
                 )
-                if target_generation is not None and event_generation != target_generation and not proposal_transition:
+                delegation_recovery_transition = (
+                    record_type == "delegation"
+                    and event.get("kind") in {"delegation_result_recovered", "delegation_interrupted"}
+                    and isinstance(event_generation, int)
+                    and isinstance(target_generation, int)
+                    and event_generation >= target_generation
+                )
+                if (target_generation is not None and event_generation != target_generation
+                        and not proposal_transition and not delegation_recovery_transition):
                     _add_issue(issues, f"trace event[{index}] generation 与目标 {record_type} 不一致")
             if available is None:
                 _add_issue(issues, f"trace event[{index}] record_type 非法: {record_type}")
@@ -2363,6 +2417,55 @@ def build_trace(
     )
     all_edges.extend(missing_fact_edges)
 
+    # Delegation events are parent State facts.  The result reference is a
+    # hash only; Trace never reads the child result body or child history.
+    for delegation_id, record in delegation_records.items():
+        gid = record.get("parent_generation_id")
+        node = _node("delegation", delegation_id)
+        parent_attempt_id = record.get("parent_attempt_id")
+        if parent_attempt_id is not None:
+            attempt = _mapping_get(attempts, parent_attempt_id)
+            linked = isinstance(attempt, Mapping) and attempt.get("tool") == "delegate_task"
+            if not linked and record.get("delivery_status") in {"committed", "interrupted"}:
+                _add_issue(issues, f"delegation {delegation_id}.parent_attempt_id 引用不存在或不是委派调用")
+            all_edges.append(_edge(
+                "parent_delegation", _node("attempt", parent_attempt_id), node,
+                gid, linked,
+            ))
+        else:
+            all_edges.append(_edge(
+                "parent_delegation", _node("generation", gid), node,
+                gid, gid in {item.get("generation_id") for item in base.get("generations", [])},
+            ))
+        lifecycle = sorted((
+            event for event in event_records
+            if event.get("record_type") == "delegation"
+            and event.get("record_id") == delegation_id
+            and event.get("kind") in {
+                "delegation_created", "delegation_started", "delegation_result_ready",
+                "delegation_committed", "delegation_result_recovered", "delegation_interrupted",
+            }
+        ), key=lambda event: event.get("sequence_id", 0))
+        previous = node
+        for event in lifecycle:
+            current = _node("trace_event", event.get("sequence_id"))
+            all_edges.append(_edge("delegation_lifecycle", previous, current, gid, True,
+                                   event.get("kind")))
+            previous = current
+        terminal = record.get("delivery_status")
+        expected_terminal = ({"delegation_committed", "delegation_result_recovered"}
+                             if terminal == "committed" else
+                             {"delegation_interrupted"} if terminal == "interrupted" else set())
+        if expected_terminal and not any(event.get("kind") in expected_terminal for event in lifecycle):
+            _add_issue(issues, f"delegation {delegation_id} 缺少终态 trace event")
+            all_edges.append(_edge("delegation_lifecycle", previous,
+                                   _node("trace_event", "missing"), gid, False,
+                                   "终态事件缺失"))
+        result_hash = record.get("result_hash")
+        if isinstance(result_hash, str) and result_hash:
+            all_edges.append(_edge("delegation_result", node,
+                                   _node("delegation_result", result_hash), gid, True))
+
     # A plan edge can cross generations (for example parent revision 1 in
     # generation 0 -> revision 2 in generation 1). Generation views keep
     # their own facts grouped locally, while retaining such an edge whenever
@@ -2455,6 +2558,7 @@ def build_trace(
         "crash_recovery": crash_recovery_map,
         "crash_issue": crash_issue_map,
         "crash_decision": crash_decision_map,
+        "delegation": delegation_records,
     }
 
     def event_record(event: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2937,6 +3041,7 @@ def render_trace(report: Mapping[str, Any]) -> str:
             ("Crash recoveries", "crash_recoveries", "recovery_id", _CRASH_RECOVERY_FIELDS),
             ("Crash issues", "crash_issues", "issue_id", _CRASH_ISSUE_FIELDS),
             ("Crash decisions", "crash_decisions", "decision_id", _CRASH_DECISION_FIELDS),
+            ("Delegations", "delegations", "delegation_id", _DELEGATION_FIELDS),
         )
         for title, key, identifier_field, fields in sections:
             lines.append(f"  {title}:")

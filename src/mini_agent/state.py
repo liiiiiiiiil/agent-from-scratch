@@ -143,7 +143,7 @@ class DelegationBudget:
         return self.max_subagents - self.created_subagents
 
 
-DelegationDeliveryStatus = Literal["created", "running", "result_ready", "committed"]
+DelegationDeliveryStatus = Literal["created", "running", "result_ready", "committed", "interrupted"]
 DelegationOutcome = Literal[
     "pending", "completed", "failed", "timed_out", "cancelled", "budget_exhausted",
 ]
@@ -173,6 +173,7 @@ class DelegationRecord:
     contract_summary: dict[str, Any] = field(default_factory=dict)
     reserved_usage: DelegationUsage = field(default_factory=DelegationUsage)
     progress_hash: str | None = None
+    parent_attempt_id: str | None = None
 
 
 def delegation_progress_hash(result: Any) -> str:
@@ -217,6 +218,22 @@ def delegation_progress_hash(result: Any) -> str:
     payload = {"findings": findings, "evidence": evidence}
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def delegation_result_hash(result: Any) -> str:
+    """Return the durable identity of the complete child result document.
+
+    The progress hash intentionally ignores prose and IDs.  Durable delivery
+    needs the opposite property: the raw result must be byte-for-byte
+    reconstructable, so the session boundary and State use this canonical
+    document hash for idempotency and tamper detection.
+    """
+    raw = result.to_dict() if hasattr(result, "to_dict") else result
+    if not isinstance(raw, dict):
+        raise ValueError("SubagentResult 必须是 object")
+    return hashlib.sha256(json.dumps(
+        raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
 
 
@@ -1047,12 +1064,24 @@ class AgentState:
     def active_delegation_records(self) -> list[DelegationRecord]:
         with self._lock:
             return [item for item in self.delegation_records
-                    if item.delivery_status != "committed"]
+                    if item.delivery_status not in {"committed", "interrupted"}]
 
     def has_active_delegations(self) -> bool:
         with self._lock:
-            return any(item.delivery_status != "committed"
+            return any(item.delivery_status not in {"committed", "interrupted"}
                        for item in self.delegation_records)
+
+    def bind_delegation_parent_attempt(self, delegation_id: str, attempt_id: str) -> DelegationRecord:
+        """Keep the durable parent invocation reference for read-only Trace."""
+        if not isinstance(attempt_id, str) or not attempt_id.startswith("a-"):
+            raise ValueError("委派 parent attempt_id 无效")
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.parent_attempt_id not in (None, attempt_id):
+                raise ValueError("委派 parent attempt_id 不能替换")
+            updated = replace(record, parent_attempt_id=attempt_id)
+            self.delegation_records[index] = updated
+            return updated
 
     def delegation_budget_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -1240,21 +1269,27 @@ class AgentState:
         raw = result.to_dict() if hasattr(result, "to_dict") else result
         if not isinstance(raw, dict):
             raise ValueError("SubagentResult 必须是 object")
+        if raw.get("delegation_id") != delegation_id:
+            raise ValueError("SubagentResult delegation_id 不一致")
         usage = DelegationUsage.from_value(raw.get("usage", {}))
         result_id = raw.get("result_id")
-        result_hash = hashlib.sha256(json.dumps(
-            raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")).hexdigest()
+        result_hash = delegation_result_hash(raw)
         progress_hash = delegation_progress_hash(raw)
         outcome = raw.get("outcome")
         if outcome not in {"completed", "failed", "timed_out", "cancelled", "budget_exhausted"}:
             raise ValueError("SubagentResult outcome 无效")
         with self._lock:
             index, record = self._find_delegation_locked(delegation_id)
+            if (raw.get("subagent_id") != record.subagent_id
+                    or raw.get("parent_task_id") != record.parent_task_id
+                    or raw.get("contract_hash") != record.task_contract_hash):
+                raise ValueError("SubagentResult 身份或合同不一致")
             if record.delivery_status == "committed":
                 if record.result_id == result_id and record.result_hash == result_hash:
                     return record
                 raise ValueError("已 committed 的委派不能替换结果")
+            if record.delivery_status == "interrupted":
+                raise ValueError("已中断的委派不能接受迟到结果")
             if record.delivery_status == "result_ready":
                 if record.result_id == result_id and record.result_hash == result_hash:
                     return record
@@ -1317,6 +1352,116 @@ class AgentState:
             return None
         return self.commit_delegation(raw["delegation_id"], result_id=raw.get("result_id"))
 
+    def mark_delegation_interrupted(self, delegation_id: str, reason: str) -> DelegationRecord:
+        """Close a created/running child as an audit fact during recovery.
+
+        A new process must never retain an old worker as active.  No child
+        result exists, so the audit record has no result identity.  The
+        reserved maximum remains a conservative budget charge, while the
+        record's actual usage stays unknown.
+        """
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.delivery_status == "interrupted":
+                return record
+            if record.delivery_status == "committed":
+                raise ValueError("已交付委派不能标记为调查中断")
+            if record.delivery_status == "result_ready":
+                raise ValueError("result_ready 委派不能标记为调查中断")
+            reserved = record.reserved_usage
+            budget = self.delegation_budget
+            self.delegation_budget = replace(
+                budget,
+                reserved_subagents=max(0, budget.reserved_subagents - 1),
+                reserved_llm_calls=max(0, budget.reserved_llm_calls - reserved.llm_calls),
+                reserved_tool_calls=max(0, budget.reserved_tool_calls - reserved.tool_calls),
+                reserved_tokens=max(0, budget.reserved_tokens - reserved.tokens),
+                used_llm_calls=budget.used_llm_calls + reserved.llm_calls,
+                used_tool_calls=budget.used_tool_calls + reserved.tool_calls,
+                used_tokens=budget.used_tokens + reserved.tokens,
+            )
+            updated = replace(
+                record,
+                delivery_status="interrupted",
+                outcome="failed",
+                diagnostic_reason=(str(reason)[:400] + "；实际用量未知，预算按预留上限保守占用"),
+                result_summary="调查中断；未恢复旧子代理",
+            )
+            self.delegation_records[index] = updated
+            self._append_trace_event_locked(
+                "delegation_interrupted", record_type="delegation", record_id=delegation_id,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return updated
+
+    def commit_recovered_delegation_result(
+        self, delegation_id: str, call: dict[str, Any], result: Any,
+    ) -> DelegationRecord:
+        """Settle a durable child result while deriving a fresh parent attempt.
+
+        The source session may have persisted a child result before the parent
+        execution attempt existed.  Recovery has the original arguments in
+        the private reservation ledger, so it can create the same successful
+        parent attempt without invoking the child or inventing arguments.
+        """
+        raw = result.to_dict() if hasattr(result, "to_dict") else result
+        if not isinstance(raw, dict):
+            raise ValueError("恢复委派结果必须是 object")
+        result_id = raw.get("result_id")
+        result_hash = delegation_result_hash(raw)
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.delivery_status == "committed":
+                if record.result_id == result_id and record.result_hash == result_hash:
+                    return record
+                raise ValueError("已 committed 的委派不能替换结果")
+            if record.delivery_status != "result_ready":
+                raise ValueError("恢复委派结果必须来自 result_ready")
+            if record.result_id != result_id or record.result_hash != result_hash:
+                raise ValueError("恢复委派结果与 State 摘要不一致")
+
+            attempt_id = call.get("attempt_id")
+            if not isinstance(attempt_id, str) or attempt_id not in self._pending_attempts:
+                raise ValueError("恢复委派结果缺少 pending attempt")
+            arguments_hash = call.get("arguments_hash")
+            if not isinstance(arguments_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", arguments_hash):
+                raise ValueError("恢复委派结果缺少调用参数身份")
+            summary = call.get("arguments_summary", {})
+            if not isinstance(summary, dict):
+                raise ValueError("恢复委派结果缺少调用参数摘要")
+            pre_generation = call.get("pre_generation_id")
+            generation_id = call.get("generation_id")
+            if not isinstance(pre_generation, int) or not isinstance(generation_id, int):
+                raise ValueError("恢复委派结果缺少 generation 引用")
+            self._pending_attempts.discard(attempt_id)
+            attempt = ExecutionAttempt(
+                attempt_id, pre_generation, generation_id, "delegate_task", arguments_hash,
+                deepcopy(summary), "succeeded", 0, "none", True,
+                "allowed", output_excerpt="recovered durable delegation result",
+            )
+            self.attempts.append(attempt)
+            self._append_trace_event_locked(
+                "execution_result", generation_id=generation_id,
+                revision_id=self.planning_state.active_revision_id,
+                record_type="attempt", record_id=attempt_id,
+            )
+            updated = replace(
+                record,
+                delivery_status="committed",
+                committed_at=_delegation_now(),
+                diagnostic_reason=(
+                    record.diagnostic_reason
+                    or "已从持久化 result_ready 原文恢复并按父调用顺序交付"
+                ),
+            )
+            self.delegation_records[index] = updated
+            self._append_trace_event_locked(
+                "delegation_result_recovered", generation_id=generation_id,
+                record_type="delegation", record_id=delegation_id,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return updated
+
     def note_delegation_cancellation(self, delegation_id: str, reason: str) -> None:
         with self._lock:
             index, record = self._find_delegation_locked(delegation_id)
@@ -1324,63 +1469,39 @@ class AgentState:
                 record, cancellation_reason=str(reason)[:500],
             )
 
-    def reconcile_pending_delegation_boundary(self, calls: list[dict[str, Any]]) -> None:
+    def reconcile_pending_delegation_boundary(
+        self, calls: list[dict[str, Any]],
+        pending_results: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Conservatively retain aggregate reservations across v0.33 recovery.
 
-        A schema-3 boundary can be persisted before a child has returned, so
-        the old session may not contain the in-memory DelegationRecord yet.
-        v0.37 does not recreate that result; it reserves the remaining parent
-        ledger and lets the ordinary crash issue flow handle the call.
+        A schema-3 boundary can be persisted before a child has returned.  A
+        v0.39 result-ready entry already has a State record and keeps its
+        settled usage.  Older boundaries have no such entry; their old
+        created/running records are closed as interruption facts and their
+        pending budget is charged conservatively.
         """
         pending = [item for item in calls if item.get("tool") == "delegate_task"
-                   and item.get("status") == "pending"
-                   and item.get("handler_admitted")]
+                   and item.get("status") == "pending"]
         if not pending:
             return
+        ready_ids = {
+            item.get("invocation_id") for item in (pending_results or [])
+            if isinstance(item, dict)
+        }
         with self._lock:
-            budget = self.delegation_budget
-            self.delegation_budget = replace(
-                budget,
-                created_subagents=max(budget.created_subagents, budget.max_subagents),
-                reserved_subagents=max(budget.reserved_subagents, 1),
-                reserved_llm_calls=max(budget.reserved_llm_calls, budget.remaining_llm_calls),
-                reserved_tool_calls=max(budget.reserved_tool_calls, budget.remaining_tool_calls),
-                reserved_tokens=max(budget.reserved_tokens, budget.remaining_tokens),
+            records_by_id = {item.delegation_id: item for item in self.delegation_records}
+            interrupted = [
+                call.get("delegation_id") for call in pending
+                if call.get("invocation_id") not in ready_ids
+                and isinstance(call.get("delegation_id"), str)
+                and records_by_id.get(call.get("delegation_id")) is not None
+                and records_by_id[call.get("delegation_id")].delivery_status in {"created", "running"}
+            ]
+        for delegation_id in interrupted:
+            self.mark_delegation_interrupted(
+                delegation_id, "调查运行中丢失；恢复分支不重启旧子代理。",
             )
-        arguments = arguments if isinstance(arguments, dict) else {}
-        with self._lock:
-            if self.status in ("blocked", "failed"):
-                return "工具调用拒绝: blocked/failed 状态不能委派"
-            if self.status != "running":
-                return "工具调用拒绝: 当前任务不在 idle/running 委派状态"
-            if effect_class != "none":
-                return "工具调用拒绝: delegate_task 必须是无副作用调用"
-            phase = self.planning_state.phase
-            repair = self._repair_phase
-            purpose = arguments.get("purpose")
-            source_id = arguments.get("source_id")
-            if phase == "awaiting_approval" or repair == "verification_required":
-                return "工具调用拒绝: 当前阶段不能委派调查"
-            unresolved = [item for item in self.crash_issues
-                          if item.status in ("unresolved", "investigating")]
-            if unresolved:
-                investigating = [item for item in unresolved if item.status == "investigating"]
-                if purpose != "crash_investigation" or not investigating:
-                    return "工具调用拒绝: crash recovery 只允许调查当前 investigating issue"
-                if source_id not in {
-                        item.issue_id for item in investigating
-                    } | {item.recovery_id for item in investigating}:
-                    return "工具调用拒绝: crash_investigation 必须引用当前 issue"
-                return None
-            if repair == "diagnosis_required":
-                if purpose != "diagnosis" or source_id != self._active_failure_id:
-                    return "工具调用拒绝: diagnosis 必须引用当前 active_failure_id"
-                return None
-            if purpose != "investigation":
-                return "工具调用拒绝: 当前空闲阶段只允许 investigation"
-            if phase not in ("direct", "exploring", "executing"):
-                return "工具调用拒绝: 当前计划阶段不能委派调查"
-            return None
 
     def begin_crash_recovery(
         self,
@@ -1399,8 +1520,8 @@ class AgentState:
                 raise ValueError("source_session_id 无效")
             if any(item.status in ("resolving",) for item in self.crash_recoveries):
                 raise ValueError("当前已有活动 crash recovery")
-            if not isinstance(pending_calls, list) or not pending_calls:
-                raise ValueError("crash recovery 至少需要一个 pending call")
+            if not isinstance(pending_calls, list):
+                raise ValueError("crash recovery pending_calls 必须是 list")
             self._ensure_generation()
             recovery_id = f"cr-{self._next_crash_recovery}"
             self._next_crash_recovery += 1
@@ -3756,7 +3877,7 @@ class AgentState:
                     ),
                 }
             active_delegations = [item for item in self.delegation_records
-                                  if item.delivery_status != "committed"]
+                                  if item.delivery_status not in {"committed", "interrupted"}]
             if active_delegations:
                 return {
                     "unfinished_todos": [],
@@ -3858,7 +3979,7 @@ class AgentState:
         if self._pending_process_controls and not allow_pending:
             issues.append("存在未提交的进程控制结果")
         active_delegations = [item.delegation_id for item in self.delegation_records
-                              if item.delivery_status != "committed"]
+                              if item.delivery_status not in {"committed", "interrupted"}]
         if active_delegations and not allow_pending:
             issues.append("存在活动或待提交委派: " + ", ".join(active_delegations))
         active = [item for item in self.process_records
@@ -4066,6 +4187,11 @@ class AgentState:
         if not isinstance(delegation_records, list):
             raise SessionExportError("delegation_records 类型无效")
         seen_delegations: set[str] = set()
+        delegation_ids_by_status: dict[str, set[str]] = {name: set() for name in (
+            "created", "running", "result_ready", "committed", "interrupted",
+        )}
+        usage_totals = {"llm_calls": 0, "tool_calls": 0, "tokens": 0}
+        reserved_totals = {"llm_calls": 0, "tool_calls": 0, "tokens": 0}
         for raw in delegation_records:
             if not isinstance(raw, dict):
                 raise SessionExportError("delegation_records 含非 object 记录")
@@ -4073,21 +4199,52 @@ class AgentState:
             if not isinstance(delegation_id, str) or not delegation_id or delegation_id in seen_delegations:
                 raise SessionExportError("delegation_id 无效或重复")
             seen_delegations.add(delegation_id)
-            if raw.get("delivery_status") not in {"created", "running", "result_ready", "committed"}:
+            delivery_status = raw.get("delivery_status")
+            if delivery_status not in {"created", "running", "result_ready", "committed", "interrupted"}:
                 raise SessionExportError("delegation delivery_status 无效")
+            delegation_ids_by_status[delivery_status].add(delegation_id)
             if raw.get("outcome") not in {"pending", "completed", "failed", "timed_out", "cancelled", "budget_exhausted"}:
                 raise SessionExportError("delegation outcome 无效")
             if not isinstance(raw.get("task_contract_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", raw.get("task_contract_hash", "")):
                 raise SessionExportError("delegation contract hash 无效")
-            if raw.get("delivery_status") == "committed" and not raw.get("result_id"):
-                raise SessionExportError("committed delegation 缺少 result_id")
-            if raw.get("delivery_status") == "result_ready" and not raw.get("result_hash"):
-                raise SessionExportError("result_ready delegation 缺少 result_hash")
+            if delivery_status in {"result_ready", "committed"}:
+                if not isinstance(raw.get("result_id"), str) or not raw["result_id"]:
+                    raise SessionExportError(f"{delivery_status} delegation 缺少 result_id")
+                if not isinstance(raw.get("result_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", raw["result_hash"]):
+                    raise SessionExportError(f"{delivery_status} delegation result_hash 无效")
+            if delivery_status == "interrupted" and (raw.get("result_id") is not None
+                    or raw.get("result_hash") is not None or raw.get("committed_at") is not None):
+                raise SessionExportError("interrupted delegation 不能伪造已交付结果")
+            parent_attempt_id = raw.get("parent_attempt_id")
+            if parent_attempt_id is not None and (not isinstance(parent_attempt_id, str)
+                    or not re.fullmatch(r"a-[1-9][0-9]*", parent_attempt_id)):
+                raise SessionExportError("delegation parent_attempt_id 无效")
             try:
-                DelegationUsage.from_value(raw.get("usage", {}))
-                DelegationUsage.from_value(raw.get("reserved_usage", {}))
+                usage = DelegationUsage.from_value(raw.get("usage", {}))
+                reserved = DelegationUsage.from_value(raw.get("reserved_usage", {}))
             except (TypeError, ValueError) as error:
                 raise SessionExportError(f"delegation usage 无效: {error}") from error
+            usage_totals["llm_calls"] += usage.llm_calls
+            usage_totals["tool_calls"] += usage.tool_calls
+            usage_totals["tokens"] += usage.tokens
+            if delivery_status in {"created", "running"}:
+                reserved_totals["llm_calls"] += reserved.llm_calls
+                reserved_totals["tool_calls"] += reserved.tool_calls
+                reserved_totals["tokens"] += reserved.tokens
+
+        if delegation_budget is not None:
+            if delegation_budget.get("used_llm_calls", 0) < usage_totals["llm_calls"]:
+                raise SessionExportError("delegation budget.used_llm_calls 小于记录 usage")
+            if delegation_budget.get("used_tool_calls", 0) < usage_totals["tool_calls"]:
+                raise SessionExportError("delegation budget.used_tool_calls 小于记录 usage")
+            if delegation_budget.get("used_tokens", 0) < usage_totals["tokens"]:
+                raise SessionExportError("delegation budget.used_tokens 小于记录 usage")
+            if delegation_budget.get("reserved_llm_calls", 0) < reserved_totals["llm_calls"]:
+                raise SessionExportError("delegation budget.reserved_llm_calls 小于活动委派预留")
+            if delegation_budget.get("reserved_tool_calls", 0) < reserved_totals["tool_calls"]:
+                raise SessionExportError("delegation budget.reserved_tool_calls 小于活动委派预留")
+            if delegation_budget.get("reserved_tokens", 0) < reserved_totals["tokens"]:
+                raise SessionExportError("delegation budget.reserved_tokens 小于活动委派预留")
 
         required_private = {
             "verification_generation", "last_verified_generation", "verification_required",
@@ -4768,7 +4925,7 @@ class AgentState:
                 raw.get("diagnostic_reason"), raw.get("result_summary", ""),
                 deepcopy(raw.get("contract_summary", {})),
                 DelegationUsage.from_value(raw.get("reserved_usage", {})),
-                raw.get("progress_hash"),
+                raw.get("progress_hash"), raw.get("parent_attempt_id"),
             ))
         raw_budget = payload.get("delegation_budget") or {}
         delegation_budget = DelegationBudget(**{

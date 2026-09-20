@@ -1373,11 +1373,13 @@ class DelegationScheduler:
 
     def __init__(self, manager: "DelegationManager", prepared: list[_PreparedDelegation],
                  max_concurrency: int, *, ready: dict[int, SubagentResult] | None = None,
+                 on_result_ready: Callable[[int, Any], None] | None = None,
                  on_result: Callable[[int, Any], None] | None = None):
         self.manager = manager
         self.prepared = tuple(prepared)
         self.max_concurrency = max(1, min(max_concurrency, len(self.prepared)))
         self.ready = dict(ready or {})
+        self.on_result_ready = on_result_ready
         self.on_result = on_result
         self._cancelled = False
 
@@ -1435,6 +1437,8 @@ class DelegationScheduler:
                 index, result = completed.get()
                 active.pop(index)
                 results[index] = result
+                if self.on_result_ready is not None:
+                    self.on_result_ready(index, result)
                 self._drain_ordered(results, next_index)
                 launch()
                 self._drain_ordered(results, next_index)
@@ -1697,6 +1701,7 @@ class DelegationManager:
         self, tasks: dict[int, DelegatedTask], state: AgentState | None = None,
         *, ready: dict[int, Any] | None = None,
         rejected_tasks: dict[int, DelegatedTask] | None = None,
+        on_result_ready: Callable[[int, Any], None] | None = None,
         on_result: Callable[[int, Any], None] | None = None,
     ) -> dict[int, SubagentResult]:
         """Run already reserved tasks; only the parent thread settles State."""
@@ -1707,12 +1712,20 @@ class DelegationManager:
             for index, task in sorted(tasks.items())
         ]
         self._register([(item.task, item.cancel_event, state) for item in entries])
+
+        def mark_ready(index: int, result: Any) -> None:
+            if on_result_ready is not None and state is not None and index in tasks:
+                state.delegation_result_ready(tasks[index].delegation_id, result)
+            if on_result_ready is not None:
+                on_result_ready(index, result)
+
         scheduler = DelegationScheduler(
             self, entries,
             getattr(getattr(state, "delegation_budget", None), "max_concurrency", 1),
             ready=ready,
+            on_result_ready=mark_ready,
             on_result=(lambda index, result: self._deliver_prepared_result(
-                index, result, tasks, rejected_tasks or {}, state, on_result,
+                index, result, tasks, rejected_tasks or {}, state, on_result_ready, on_result,
             ))
         )
         return scheduler.run()
@@ -1720,10 +1733,19 @@ class DelegationManager:
     def _deliver_prepared_result(
         self, index: int, result: Any, tasks: dict[int, DelegatedTask],
         rejected_tasks: dict[int, DelegatedTask],
-        state: AgentState | None, on_result: Callable[[int, Any], None] | None,
+        state: AgentState | None,
+        on_result_ready: Callable[[int, Any], None] | None,
+        on_result: Callable[[int, Any], None] | None,
     ) -> None:
         if state is not None and index in tasks:
-            state.delegation_result_ready(tasks[index].delegation_id, result)
+            record = next(
+                (item for item in state.delegation_records
+                 if item.delegation_id == tasks[index].delegation_id), None,
+            )
+            if record is None or record.delivery_status != "result_ready":
+                state.delegation_result_ready(tasks[index].delegation_id, result)
+                if on_result_ready is not None:
+                    on_result_ready(index, result)
         elif state is not None and index in rejected_tasks:
             try:
                 state.record_delegation_rejection(
@@ -1731,7 +1753,13 @@ class DelegationManager:
                     result, result.error_detail,
                 )
             except Exception:
-                pass
+                if on_result_ready is not None:
+                    raise
+            if on_result_ready is not None:
+                # Budget and duplicate-contract rejections also produce a
+                # structured SubagentResult.  Persist that result before
+                # the ordered parent delivery just like a worker result.
+                on_result_ready(index, result)
         if on_result is not None:
             on_result(index, result)
 

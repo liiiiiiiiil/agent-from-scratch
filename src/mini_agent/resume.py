@@ -319,8 +319,47 @@ class ResumeCandidate:
                         "崩溃恢复占用前工作区结构化观察发生变化；请重新准备恢复候选"
                     )
                 boundary = deepcopy(self.expected_envelope["tool_boundary"])
+                ready_by_invocation = {
+                    item.get("invocation_id"): item
+                    for item in boundary.get("pending_delegation_results", [])
+                    if isinstance(item, dict)
+                }
                 for call in boundary.get("calls", []):
                     if call.get("status") != "pending":
+                        continue
+                    ready = ready_by_invocation.get(call.get("invocation_id"))
+                    if ready is not None:
+                        try:
+                            raw_result = json.loads(ready["result_json"])
+                        except (TypeError, KeyError, json.JSONDecodeError) as error:
+                            raise ResumeError("持久委派结果原文无法解析") from error
+                        delegation_id = call.get("delegation_id")
+                        if not isinstance(delegation_id, str):
+                            raise ResumeError("持久委派结果缺少 delegation_id")
+                        record = next(
+                            (item for item in runtime.state.delegation_records
+                             if item.delegation_id == delegation_id), None,
+                        )
+                        if record is None or record.delivery_status != "committed":
+                            raise ResumeError("持久委派结果的 State 生命周期未 committed")
+                        attempt = next(
+                            (item for item in runtime.state.attempts
+                             if item.attempt_id == call.get("attempt_id")), None,
+                        )
+                        content = ready["result_json"]
+                        call.update({
+                            "status": "committed",
+                            "permission": "allowed",
+                            "handler_admitted": True,
+                            "pre_generation_id": attempt.pre_generation_id if attempt else call.get("pre_generation_id"),
+                            "generation_id": attempt.generation_id if attempt else call.get("generation_id"),
+                            "delegation_result_hash": ready["result_hash"],
+                            "result": {
+                                "outcome": "succeeded", "content": content,
+                                "output_excerpt": content[:200], "error_kind": None,
+                                "exit_code": None,
+                            },
+                        })
                         continue
                     issue = next((item for item in runtime.state.crash_issues
                                   if item.invocation_id == call.get("invocation_id")), None)
@@ -355,6 +394,7 @@ class ResumeCandidate:
                             "exit_code": None,
                         },
                     })
+                boundary.pop("pending_delegation_results", None)
                 boundary["status"] = "committed"
                 claimed = self.store.claim_crash_recovery(
                     runtime.session_id, self.expected_envelope,
@@ -439,9 +479,35 @@ def prepare_resume(store: SessionStore, session_id: str,
 
     state = AgentState.restore_session(raw_state, root, allow_pending=crash_mode)
     if crash_mode:
-        pending_calls = [deepcopy(item) for item in envelope["tool_boundary"]["calls"]
-                         if item.get("status") == "pending"]
-        state.reconcile_pending_delegation_boundary(envelope["tool_boundary"]["calls"])
+        raw_boundary = envelope["tool_boundary"]
+        pending_results = [
+            deepcopy(item) for item in raw_boundary.get("pending_delegation_results", [])
+            if isinstance(item, dict)
+        ]
+        ready_invocations = {item.get("invocation_id") for item in pending_results}
+        state.reconcile_pending_delegation_boundary(
+            raw_boundary["calls"], pending_results,
+        )
+        # A durable child result is a complete fact.  Settle the parent
+        # attempt before opening the fresh crash generation; no child worker or
+        # child LLM is started during this path.
+        for entry in pending_results:
+            call = next((item for item in raw_boundary["calls"]
+                         if item.get("invocation_id") == entry.get("invocation_id")), None)
+            if call is None or not isinstance(call.get("delegation_id"), str):
+                raise ResumeError("持久委派结果缺少对应调用")
+            try:
+                raw_result = json.loads(entry["result_json"])
+            except (TypeError, KeyError, json.JSONDecodeError) as error:
+                raise ResumeError("持久委派结果原文无法解析") from error
+            state.commit_recovered_delegation_result(
+                call["delegation_id"], call, raw_result,
+            )
+        pending_calls = [
+            deepcopy(item) for item in raw_boundary["calls"]
+            if item.get("status") == "pending"
+            and item.get("invocation_id") not in ready_invocations
+        ]
         state.begin_crash_recovery(
             envelope["session_id"], envelope["session_generation"],
             envelope["session_generation"], envelope["integrity"]["sha256"],
@@ -462,8 +528,20 @@ def prepare_resume(store: SessionStore, session_id: str,
     context_payload = deepcopy(envelope["context"])
     if crash_mode:
         issue_by_invocation = {item.invocation_id: item for item in state.crash_issues}
+        ready_by_invocation = {
+            item.get("invocation_id"): item
+            for item in envelope["tool_boundary"].get("pending_delegation_results", [])
+            if isinstance(item, dict)
+        }
         for call in envelope["tool_boundary"]["calls"]:
             if call.get("status") != "pending":
+                continue
+            ready = ready_by_invocation.get(call.get("invocation_id"))
+            if ready is not None:
+                context_payload["history"].append({
+                    "role": "tool", "tool_call_id": call["tool_call_id"],
+                    "content": ready["result_json"],
+                })
                 continue
             issue = issue_by_invocation.get(call.get("invocation_id"))
             if issue is None:

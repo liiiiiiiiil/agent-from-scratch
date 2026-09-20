@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程已完成 `v0.38`（第 38 课：有界并行子代理），阶段十继续推进。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程已完成 `v0.39`（第 39 课：持久委派交付），阶段十已完成。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -75,7 +75,7 @@
     <tr><td><strong>v0.36</strong></td><td><a href="./docs/tutorials/36-multi-provider.md">多 provider 与统一协议适配</a></td><td>用本地 profile 绑定父子模型，接入 OpenAI-compatible Chat Completions 与 Anthropic Messages，并把 provider 差异收进适配层。</td></tr>
     <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">子代理生命周期与聚合预算</a></td><td>记录委派交付状态，按父任务聚合预算预留与结算，并用协作式取消收束同步子代理。</td></tr>
     <tr><td><strong>v0.38</strong></td><td><a href="./docs/tutorials/38-parallel-delegation.md">有界并行子代理</a></td><td>在固定并发上限下运行多个只读调查，并按模型 tool-call 顺序提交父结果。</td></tr>
-    <tr><td>v0.39</td><td>持久委派交付</td><td>后续处理跨进程的委派结果持久化与恢复。</td></tr>
+    <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">持久委派交付</a></td><td>先保存已校验的子结果，再按父调用顺序原子交付并支持跨进程恢复。</td></tr>
   </tbody>
 </table>
 

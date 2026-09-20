@@ -21,7 +21,8 @@ from typing import Any
 from mini_agent import __version__
 from mini_agent.config import MAX_SESSION_FILE_BYTES
 from mini_agent.state import (
-    AgentState, SessionExportError, canonical_arguments_hash, redacted_arguments,
+    AgentState, SessionExportError, canonical_arguments_hash, delegation_result_hash,
+    redacted_arguments,
 )
 
 
@@ -39,6 +40,49 @@ _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS = {
     "begin_plan", "cancel_planning", "commit_plan", "update_plan_progress", "request_replan",
     "recover",
 }
+_MAX_PENDING_DELEGATION_RESULTS_BYTES = 128 * 1024
+_MAX_PENDING_DELEGATION_RESULT_BYTES = 16 * 1024
+_DELEGATION_RESULT_FIELDS = {
+    "result_id", "delegation_id", "subagent_id", "parent_task_id", "outcome",
+    "summary", "findings", "evidence", "limitations", "usage", "contract_hash",
+    "started_at", "finished_at", "error_kind", "error_detail", "model_profile",
+    "binding_fingerprint",
+}
+
+
+def _canonical_delegation_result(raw: Any) -> tuple[str, str, dict[str, Any]]:
+    """Validate and hash one persisted child result without importing delegation."""
+    if not isinstance(raw, dict):
+        raise SessionValidationError("待交付委派结果必须是 object")
+    if set(raw) - _DELEGATION_RESULT_FIELDS:
+        raise SessionValidationError("待交付委派结果含未知字段")
+    required = {
+        "result_id", "delegation_id", "subagent_id", "parent_task_id", "outcome",
+        "summary", "findings", "evidence", "limitations", "usage", "contract_hash",
+        "started_at", "finished_at",
+    }
+    if not required.issubset(raw):
+        raise SessionValidationError("待交付委派结果字段不完整")
+    if (not isinstance(raw["result_id"], str) or not raw["result_id"]
+            or not isinstance(raw["delegation_id"], str) or not raw["delegation_id"]
+            or not isinstance(raw["subagent_id"], str) or not raw["subagent_id"]
+            or not isinstance(raw["parent_task_id"], str)
+            or raw["outcome"] not in {"completed", "failed", "timed_out", "cancelled", "budget_exhausted"}
+            or not isinstance(raw["summary"], str)
+            or not isinstance(raw["findings"], list)
+            or not isinstance(raw["evidence"], list)
+            or not isinstance(raw["limitations"], list)
+            or not isinstance(raw["usage"], dict)
+            or not isinstance(raw["contract_hash"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", raw["contract_hash"])
+            or not isinstance(raw["started_at"], str)
+            or not isinstance(raw["finished_at"], str)):
+        raise SessionValidationError("待交付委派结果字段值无效")
+    normalized = json.loads(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+    encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _MAX_PENDING_DELEGATION_RESULT_BYTES:
+        raise SessionSizeError("单个待交付委派结果超过大小上限")
+    return encoded.decode("utf-8"), delegation_result_hash(normalized), normalized
 
 
 class SessionError(RuntimeError):
@@ -393,7 +437,8 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
     if not isinstance(boundary, dict):
         raise SessionValidationError("tool_boundary 必须是 object")
     expected_fields = {"round_id", "assistant_message", "calls", "status"}
-    if set(boundary) != expected_fields:
+    optional_fields = {"pending_delegation_results"}
+    if set(boundary) - expected_fields - optional_fields:
         raise SessionValidationError("tool_boundary 字段无效")
     round_id = boundary.get("round_id")
     if isinstance(round_id, bool) or not isinstance(round_id, int) or round_id < 0:
@@ -444,6 +489,53 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
     }
     private = state.get("private")
     pending_attempts = set(private.get("pending_attempts", [])) if isinstance(private, dict) else set()
+    state_delegations = {
+        item.get("delegation_id"): item
+        for item in state.get("delegation_records", [])
+        if isinstance(item, dict) and isinstance(item.get("delegation_id"), str)
+    }
+    raw_pending_results = boundary.get("pending_delegation_results", [])
+    if not isinstance(raw_pending_results, list):
+        raise SessionValidationError("pending_delegation_results 必须是列表")
+    pending_result_by_invocation: dict[str, dict[str, Any]] = {}
+    pending_result_bytes = 0
+    for item in raw_pending_results:
+        if not isinstance(item, dict):
+            raise SessionValidationError("待交付委派结果记录无效")
+        expected_result_fields = {
+            "invocation_id", "delegation_id", "result_id", "result_hash",
+            "result_json", "result_summary",
+        }
+        if set(item) != expected_result_fields:
+            raise SessionValidationError("待交付委派结果字段无效")
+        invocation_id = item.get("invocation_id")
+        if (not isinstance(invocation_id, str) or not invocation_id
+                or invocation_id in pending_result_by_invocation):
+            raise SessionValidationError("待交付委派结果 invocation_id 重复或无效")
+        result_json = item.get("result_json")
+        if not isinstance(result_json, str):
+            raise SessionValidationError("待交付委派结果原文无效")
+        if len(result_json.encode("utf-8")) > _MAX_PENDING_DELEGATION_RESULT_BYTES:
+            raise SessionSizeError("单个待交付委派结果超过大小上限")
+        try:
+            parsed = json.loads(result_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise SessionValidationError("待交付委派结果原文不是合法 JSON") from error
+        canonical, result_hash, parsed = _canonical_delegation_result(parsed)
+        if canonical != result_json:
+            raise SessionValidationError("待交付委派结果原文不是 canonical JSON")
+        if item.get("result_hash") != result_hash:
+            raise SessionValidationError("待交付委派结果 hash 不匹配")
+        if item.get("result_id") != parsed.get("result_id"):
+            raise SessionValidationError("待交付委派结果 result_id 不匹配")
+        if not isinstance(item.get("delegation_id"), str) or item["delegation_id"] != parsed.get("delegation_id"):
+            raise SessionValidationError("待交付委派结果 delegation_id 不匹配")
+        if not isinstance(item.get("result_summary"), str) or len(item["result_summary"]) > 1200:
+            raise SessionValidationError("待交付委派结果摘要无效")
+        pending_result_bytes += len(result_json.encode("utf-8"))
+        pending_result_by_invocation[invocation_id] = item
+    if pending_result_bytes > _MAX_PENDING_DELEGATION_RESULTS_BYTES:
+        raise SessionSizeError("待交付委派结果区超过大小上限")
     seen_invocations: set[str] = set()
     seen_pending = False
     referenced_pending_attempts: set[str] = set()
@@ -455,12 +547,17 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             "arguments_hash", "effect_class", "permission", "handler_admitted", "attempt_id",
             "pre_generation_id", "generation_id", "status", "result",
         }
+        extended_call_fields = call_fields | {
+            "delegation_id", "subagent_id", "delegation_result_hash",
+        }
         # v0.32 boundaries did not retain the original reservation hash.  They
         # remain readable for clean replay diagnostics, but a pending admitted
         # call without this field is not eligible for crash hand-off because
         # reconstructing it from redacted arguments would break its identity.
         legacy_call_fields = call_fields - {"arguments_hash"}
-        if set(call) not in (call_fields, legacy_call_fields):
+        if not set(call).issubset(extended_call_fields) or not (
+                call_fields - {"arguments_hash"} <= set(call)
+                or call_fields <= set(call)):
             raise SessionValidationError("tool_boundary call 字段无效")
         if call.get("sequence") != index:
             raise SessionValidationError("tool_boundary 调用顺序无效")
@@ -470,6 +567,21 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         seen_invocations.add(invocation_id)
         if call.get("tool_call_id") != raw_ids[index] or not isinstance(call.get("tool"), str):
             raise SessionValidationError("tool_boundary 调用身份不匹配")
+        delegation_id = call.get("delegation_id")
+        if delegation_id is not None and (
+                call.get("tool") != "delegate_task" or not isinstance(delegation_id, str) or not delegation_id
+        ):
+            raise SessionValidationError("tool_boundary delegation_id 引用无效")
+        if call.get("subagent_id") is not None and (
+                call.get("tool") != "delegate_task" or not isinstance(call.get("subagent_id"), str)
+                or not call.get("subagent_id")
+        ):
+            raise SessionValidationError("tool_boundary subagent_id 引用无效")
+        if call.get("delegation_result_hash") is not None and (
+                not isinstance(call.get("delegation_result_hash"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", call["delegation_result_hash"])
+        ):
+            raise SessionValidationError("tool_boundary delegation result hash 无效")
         if not isinstance(call.get("arguments_summary"), dict):
             raise SessionValidationError("tool_boundary 参数摘要无效")
         if "arguments_hash" in call and (
@@ -503,6 +615,55 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("handler_admitted 缺少 attempt 引用")
         if call.get("status") == "pending" and call.get("result") is not None:
             raise SessionValidationError("pending call 不能包含 result")
+        if call.get("tool") == "delegate_task" and delegation_id is not None:
+            delegation = state_delegations.get(delegation_id)
+            if delegation is None:
+                raise SessionValidationError("tool_boundary delegate_task 缺少 State delegation record")
+            if call.get("subagent_id") is not None and call["subagent_id"] != delegation.get("subagent_id"):
+                raise SessionValidationError("tool_boundary subagent_id 与 State 不一致")
+            if (delegation.get("parent_attempt_id") is not None
+                    and delegation["parent_attempt_id"] != attempt_id):
+                raise SessionValidationError("tool_boundary parent attempt 与 State 不一致")
+            if call.get("status") == "pending" and delegation.get("delivery_status") == "result_ready":
+                ready = pending_result_by_invocation.get(invocation_id)
+                if ready is None:
+                    raise SessionValidationError("result_ready 委派缺少待交付原文")
+                if (ready.get("delegation_id") != delegation_id
+                        or ready.get("result_id") != delegation.get("result_id")
+                        or ready.get("result_hash") != delegation.get("result_hash")):
+                    raise SessionValidationError("待交付委派结果与 State 不一致")
+                try:
+                    ready_raw = json.loads(ready["result_json"])
+                except (TypeError, KeyError, json.JSONDecodeError) as error:
+                    raise SessionValidationError("待交付委派结果原文无法解析") from error
+                if (ready_raw.get("subagent_id") != delegation.get("subagent_id")
+                        or ready_raw.get("parent_task_id") != delegation.get("parent_task_id")
+                        or ready_raw.get("contract_hash") != delegation.get("task_contract_hash")):
+                    raise SessionValidationError("待交付委派结果身份或合同不一致")
+            if call.get("status") == "committed":
+                delivery_status = delegation.get("delivery_status")
+                interrupted = (delivery_status == "interrupted"
+                               and isinstance(call.get("result"), dict)
+                               and call["result"].get("outcome") == "uncertain"
+                               and call.get("delegation_result_hash") is None)
+                if delivery_status != "committed" and not interrupted:
+                    raise SessionValidationError("committed delegate_task 与 State 生命周期不一致")
+                result_hash = call.get("delegation_result_hash")
+                if result_hash is not None and result_hash != delegation.get("result_hash"):
+                    raise SessionValidationError("committed delegate_task result hash 不一致")
+                if result_hash is not None:
+                    result = call.get("result")
+                    content = result.get("content") if isinstance(result, dict) else None
+                    try:
+                        _, content_hash, content_raw = _canonical_delegation_result(json.loads(content))
+                    except (TypeError, json.JSONDecodeError, SessionError) as error:
+                        raise SessionValidationError("committed 委派结果原文无效") from error
+                    if (content_hash != delegation.get("result_hash")
+                            or content_raw.get("result_id") != delegation.get("result_id")
+                            or content_raw.get("delegation_id") != delegation_id):
+                        raise SessionValidationError("committed 委派结果与 State 不一致")
+        elif invocation_id in pending_result_by_invocation:
+            raise SessionValidationError("待交付结果只能引用 delegate_task")
         if (call.get("status") == "pending" and call.get("handler_admitted")
                 and "arguments_hash" not in call):
             raise SessionValidationError("pending admitted call 缺少 durable arguments_hash")
@@ -550,6 +711,14 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         raise SessionValidationError("complete tool_boundary 仍包含 pending attempt")
     if status == "pending" and pending_attempts != referenced_pending_attempts:
         raise SessionValidationError("tool_boundary 与 State pending attempt 不一致")
+    referenced_ready = {
+        call.get("invocation_id") for call in calls
+        if isinstance(call, dict) and call.get("tool") == "delegate_task"
+        and call.get("status") == "pending"
+        and state_delegations.get(call.get("delegation_id"), {}).get("delivery_status") == "result_ready"
+    }
+    if referenced_ready != set(pending_result_by_invocation):
+        raise SessionValidationError("tool_boundary 待交付结果与 State result_ready 集合不一致")
     assistant_index = next(
         (index for index in range(len(history) - 1, -1, -1)
          if isinstance(history[index], dict)
@@ -675,7 +844,7 @@ class SessionStore:
             active_delegations = [
                 item.get("delegation_id", "?")
                 for item in state.get("delegation_records", [])
-                if isinstance(item, dict) and item.get("delivery_status") != "committed"
+                if isinstance(item, dict) and item.get("delivery_status") not in {"committed", "interrupted"}
             ]
             if active_delegations:
                 raise SessionValidationError(
@@ -1390,6 +1559,16 @@ class DurableToolBoundary:
         self.session_id = envelope["session_id"]
         return envelope
 
+    @staticmethod
+    def _result_raw(result: Any) -> tuple[str, str, dict[str, Any]]:
+        raw = result.to_dict() if hasattr(result, "to_dict") else result
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise SessionValidationError("委派结果原文不是合法 JSON") from error
+        return _canonical_delegation_result(raw)
+
     def start_round(self, round_id: int, assistant_message: dict[str, Any],
                     calls: list[dict[str, Any]], state: Any, context: Any) -> dict[str, Any]:
         """Persist an assistant message before any handler can run."""
@@ -1437,6 +1616,31 @@ class DurableToolBoundary:
         }
         return self._save(state, context)
 
+    def persist_delegation_batch(
+        self, tasks: dict[int, Any] | list[tuple[int, Any]], state: Any, context: Any,
+    ) -> dict[str, Any]:
+        """Persist frozen child contracts after reservation and before workers start."""
+        entries = tasks.items() if isinstance(tasks, dict) else tasks
+        calls = self.boundary.get("calls", [])
+        for index, task in sorted(entries, key=lambda item: item[0]):
+            if not isinstance(index, int) or index < 0 or index >= len(calls):
+                raise SessionValidationError("委派任务索引与 tool_boundary 不一致")
+            call = calls[index]
+            if call.get("tool") != "delegate_task":
+                raise SessionValidationError("委派合同只能绑定 delegate_task")
+            if (hasattr(state, "bind_delegation_parent_attempt")
+                    and call.get("attempt_id") is not None):
+                state.bind_delegation_parent_attempt(task.delegation_id, call.get("attempt_id"))
+            call.update({
+                "delegation_id": str(getattr(task, "delegation_id", "")),
+                "subagent_id": str(getattr(task, "subagent_id", "")),
+            })
+        return self._save(state, context)
+
+    # Explicit spelling used by integrations that treat reservation/start as
+    # one durable lifecycle point.
+    persist_delegation_start = persist_delegation_batch
+
     def _call(self, invocation_id: str) -> dict[str, Any]:
         for call in self.boundary.get("calls", []):
             if call.get("invocation_id") == invocation_id:
@@ -1458,12 +1662,19 @@ class DurableToolBoundary:
                          state: Any, context: Any) -> dict[str, Any]:
         """Persist handler admission before entering the handler."""
         call = self._call(invocation_id)
+        admitted_arguments = getattr(admission, "arguments", None)
         call.update({
             "effect_class": getattr(admission, "effect_class", call["effect_class"]),
             "permission": "allowed",
             "handler_admitted": True,
             **self._reservation_fields(admission),
         })
+        if isinstance(admitted_arguments, dict):
+            # Tool validation may add normalized defaults after start_round.
+            # The durable identity must match the exact arguments used for
+            # the reservation that recovery will later settle.
+            call["arguments_summary"] = redacted_arguments(admitted_arguments)
+            call["arguments_hash"] = canonical_arguments_hash(admitted_arguments)
         return self._save(state, context)
 
     def record_execution_result(self, invocation_id: str, execution: Any,
@@ -1499,6 +1710,106 @@ class DurableToolBoundary:
                 "exit_code": getattr(execution, "exit_code", None),
             },
         })
+        return self._save(state, context)
+
+    def record_delegation_result_ready(
+        self, invocation_id: str, result: Any, state: Any, context: Any,
+    ) -> dict[str, Any]:
+        """Persist one validated child result while keeping its parent call pending."""
+        call = self._call(invocation_id)
+        if call.get("tool") != "delegate_task" or call.get("status") != "pending":
+            raise SessionValidationError("只有 pending delegate_task 可以进入 result_ready")
+        result_json, result_hash, raw = self._result_raw(result)
+        delegation_id = call.get("delegation_id") or raw.get("delegation_id")
+        if not isinstance(delegation_id, str) or not delegation_id:
+            raise SessionValidationError("result_ready 委派缺少 delegation_id")
+        if call.get("delegation_id") not in (None, delegation_id):
+            raise SessionValidationError("result_ready delegation_id 不一致")
+        if call.get("subagent_id") not in (None, raw.get("subagent_id")):
+            raise SessionValidationError("result_ready subagent_id 不一致")
+        state_record = next(
+            (item for item in getattr(state, "delegation_records", [])
+             if item.delegation_id == delegation_id), None,
+        )
+        if state_record is None or state_record.delivery_status != "result_ready":
+            raise SessionValidationError("State 必须先保存 result_ready 生命周期")
+        if state_record.result_id != raw.get("result_id") or state_record.result_hash != result_hash:
+            raise SessionValidationError("result_ready 与 State 摘要不一致")
+        # A budget rejection can be materialized after batch preparation, so
+        # its boundary call did not yet receive the frozen task identity.
+        # Attach the identity before saving the result-ready boundary.
+        call["delegation_id"] = delegation_id
+        call.setdefault("subagent_id", raw.get("subagent_id"))
+        if hasattr(state, "bind_delegation_parent_attempt") and call.get("attempt_id") is not None:
+            state.bind_delegation_parent_attempt(delegation_id, call["attempt_id"])
+        pending = self.boundary.setdefault("pending_delegation_results", [])
+        existing = next((item for item in pending if item.get("invocation_id") == invocation_id), None)
+        entry = {
+            "invocation_id": invocation_id,
+            "delegation_id": delegation_id,
+            "result_id": raw["result_id"],
+            "result_hash": result_hash,
+            "result_json": result_json,
+            "result_summary": str(raw.get("summary") or "")[:1200],
+        }
+        if existing is not None:
+            if existing != entry:
+                raise SessionValidationError("重复 result_ready 与既有结果冲突")
+            return self._save(state, context)
+        pending.append(entry)
+        return self._save(state, context)
+
+    # Compatibility aliases make the lifecycle boundary discoverable without
+    # exposing a new public tool argument.
+    persist_delegation_result_ready = record_delegation_result_ready
+    save_delegation_result_ready = record_delegation_result_ready
+
+    def commit_delegation_result(
+        self, invocation_id: str, execution: Any, content: str,
+        state: Any, context: Any, attempt: Any = None,
+    ) -> dict[str, Any]:
+        """Atomically remove a pending raw result and commit parent delivery."""
+        call = self._call(invocation_id)
+        if call.get("tool") != "delegate_task" or call.get("status") != "pending":
+            raise SessionValidationError("只有 pending delegate_task 可以 committed")
+        pending = self.boundary.get("pending_delegation_results", [])
+        entry = next((item for item in pending if item.get("invocation_id") == invocation_id), None)
+        if entry is None:
+            raise SessionValidationError("committed 委派缺少已持久化的 result_ready 原文")
+        raw_json, result_hash, raw = self._result_raw(execution.output if hasattr(execution, "output") else execution)
+        if raw_json != entry.get("result_json") or result_hash != entry.get("result_hash"):
+            raise SessionValidationError("committed 委派结果与 result_ready 原文不一致")
+        if str(content) != raw_json:
+            raise SessionValidationError("父 tool 结果不是可恢复的委派原文")
+        delegation_id = call.get("delegation_id")
+        if delegation_id != entry.get("delegation_id"):
+            raise SessionValidationError("committed 委派身份不一致")
+        state_record = next(
+            (item for item in getattr(state, "delegation_records", [])
+             if item.delegation_id == delegation_id), None,
+        )
+        if state_record is None or state_record.delivery_status != "committed":
+            raise SessionValidationError("State 必须先 committed 委派结果")
+        reservation = getattr(execution, "reservation", None)
+        call.update({
+            "status": "committed",
+            "attempt_id": getattr(attempt, "attempt_id", getattr(reservation, "attempt_id", call.get("attempt_id"))),
+            "pre_generation_id": getattr(attempt, "pre_generation_id", getattr(reservation, "pre_generation_id", call.get("pre_generation_id"))),
+            "generation_id": getattr(attempt, "generation_id", getattr(reservation, "generation_id", call.get("generation_id"))),
+            "delegation_result_hash": result_hash,
+            "result": {
+                "outcome": getattr(execution, "outcome", "succeeded"),
+                "content": str(content),
+                "output_excerpt": str(getattr(execution, "output_excerpt", "")),
+                "error_kind": getattr(execution, "error_kind", None),
+                "exit_code": getattr(execution, "exit_code", None),
+            },
+        })
+        self.boundary["pending_delegation_results"] = [
+            item for item in pending if item.get("invocation_id") != invocation_id
+        ]
+        if not self.boundary["pending_delegation_results"]:
+            self.boundary.pop("pending_delegation_results", None)
         return self._save(state, context)
 
     def complete_round(self, state: Any, context: Any) -> dict[str, Any]:

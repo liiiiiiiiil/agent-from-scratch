@@ -1,6 +1,18 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.38**（有界并行子代理、按序结果交付和父任务聚合预算；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.39**（持久委派交付、按序恢复和父任务聚合预算；含此前可靠执行能力）。
+
+## v0.39 持久委派交付
+
+v0.38 的调度器允许子代理乱序完成，但结果在父 Context 写入前只存在于当前进程。如果父进程在这个窗口退出，子代理可能已经消耗了模型额度，父 Agent 却没有足够事实重建同一个 `role=tool` 结果。v0.39 把这两个时刻明确分开：结果合同校验通过后先保存为 `result_ready`，再按模型调用顺序交付。
+
+开启 `/save` 后，schema 3 的 `tool_boundary` 可以包含有界的 `pending_delegation_results`。每条记录保存 `invocation_id`、`delegation_id`、结果 ID、规范化结果原文、摘要和 hash；原文按 UTF-8 计数，单条和总区都有上限。它只覆盖尚未提交的 `delegate_task`，不保存子代理的完整 Context、history、隐藏提示词或凭据。
+
+父侧提交的顺序是：先保存委派合同、预留额度和 `created/running` 状态；子结果完成后校验并保存 `result_ready`；轮到该父调用时，把父 attempt、State 中的 `committed` 生命周期、对应 `role=tool` 和 boundary 中的结果引用放入同一次原子 session 提交。前序调用仍在运行时，后序结果可以先变成 `result_ready`，但不会越过父模型调用顺序交付。
+
+恢复 active pending boundary 时，已有且通过 hash、调用身份、State 状态和顺序校验的结果会在派生 session 中按父顺序直接交付，不会重新调用子 LLM。`created/running` 且没有持久结果的记录转为 `interrupted`：不生成子结果 ID/hash，也不标记为 `committed`；对应父工具调用仍由 v0.33 生成不确定结果和待用户处理的 issue。实际子用量未知，聚合预算按原预留上限保守占用，不会因派生新 session 重置，也不会显示为已确认的子实际 usage。
+
+Trace 和 Structured State 只显示父调用、合同摘要、生命周期、usage 和结果引用，不读取子 history 或原始待交付结果。工作区和项目指令仍在恢复时重新检查；旧结果只能作为父 Agent 的调查材料，不能扩大新的委派权限或代替父验证。
 
 ## v0.38 有界并行子代理
 
@@ -12,7 +24,7 @@ v0.38 允许父模型在一个 assistant 回合提交多个彼此独立的 `dele
 
 用户中断子代理调用时，Runtime 先提交每个已完成或取消的父工具结果，再停止父循环；不会继续请求父模型。子代理的上下文压缩若需要额外的模型摘要请求，也必须先检查剩余调用数、token 和时间，并限制摘要输出；预算不足时退回裁剪并结束子任务。
 
-活动或 `result_ready` 委派会阻止父任务进入 `done`，也会阻止 safe point。已提交记录及聚合账本可以随普通 State 一起保存和恢复；schema 3 pending tool boundary 只保守保留预留并沿用 v0.33 crash recovery，不自动重跑子代理，也不承诺恢复未提交的原始子结果。
+活动或 `result_ready` 委派会阻止父任务进入 `done`，也会阻止 safe point。v0.39 为 `result_ready` 增加了有界原文保存；没有这份原文的旧 v0.38 session 仍按 v0.33 规则把已准入调用交给 issue，不自动重跑子代理。
 
 ### v0.38 配置
 
@@ -460,7 +472,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.38，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.39，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
@@ -512,13 +524,13 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 输入 `/save` 后，session 文件升级为 schema 3。它仍然是单个原子 JSON 文件，同时保存 State、Context 和最后一个工具回合的 `tool_boundary`；不会额外创建 journal。`session_generation` 是每次提交递增的序号。
 
-工具回合的持久化顺序是固定的：先写入 assistant 消息和按模型顺序排列的 pending call；通过权限、参数和计划前置检查后，在 handler 真正开始前提交 `handler_admitted`；handler 返回后，先记账 State，再追加对应的 `role=tool`，然后原子提交该 call 的结果。所有 call 都 committed 后，才允许再次请求 LLM。`run_shell` 包括 `purpose="verification"` 始终按 `possible` 记录；`recover` 可能进入另一个工具或执行回滚，外层边界也保守记录为 `possible`，实际恢复 attempt 和 generation 仍由 `RecoveryRuntime` 管理。
+工具回合的持久化顺序是固定的：先写入 assistant 消息和按模型顺序排列的 pending call；通过权限、参数和计划前置检查后，在 handler 真正开始前提交 `handler_admitted`；handler 返回后，先记账 State，再追加对应的 `role=tool`，然后原子提交该 call 的结果。对 `delegate_task`，子结果先进入 boundary 的 `result_ready` 区；交付时再把父 attempt、State 的 `committed` 生命周期、`role=tool` 和边界状态一起提交。所有 call 都 committed 后，才允许再次请求 LLM。`run_shell` 包括 `purpose="verification"` 始终按 `possible` 记录；`recover` 可能进入另一个工具或执行回滚，外层边界也保守记录为 `possible`，实际恢复 attempt 和 generation 仍由 `RecoveryRuntime` 管理。
 
 这条边界解决的是“工具已经执行，但结果还没有落盘”的窗口。串行副作用工具按模型顺序完成；effect class 为 `none` 的调用可以并发产生结果，但准入提交和主线程的结果提交仍按模型顺序进行。权限拒绝、参数错误、计划校验失败和 handler 异常都各自产生确定的工具结果；存储失败会停止后续 handler 与模型请求，不会被包装成普通工具失败。
 
 进程自然退出属于异步 State 事实，会单独提交，不伪造新的工具回复。`write_process.input` 只在保存时保留占位符；如果正文出现在其他持久化文本中，保存会拒绝。
 
-v0.33 增加了 pending 边界的崩溃恢复交接。`--resume` 仍保留 v0.31 的 clean safe point 路径；遇到 active pending boundary 时，新的 session 会保存按模型顺序合成的 `role=tool` 结果和恢复 State，但不会重放旧调用。恢复 generation 的当前 verification 资格会清除，append-only verification history、FailureEvent、RecoveryAction 和计划历史仍保留供审计。
+v0.33 增加了 pending 边界的崩溃恢复交接，v0.39 又能直接消费已持久化的委派原结果。`--resume` 仍保留 v0.31 的 clean safe point 路径；遇到 active pending boundary 时，新的 session 会保存按模型顺序合成的 `role=tool` 结果和恢复 State，但不会重放旧调用。恢复 generation 的当前 verification 资格会清除，append-only verification history、FailureEvent、RecoveryAction 和计划历史仍保留供审计。
 
 ### 3.3 上下文预算与裁剪
 

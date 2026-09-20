@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.39.0] - Durable delegation delivery
+
+- Added a bounded schema 3 `pending_delegation_results` area that stores validated child result JSON and its hash before parent delivery.
+- Persisted delegation contracts and `created → running → result_ready → committed` lifecycle facts before starting workers, including out-of-order child completion.
+- Committed the parent attempt, State lifecycle, ordered `role=tool` message, and durable boundary together; storage failure stops later parent model requests.
+- Extended crash recovery to deliver persisted results in parent call order without invoking child LLMs again, while classifying admitted calls without results as interrupted investigations.
+- Added bounded delegation projections to Context and Trace, v0.39 durable delegation tests, lesson 39, and synchronized the manual, plans, README files, and package version.
+- Fixed delegation Trace rendering and linked parent attempts to lifecycle events; interrupted investigations now retain a distinct audit status without a synthetic child result or reported actual usage.
+
 ## [v0.38.0] - Bounded parallel subagents
 
 - Added a dedicated standard-library `DelegationScheduler` for multiple independent read-only `delegate_task` calls in one parent assistant round.

@@ -1,6 +1,6 @@
 # 阶段十：受控子代理委派（Controlled Subagent Delegation）实施计划
 
-> 状态：`v0.34`、`v0.35`、`v0.36`、`v0.37`、`v0.38` 已实现并保留；`v0.39` 待实施
+> 状态：`v0.34`、`v0.35`、`v0.36`、`v0.37`、`v0.38`、`v0.39` 已实现并保留
 > 建议版本范围：`v0.34`–`v0.39`
 > 能力前置：阶段七结构化计划（`v0.22`–`v0.25`）、阶段八任务与进程边界（`v0.26`–`v0.29`）、阶段九的安全恢复与持久化工具边界（`v0.30`–`v0.32`）
 > 关联计划：`adaptive-planning-plan.md`、`process-management-plan.md`、`session-persistence-resume-plan.md`
@@ -193,6 +193,7 @@ token 统计优先使用服务商返回的 usage；服务商未提供时，使�
 created → running → result_ready → committed
               │            ↑
               └─ 任何执行 outcome 均形成有界结果 ─┘
+              └─ 崩溃后无持久结果 → interrupted（仅审计）
 ```
 
 结果的执行 outcome 独立表示：
@@ -205,6 +206,7 @@ completed | failed | timed_out | cancelled | budget_exhausted
 
 - `result_ready`：子代理完整结果已经产生并通过本地校验，但尚未可靠进入父 State / Context。
 - `committed`：结果、父 DelegationRecord 和对应 `role=tool` 消息已经共同提交，父 Agent 可以继续请求 LLM。
+- `interrupted`：旧进程中的调查没有持久结果；父工具调用由 Crash Recovery 给出不确定结果，委派记录不伪造结果 ID 或实际用量。
 
 `committed` 不表示 outcome 为 `completed`。父 Agent 必须能收到并处理确定的失败结果。
 
@@ -398,7 +400,8 @@ UsageRecord
 DelegationRecord
 - delegation_id, subagent_id, parent_task_id, parent_generation_id
 - task_contract_hash
-- delivery_status: created | running | result_ready | committed
+- delivery_status: created | running | result_ready | committed | interrupted
+- parent_attempt_id?（父侧调用引用，用于 Trace）
 - outcome: pending | completed | failed | timed_out | cancelled | budget_exhausted
 - result_id?
 - result_hash?
@@ -494,7 +497,7 @@ delegations
 
 验收重点：子代理能回答一个跨文件调查问题并提供结构化位置证据；它看不到任何写、shell、进程、计划、恢复、验证或委派工具；其结果不自动推进父 Plan 或父 verification。
 
-本次实现已经支持多个同步创建的只读子代理在固定并发上限内并行；`v0.37` 已补入父任务聚合预算、后台取消和生命周期记录，`v0.38` 增加批量预留、乱序完成和按父顺序的内存内结果交付，仍未实现跨进程持久化委派结果或跨 session 恢复原始结果。`v0.35` 已收敛唯一循环，`v0.36` 已引入多 provider，持久化交付留给 `v0.39`。原有合同字段和失败结果保持兼容；新增模型绑定字段使用兼容默认值，不改写历史合同 hash。
+本次实现已经支持多个同步创建的只读子代理在固定并发上限内并行；`v0.37` 已补入父任务聚合预算、后台取消和生命周期记录，`v0.38` 增加批量预留、乱序完成和按父顺序的内存内结果交付，`v0.39` 又把已校验的原始结果保存为有界 `result_ready`，并接入 schema 3 session 与 v0.33 恢复。`v0.35` 已收敛唯一循环，`v0.36` 已引入多 provider。原有合同字段和失败结果保持兼容；新增模型绑定字段使用兼容默认值，不改写历史合同 hash。
 
 实施状态：
 
@@ -503,7 +506,7 @@ delegations
 - [x] `v0.36`：多 provider、协议适配和父子独立模型绑定。
 - [x] `v0.37`：生命周期、取消和聚合预算。
 - [x] `v0.38`：有界并行和按父顺序提交。
-- [ ] `v0.39`：持久委派、Trace、session 与 Crash Recovery 协调。
+- [x] `v0.39`：持久委派、Trace、session 与 Crash Recovery 协调。
 
 ### 8.2 `v0.35` 统一父子运行循环
 
@@ -744,7 +747,7 @@ result_ready / committed、session、Trace、崩溃协调
 - `docs/plans/README.md` 与本计划的实施状态
 - 真正新增全仓运行、授权或修改硬约束时更新 `AGENTS.md`
 
-v0.38 实现已同步有界并行、批量预算预留、按父顺序结果提交、取消传播、教程、运行手册、README、CHANGELOG 和版本信息；`v0.39` 的跨进程持久化交付仍保持为后续工作。`v0.36` 的 provider 配置、Runtime usage、父子 binding 与脱敏恢复边界继续保留。
+v0.39 实现已同步有界并行、批量预算预留、结果先持久化再按父顺序交付、恢复不重跑子代理、Trace、教程、运行手册、README、CHANGELOG 和版本信息。`v0.36` 的 provider 配置、Runtime usage、父子 binding 与脱敏恢复边界继续保留。
 
 教程先解释“工具并发”和“子代理委派”的区别，再解释为什么独立 State/Context 可以共用同一循环、如何通过配置限制能力；随后解释服务方、协议和模型的区别，再引入两级预算、结果顺序和 durable delivery。首次出现 canonical Runtime、provider、ModelBinding、Subagent、delegation、result_ready、committed、aggregate budget 和 authoritative verification 时必须就近用直观中文解释，不能只列字段。
 

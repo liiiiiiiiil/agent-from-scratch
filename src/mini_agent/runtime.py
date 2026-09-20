@@ -459,20 +459,41 @@ class AgentRuntime:
             state = getattr(self.context, "state", None)
             if state is not None and hasattr(state, "record_execution_result"):
                 attempt = state.record_execution_result(actual)
+        state = getattr(self.context, "state", None)
+        durable_delegation = (
+            name == "delegate_task"
+            and self.session_boundary is not None
+            and hasattr(self.session_boundary, "commit_delegation_result")
+            and isinstance(getattr(self.session_boundary, "boundary", None), dict)
+            and any(item.get("invocation_id") == f"r-{self.rounds}-c-{index}"
+                    for item in self.session_boundary.boundary.get(
+                        "pending_delegation_results", []
+                    ))
+        )
+        if durable_delegation:
+            # The State lifecycle, parent attempt, role=tool message and
+            # pending raw result are exported by one boundary save.  In-memory
+            # State is updated first so a failed save stops the loop before a
+            # subsequent provider request.
+            if state is not None and hasattr(state, "commit_delegation_tool_result"):
+                state.commit_delegation_tool_result(content)
+            self._append_tool_result(call["id"], content)
+            self.session_boundary.commit_delegation_result(
+                f"r-{self.rounds}-c-{index}", actual or display, content,
+                state, self.context, attempt,
+            )
+            return
         self._append_tool_result(call["id"], content)
         if self.session_boundary is not None:
             self.session_boundary.record_execution_result(
                 f"r-{self.rounds}-c-{index}",
                 actual or display,
                 content,
-                getattr(self.context, "state", None),
+                state,
                 self.context,
                 attempt,
             )
-        state = getattr(self.context, "state", None)
         if name == "delegate_task" and state is not None and hasattr(state, "commit_delegation_tool_result"):
-            # The role=tool message has been appended (and, when enabled,
-            # durably recorded) before the parent lifecycle becomes committed.
             state.commit_delegation_tool_result(content)
 
     def _start_durable_round(self, calls: tuple[dict[str, Any], ...]) -> None:
@@ -680,6 +701,14 @@ class AgentRuntime:
         else:
             tasks, ready, rejected_tasks = manager.prepare_batch(admissions, self.context.state)
 
+            if self.session_boundary is not None and tasks and hasattr(
+                    self.session_boundary, "persist_delegation_batch"):
+                # All accepted contracts, reservations and running lifecycle
+                # records are durable before the first child worker starts.
+                self.session_boundary.persist_delegation_batch(
+                    tasks, self.context.state, self.context,
+                )
+
             def commit_ready(index: int, result: Any) -> None:
                 if isinstance(result, tuple) and len(result) == 3:
                     record = result
@@ -716,6 +745,15 @@ class AgentRuntime:
             manager.run_prepared_batch(
                 tasks, self.context.state, ready=all_ready,
                 rejected_tasks=rejected_tasks,
+                on_result_ready=(
+                    (lambda index, result: self.session_boundary.record_delegation_result_ready(
+                        f"r-{self.rounds}-c-{index}", result,
+                        self.context.state, self.context,
+                    ))
+                    if self.session_boundary is not None
+                    and hasattr(self.session_boundary, "record_delegation_result_ready")
+                    else None
+                ),
                 on_result=commit_ready,
             )
             if any(record is None for record in records):

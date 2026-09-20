@@ -776,7 +776,7 @@ class ContextManager:
             )
             active_delegations = [
                 item for item in delegations
-                if isinstance(item, dict) and item.get("delivery_status") != "committed"
+                if isinstance(item, dict) and item.get("delivery_status") not in {"committed", "interrupted"}
             ]
             if active_delegations:
                 base_lines.append(
@@ -784,6 +784,7 @@ class ContextManager:
                         f"{item.get('delegation_id', '?')} goal="
                         f"{item.get('contract_summary', {}).get('goal', '')} "
                         f"status={item.get('delivery_status', '?')} outcome={item.get('outcome', '?')}"
+                        f" result_ref={item.get('result_id') or item.get('result_hash') or '-'}"
                         for item in active_delegations[:8]
                     ), 1800)
                 )
@@ -797,9 +798,20 @@ class ContextManager:
                         f"{item.get('delegation_id', '?')}="
                         f"{item.get('outcome', '?')}: "
                         f"{item.get('result_summary') or item.get('diagnostic_reason') or 'result committed'}"
+                        f" [result_ref={item.get('result_id') or item.get('result_hash') or '-'}]"
                         for item in committed[-3:]
                     ), 1200)
                 )
+            interrupted = [
+                item for item in delegations
+                if isinstance(item, dict) and item.get("delivery_status") == "interrupted"
+            ]
+            if interrupted:
+                base_lines.append("Interrupted investigations: " + bounded("; ".join(
+                    f"{item.get('delegation_id', '?')}: "
+                    f"{item.get('diagnostic_reason') or 'result unknown'}"
+                    for item in interrupted[-3:]
+                ), 1200))
         process_records = snapshot.get("processes", [])
         if process_records:
             base_lines.append("Background processes:")

@@ -137,6 +137,16 @@ def _render_crash_recovery(state, *, source_session_id=None, derived_session_id=
             f"{item.get('stdin_mode', 'closed')}/{item.get('stdin_state', 'disabled')}"
             for item in orphaned[:16]
         )
+    delegations = [item for item in snapshot.get("delegations", [])
+                   if isinstance(item, dict)]
+    recovered = [item for item in delegations
+                 if "持久化 result_ready 原文" in str(item.get("diagnostic_reason", ""))]
+    interrupted = [item for item in delegations
+                   if "调查中断" in str(item.get("diagnostic_reason", ""))]
+    if recovered:
+        lines.append(f"已恢复待交付委派结果：{len(recovered)} 个；子代理不会重跑。")
+    if interrupted:
+        lines.append(f"调查运行中丢失：{len(interrupted)} 个；已记录为中断事实，不会启动旧子代理。")
     lines.append("调用分类：")
     for issue in snapshot.get("crash_issues", []):
         lines.append(
