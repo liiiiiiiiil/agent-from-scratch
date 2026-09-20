@@ -25,13 +25,17 @@ from mini_agent.tools.plan import (make_begin_plan_tool, make_cancel_planning_to
 from mini_agent.recovery import RecoveryRuntime
 from mini_agent.checkpoint import CheckpointStore, make_rollback_checkpoint_tool
 from mini_agent.providers.catalog import ProviderCatalog
+from mini_agent.memory import MemoryStore
+import mini_agent.config as runtime_config
+from mini_agent.tools.memory import make_memory_tools
 
 def create_registry(state: AgentState | None = None,
                     workspace_root: str | None = None,
                     process_manager: ProcessManager | None = None,
                     subagent_llm=None,
                     include_delegation: bool | None = None,
-                    provider_catalog: ProviderCatalog | None = None) -> ToolRegistry:
+                    provider_catalog: ProviderCatalog | None = None,
+                    memory_store: MemoryStore | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -87,6 +91,16 @@ def create_registry(state: AgentState | None = None,
         result.register(__import__('mini_agent.recovery', fromlist=['make_recover_tool']).make_recover_tool(recovery_runtime))
         result.register(make_rollback_checkpoint_tool(checkpoint_store))
         result._recovery_runtime = recovery_runtime
+        # Memory is a parent-only workspace resource.  It is deliberately
+        # absent from the module-level smoke registry and from the filtered
+        # child registry, whose four-tool allowlist remains unchanged.
+        memory_store = memory_store or MemoryStore(
+            workspace_root=workspace_root or os.getcwd(),
+            memory_dir=runtime_config.MEMORY_DIR,
+        )
+        result._memory_store = memory_store
+        for tool in make_memory_tools(memory_store):
+            result.register(tool)
     return result
 
 # Keep the historical module-level smoke-test registry stable.  CLI and all

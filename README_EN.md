@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.39` are complete (lesson 39: durable delegation delivery), completing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.40` are complete (lesson 40: lightweight persistent memory), beginning Stage 11. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -76,6 +76,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">Subagent lifecycle and aggregate budgets</a></td><td>Track delegation delivery, reserve and settle parent aggregate budgets, and cooperatively cancel the synchronous child.</td></tr>
     <tr><td><strong>v0.38</strong></td><td><a href="./docs/tutorials/38-parallel-delegation.md">Bounded parallel subagents</a></td><td>Run multiple read-only investigations under a fixed concurrency limit and deliver parent results in model tool-call order.</td></tr>
     <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">Durable delegation delivery</a></td><td>Persist validated child results, deliver them in parent call order atomically, and recover them across processes.</td></tr>
+    <tr><th colspan="3"><a id="stage-11"></a>Stage 11 · Workspace memory and references</th></tr>
+    <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">Lightweight persistent memory</a></td><td>Let the parent Agent explicitly view, save, revise, and forget workspace memory with pagination, workspace-external storage, uncertain-commit inspection, permission, revision, atomic storage, and recovery boundaries.</td></tr>
   </tbody>
 </table>
 

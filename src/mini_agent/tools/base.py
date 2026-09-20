@@ -90,6 +90,13 @@ class ExecutionResult:
             return format_tool_result(self.output, max_chars=8000)
         if self.tool == "delegate_task":
             return format_tool_result(self.output, max_chars=12 * 1024)
+        if self.tool in {
+            "list_memories", "read_memory", "remember", "revise_memory", "forget_memory",
+        }:
+            # Memory handlers already serialize a bounded JSON document.  Do
+            # not apply the generic 4 KiB text truncation, which could turn a
+            # valid list response into invalid JSON.
+            return format_tool_result(self.output, max_chars=64 * 1024)
         return format_tool_result(self.output)
 
 
@@ -276,8 +283,20 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
                 raise ValueError(f"参数 {key} 超过长度上限")
             if "pattern" in prop and re.search(prop["pattern"], value) is None:
                 raise ValueError(f"参数 {key} 格式非法")
-        if isinstance(value, list) and "maxItems" in prop and len(value) > prop["maxItems"]:
-            raise ValueError(f"参数 {key} 超过数量上限")
+        if isinstance(value, list):
+            if "maxItems" in prop and len(value) > prop["maxItems"]:
+                raise ValueError(f"参数 {key} 超过数量上限")
+            item_schema = prop.get("items")
+            if isinstance(item_schema, dict):
+                for index, item in enumerate(value):
+                    item_type = item_schema.get("type")
+                    if item_type and not _json_type_matches(item, item_type):
+                        raise ValueError(f"参数 {key}[{index}] 类型应为 {item_type}")
+                    if isinstance(item, str):
+                        if "minLength" in item_schema and len(item) < item_schema["minLength"]:
+                            raise ValueError(f"参数 {key}[{index}] 长度不足")
+                        if "maxLength" in item_schema and len(item) > item_schema["maxLength"]:
+                            raise ValueError(f"参数 {key}[{index}] 超过长度上限")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if "minimum" in prop and value < prop["minimum"]:
                 raise ValueError(f"参数 {key} 小于允许下限")
@@ -291,6 +310,31 @@ def _brief(value: Any) -> str:
         return str(value)[:RESULT_BRIEF_MAX_LENGTH]
     except Exception:
         return RESULT_BRIEF_FALLBACK
+
+
+def _memory_excerpt(value: Any) -> str:
+    """Keep Memory正文 out of State/trace excerpts while preserving the result."""
+    if not isinstance(value, str):
+        return _brief(value)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _brief(value)
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: "<omitted>" if key == "body" else scrub(child)
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [scrub(child) for child in item]
+        return item
+
+    try:
+        return _brief(json.dumps(scrub(parsed), ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return _brief(value)
 
 
 def _checkpoint_notice(checkpoint: Any) -> str:
@@ -479,7 +523,11 @@ class ToolExecutor:
             output = json.dumps(public, ensure_ascii=False)
         if checkpoint is not None:
             output = f"{output}\n{_checkpoint_notice(checkpoint)}"
-        excerpt = _brief(output)
+        excerpt = (
+            _memory_excerpt(output)
+            if name in {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory"}
+            else _brief(output)
+        )
         exit_code = None
         outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"
         error_kind = None

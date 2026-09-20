@@ -41,6 +41,8 @@ _PLAN_REFERENCE_LIMIT = 50
 _MISSING = object()
 _DELEGATION_RECORD_LIMIT = 64
 _DELEGATION_SUMMARY_MAX = 1200
+_MEMORY_WRITE_TOOLS = {"remember", "revise_memory", "forget_memory"}
+_MEMORY_COMMIT_UNCERTAIN = "memory_commit_uncertain"
 
 
 def _delegation_now() -> str:
@@ -290,7 +292,7 @@ def redacted_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         value = arguments[key]
         if any(word in key.lower() for word in sensitive):
             summary[key] = "<redacted>"
-        elif key in ("content", "old_string", "new_string", "command", "input"):
+        elif key in ("content", "body", "old_string", "new_string", "command", "input"):
             summary[key] = f"<{type(value).__name__}:{len(value) if isinstance(value, str) else '?'}>"
         elif isinstance(value, (str, int, float, bool)) or value is None:
             summary[key] = value[:80] if isinstance(value, str) else value
@@ -304,6 +306,8 @@ def stored_attempt_arguments(tool: str, arguments: dict[str, Any]) -> dict[str, 
     result = deepcopy(arguments)
     if tool == "write_process":
         result.pop("input", None)
+    if tool in {"remember", "revise_memory"} and isinstance(result.get("body"), str):
+        result["body"] = f"<str:{len(result['body'])}>"
     return result
 
 
@@ -1012,6 +1016,7 @@ class AgentState:
             allowed = {
                 "read_file", "list_dir", "grep", "calculate",
                 "get_process", "read_process", "list_processes", "wait_process",
+                "list_memories", "read_memory",
             }
             if name == "delegate_task" and isinstance(arguments, dict):
                 if arguments.get("purpose") == "crash_investigation":
@@ -1614,6 +1619,7 @@ class AgentState:
             for call in pending_calls:
                 effect = call.get("effect_class", "none")
                 admitted = bool(call.get("handler_admitted", False))
+                tool_name = str(call.get("tool", "<unknown>"))
                 if not admitted:
                     classification = "not_executed"
                     reason = "持久边界显示 handler_admitted=false；调用未进入 handler，恢复时补入未执行结果。"
@@ -1623,6 +1629,11 @@ class AgentState:
                 else:
                     classification = "uncertain_side_effect"
                     reason = "调用已准入可能产生副作用的 handler，但结果未提交；不得重放或声称成功。"
+                if admitted and effect == "possible" and tool_name in _MEMORY_WRITE_TOOLS:
+                    reason = (
+                        "记忆写入调用已进入 handler，但父工具结果未提交；记忆文件可能已经替换，"
+                        "提交状态未确认。不得重放；请先只读查看当前记忆，再逐项处理恢复 issue。"
+                    )
                 issue_id = f"issue-{self._next_crash_issue}"
                 self._next_crash_issue += 1
                 attempt_id = call.get("attempt_id") if isinstance(call.get("attempt_id"), str) else None
@@ -1639,13 +1650,18 @@ class AgentState:
                         if isinstance(call.get("generation_id"), int)
                         else generation_id
                     )
+                    attempt_excerpt = (
+                        reason[:200]
+                        if admitted and effect == "possible" and tool_name in _MEMORY_WRITE_TOOLS
+                        else "crash recovery: result not committed"
+                    )
                     attempt = ExecutionAttempt(
                         attempt_id,
                         int(call.get("pre_generation_id") if call.get("pre_generation_id") is not None else attempt_generation),
                         attempt_generation, str(call.get("tool", "<unknown>")), arguments_hash,
                         summary, "uncertain", 0, effect, True,
                         str(call.get("permission", "allowed")),
-                        output_excerpt="crash recovery: result not committed",
+                        output_excerpt=attempt_excerpt,
                         error_kind="crash_recovery_uncertain",
                     )
                     self.attempts.append(attempt)
@@ -3499,6 +3515,8 @@ class AgentState:
                     category = "deterministic"
                 elif result.error_kind in ("rollback_conflict", "rollback_restore_failed"):
                     category = "unknown"
+                elif result.error_kind == _MEMORY_COMMIT_UNCERTAIN:
+                    category = "unknown"
                 elif result.tool == "write_process" and result.error_kind in (
                     "stdin_pipe_error", "stdin_write_error", "stdin_write_thread_error",
                 ):
@@ -3610,10 +3628,23 @@ class AgentState:
                 )
                 self.errors.append(f"{result.tool}: {result.output_excerpt}")
                 if not was_terminal:
-                    self.recovery_notice = (f"Failure {failure_id} ({category}) requires diagnosis; "
-                                            f"caused by {attempt_id} in generation {generation_id}.")
+                    if result.error_kind == _MEMORY_COMMIT_UNCERTAIN:
+                        self.recovery_notice = (
+                            f"Failure {failure_id} ({_MEMORY_COMMIT_UNCERTAIN}) caused by {attempt_id}: "
+                            "记忆文件可能已经替换，提交状态未确认；请先只读核查，不能直接重试记忆写入。"
+                        )
+                    else:
+                        self.recovery_notice = (f"Failure {failure_id} ({category}) requires diagnosis; "
+                                                f"caused by {attempt_id} in generation {generation_id}.")
                 exhausted = self._fingerprint_counts[fingerprint] >= MAX_ATTEMPT_FINGERPRINTS
-                if result.error_kind == "rollback_conflict":
+                if result.error_kind == _MEMORY_COMMIT_UNCERTAIN:
+                    self._terminal(
+                        "blocked",
+                        "memory_commit_uncertain：记忆文件可能已经替换，提交状态未确认；"
+                        "请先只读核查，不得直接重试",
+                        failure_id,
+                    )
+                elif result.error_kind == "rollback_conflict":
                     self._terminal("blocked", "rollback_conflict：目标文件已发生外部变化", failure_id)
                 elif result.error_kind == "rollback_restore_failed":
                     self._terminal("blocked", "rollback_restore_failed：恢复操作未完成", failure_id)

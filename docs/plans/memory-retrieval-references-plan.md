@@ -1,6 +1,6 @@
 # 阶段十一：轻量记忆、相关检索与资料引用实施计划
 
-> 状态：计划中；`v0.40`–`v0.42` 尚未实现
+> 状态：`v0.40` 已实现；`v0.41`–`v0.42` 仍在计划中
 > 建议版本范围：`v0.40`–`v0.42`
 > 能力前置：阶段四的 State / Context 分离、阶段五的项目指令、阶段九的持久工具边界与崩溃恢复、阶段十的父子权限边界
 > 关联计划：`context-management-plan.md`、`session-persistence-resume-plan.md`、`subagent-delegation-plan.md`

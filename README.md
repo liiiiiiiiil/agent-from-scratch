@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程已完成 `v0.39`（第 39 课：持久委派交付），阶段十已完成。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程已完成 `v0.40`（第 40 课：轻量持久 Memory），阶段十一已开始。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -76,6 +76,8 @@
     <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">子代理生命周期与聚合预算</a></td><td>记录委派交付状态，按父任务聚合预算预留与结算，并用协作式取消收束同步子代理。</td></tr>
     <tr><td><strong>v0.38</strong></td><td><a href="./docs/tutorials/38-parallel-delegation.md">有界并行子代理</a></td><td>在固定并发上限下运行多个只读调查，并按模型 tool-call 顺序提交父结果。</td></tr>
     <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">持久委派交付</a></td><td>先保存已校验的子结果，再按父调用顺序原子交付并支持跨进程恢复。</td></tr>
+    <tr><th colspan="3"><a id="stage-11"></a>阶段十一 · 工作区记忆与资料引用</th></tr>
+    <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">轻量持久 Memory</a></td><td>由父 Agent 显式查看、保存、修订和遗忘工作区记忆，支持分页、工作区外存储和不确定提交核查，并通过权限、revision、原子存储和恢复边界保持可核查。</td></tr>
   </tbody>
 </table>
 

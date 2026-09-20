@@ -1,6 +1,26 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.39**（持久委派交付、按序恢复和父任务聚合预算；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.40**（轻量持久 Memory；含此前可靠执行能力）。
+
+## v0.40 轻量持久 Memory
+
+Memory 是按规范化工作区隔离的长期资料集合，与当前任务的 `AgentState`、Plan、verification evidence 和 `/save` session 分开。它不会自动从对话提炼，也不会自动注入每次模型请求；父 Agent 必须显式调用工具。`source` 只是用户或 Agent 提供的来源说明，不代表内容已经独立验证。
+
+父侧提供五个工具：`list_memories(limit=20, offset=0)` 只返回 ID、revision、标题、标签、来源和时间，并附 `total` 与 `next_offset`；`read_memory(memory_id)` 才返回单条正文；`remember(title, body, tags, source)` 新建；`revise_memory(memory_id, expected_revision, title, body, tags, source)` 修订；`forget_memory(memory_id, expected_revision)` 遗忘。查看默认 `allow`，三个修改工具默认 `ask`；授权提示展示受 schema 上限约束的拟写内容、目标 ID 和 revision，并继续支持 `once/always/reject`。
+
+默认存储根目录是 `~/.mini_agent/memory`，可在不提交的 `config_local.py` 中设置 `MEMORY_DIR`。`MEMORY_DIR` 按真实路径校验，不能位于当前工作区内，也不能通过符号链接指向工作区；这样子代理的工作区只读工具无法绕过 Memory 工具边界读取正文。工作区外的自定义目录继续可用。每个规范化工作区真实路径的 SHA-256 作为文件名，JSON 使用 `schema_version=1`。单个工作区最多 256 条；标题、正文、标签、来源上限分别是 120、2000、8×32、240 字符，整个 JSON 不超过 1 MiB。目录权限是 `0700`，文件是 `0600`；缺失文件表示空集合，损坏文件或未知 schema 只报错，不覆盖。
+
+修改流程在工作区专属 lock 下执行“重读 → 校验 → 修改 → 临时文件写入并同步 → 原子替换 → 目录同步”。锁最多等待 2 秒，不会自动抢占遗留锁。若替换已发生但目录同步失败，工具返回独立的 `memory_commit_uncertain`，State 将其归为结果不确定、不可直接重试的失败；当前进程后续记忆写入停止，但只读查看仍可用于核查。工具结果、State 和恢复提示都会说明文件可能已经替换，不能据此断言未写入。`expected_revision` 冲突不会写盘。
+
+记忆修改工具仍是 `effect_class=possible`，所以会预留 generation、使旧 verification 失效，并受只读规划和 crash recovery gate 约束。开启 `/save` 后，相关工具调用会像其他调用一样先提交 `handler_admitted`，再提交 State、对应 `role=tool` 和 boundary；如果 Memory 文件已写入但父结果未提交，恢复不会重放 handler，而是把调用标为不确定事实。Memory 文件不参与 session 回滚。
+
+Memory 不加入子代理固定白名单；子代理仍只能使用 `calculate`、`read_file`、`list_dir`、`grep`。State 摘要和普通终端输出不展开正文，但工具参数仍属于当前模型 history；开启 `/save` 后，单次记忆正文可能随 Context 进入 session。因此本版只是不复制整份 Memory 快照，不承诺 session 绝无某次记忆正文。相关性检索和自动选择上下文候选属于 v0.41，References 属于 v0.42。
+
+### v0.40 配置
+
+```python
+MEMORY_DIR = "~/.mini_agent/memory"
+```
 
 ## v0.39 持久委派交付
 
@@ -472,7 +492,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.39，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.40，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

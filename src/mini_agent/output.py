@@ -99,7 +99,7 @@ def _argument_dict(arguments: Any) -> dict[str, Any]:
 def _argument_summary(name: str, arguments: Any) -> str:
     """Return only a safe path/command summary for normal mode.
 
-    In particular, write/edit content is intentionally ignored.  The returned
+    In particular, write/edit/memory content is intentionally ignored.  The returned
     text is a single line and is bounded independently from the surrounding
     status line.
     """

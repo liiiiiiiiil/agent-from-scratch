@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.40.0] - Lightweight persistent workspace memory
+
+- Added a standard-library schema 1 `MemoryStore` with workspace SHA-256 isolation, bounded CRUD records, private permissions, exclusive locks, atomic replacement, directory sync, and explicit uncertain-commit halting.
+- Added parent-only `list_memories`, `read_memory`, `remember`, `revise_memory`, and `forget_memory` tools; reads are allowed while modifications ask for approval and use optimistic revisions.
+- Added paged memory summaries (`offset`, `total`, and `next_offset`) so records after the first 20 remain discoverable, and rejected `MEMORY_DIR` paths inside the workspace, including symlink-resolved paths.
+- Kept memory outside `AgentState`, Plan, verification evidence, and session snapshots; durable tool boundaries and crash recovery never replay an admitted memory write, while model history may still contain its call parameters.
+- Added the `memory_commit_uncertain` result classification and recovery guidance for a replacement whose directory sync was not confirmed; read-only inspection remains available while later writes stop.
+- Added lesson 40, memory storage/manual guidance, navigation updates, v0.40 tests, and the optional `MEMORY_DIR` configuration.
+
 ## [v0.39.0] - Durable delegation delivery
 
 - Added a bounded schema 3 `pending_delegation_results` area that stores validated child result JSON and its hash before parent delivery.

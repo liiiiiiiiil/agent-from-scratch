@@ -14,6 +14,7 @@ v0.09 版：从一维 (tool_name -> action) 升级为二维 (tool_name, pattern)
 from __future__ import annotations
 
 import fnmatch
+import json
 import threading
 
 # ============================================================
@@ -37,6 +38,11 @@ PERMISSION_RULES = {
     "calculate": ALLOW,
     "list_dir": ALLOW,  # 只读，放行
     "grep": ALLOW,  # 只读，放行
+    "list_memories": ALLOW,
+    "read_memory": ALLOW,
+    "remember": ASK,
+    "revise_memory": ASK,
+    "forget_memory": ASK,
     "write_file": ASK,  # 有副作用，每次问一下
     "edit_file": ASK,  # 有副作用，同 write_file
     "rollback_checkpoint": ASK,  # 仅 RecoveryRuntime 可调用的受限文件恢复
@@ -190,6 +196,15 @@ class PermissionGate:
                 f"process_id={args.get('process_id', '<missing>')}, "
                 f"bytes={byte_count}, close_stdin={bool(args.get('close_stdin', False))}"
             )
+        if tool_name in {"remember", "revise_memory", "forget_memory"}:
+            # Memory bodies are already bounded by the tool schema.  Show the
+            # actual proposed content and optimistic target revision so an
+            # ``ask`` decision is reviewable; never use the generic repr here
+            # because it is easy to lose the distinction between fields.
+            try:
+                return json.dumps(args, ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                return str(args)
         return str(args)
 
     @staticmethod
