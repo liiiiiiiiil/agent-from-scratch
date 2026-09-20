@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -55,6 +56,31 @@ class _CrashAfterBatchBoundary(DurableToolBoundary):
         raise RuntimeError("injected crash after delegation start")
 
 
+class _CrashAfterReadyBoundary(DurableToolBoundary):
+    def record_delegation_result_ready(self, *args, **kwargs):
+        super().record_delegation_result_ready(*args, **kwargs)
+        raise RuntimeError("injected crash after result_ready")
+
+
+class _CrashOnSecondCommitBoundary(DurableToolBoundary):
+    def __init__(self, store, session_id, workspace_root, last_ready: Event):
+        super().__init__(store, session_id, workspace_root)
+        self.last_ready = last_ready
+        self.commit_count = 0
+
+    def record_delegation_result_ready(self, invocation_id, *args, **kwargs):
+        saved = super().record_delegation_result_ready(invocation_id, *args, **kwargs)
+        if invocation_id == "r-1-c-2":
+            self.last_ready.set()
+        return saved
+
+    def commit_delegation_result(self, *args, **kwargs):
+        self.commit_count += 1
+        if self.commit_count == 2:
+            raise RuntimeError("injected half-round commit crash")
+        return super().commit_delegation_result(*args, **kwargs)
+
+
 def _parent_llm(arguments: dict):
     calls = [0]
 
@@ -69,6 +95,27 @@ def _parent_llm(arguments: dict):
                         "arguments": json.dumps(arguments),
                     },
                 }],
+            }
+        return {"role": "assistant", "content": "done"}
+
+    return parent, calls
+
+
+def _batch_parent_llm(goals: list[str]):
+    calls = [0]
+
+    def parent(_messages, **_options):
+        calls[0] += 1
+        if calls[0] == 1:
+            return {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": f"delegate-call-{index}", "type": "function",
+                    "function": {
+                        "name": "delegate_task",
+                        "arguments": json.dumps(_arguments(goal)),
+                    },
+                } for index, goal in enumerate(goals)],
             }
         return {"role": "assistant", "content": "done"}
 
@@ -120,6 +167,138 @@ def test_result_ready_is_durable_before_parent_delivery(tmp_path: Path):
                for edge in trace["causal_edges"])
     assert any(edge["type"] == "delegation_lifecycle" for edge in trace["causal_edges"])
     assert "Delegations:" in render_trace(trace)
+
+
+def test_crash_after_ready_save_reuses_exact_result(tmp_path: Path):
+    state = AgentState()
+    state.begin_task("ready-save crash")
+    context = ContextManager(state, [])
+    store = SessionStore(tmp_path / "sessions")
+    initial = store.save(None, state, context, workspace_root=tmp_path)
+    boundary = _CrashAfterReadyBoundary(store, initial["session_id"], tmp_path)
+    child_calls = []
+    registry = create_registry(
+        state, workspace_root=tmp_path,
+        subagent_llm=lambda *_args, **_kwargs: child_calls.append(1) or _report(),
+    )
+    parent, parent_calls = _parent_llm(_arguments())
+    runtime = AgentRuntime(
+        llm_client=parent, context=context, executor=ToolExecutor(registry),
+        policy=ParentRuntimePolicy(), max_rounds=3, session_boundary=boundary,
+    )
+    with pytest.raises(RuntimeError, match="after result_ready"):
+        runtime.run()
+    source = store.load(initial["session_id"])
+    ready = source["tool_boundary"]["pending_delegation_results"][0]
+    resumed = prepare_resume(store, initial["session_id"], tmp_path).claim()
+    assert resumed.context.history[-1]["content"] == ready["result_json"]
+    assert len(child_calls) == 1 and parent_calls[0] == 1
+    assert store.load(initial["session_id"])["integrity"] == source["integrity"]
+
+
+def test_three_ready_results_survive_half_round_commit_and_session_claim(tmp_path: Path):
+    last_ready = Event()
+    state = AgentState()
+    state.begin_task("half-round delegation")
+    context = ContextManager(state, [])
+    store = SessionStore(tmp_path / "sessions")
+    initial = store.save(None, state, context, workspace_root=tmp_path)
+    boundary = _CrashOnSecondCommitBoundary(
+        store, initial["session_id"], tmp_path, last_ready,
+    )
+    child_calls = []
+
+    def child(messages, **_options):
+        request = next(json.loads(item["content"]) for item in messages
+                       if item.get("role") == "user")
+        goal = request["contract"]["goal"]
+        child_calls.append(goal)
+        if goal == "A":
+            assert last_ready.wait(5), "later results were not durably ready"
+        return _report(goal)
+
+    registry = create_registry(state, workspace_root=tmp_path, subagent_llm=child)
+    parent, parent_calls = _batch_parent_llm(["A", "B", "C"])
+    runtime = AgentRuntime(
+        llm_client=parent, context=context, executor=ToolExecutor(registry),
+        policy=ParentRuntimePolicy(), max_rounds=3, session_boundary=boundary,
+    )
+    with pytest.raises(RuntimeError, match="half-round"):
+        runtime.run()
+    source = store.load(initial["session_id"])
+    calls = source["tool_boundary"]["calls"]
+    pending = source["tool_boundary"]["pending_delegation_results"]
+    assert [call["status"] for call in calls] == ["committed", "pending", "pending"]
+    assert [item["invocation_id"] for item in pending] == ["r-1-c-1", "r-1-c-2"]
+    first_content = calls[0]["result"]["content"]
+    ready_contents = [item["result_json"] for item in pending]
+
+    resumed = prepare_resume(store, initial["session_id"], tmp_path).claim()
+    derived = store.load(resumed.session_id)
+    assert resumed.session_id != initial["session_id"]
+    assert [item["status"] for item in derived["tool_boundary"]["calls"]] == ["committed"] * 3
+    assert "pending_delegation_results" not in derived["tool_boundary"]
+    assert [item["result"]["content"] for item in derived["tool_boundary"]["calls"]] == [
+        first_content, *ready_contents,
+    ]
+    assert [item["tool_call_id"] for item in derived["tool_boundary"]["calls"]] == [
+        "delegate-call-0", "delegate-call-1", "delegate-call-2",
+    ]
+    assert [item["content"] for item in resumed.context.history if item["role"] == "tool"] == [
+        first_content, *ready_contents,
+    ]
+    assert all(record.delivery_status == "committed" for record in resumed.state.delegation_records)
+    assert len(child_calls) == 3 and parent_calls[0] == 1
+    assert store.load(initial["session_id"])["integrity"] == source["integrity"]
+    with pytest.raises(SessionValidationError, match="已经派生"):
+        prepare_resume(store, initial["session_id"], tmp_path).claim()
+
+
+def test_failed_derived_session_write_retries_same_claim_without_child_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    state = AgentState()
+    state.begin_task("claim write interruption")
+    context = ContextManager(state, [])
+    store = SessionStore(tmp_path / "sessions")
+    initial = store.save(None, state, context, workspace_root=tmp_path)
+    boundary = _CrashOnCommitBoundary(store, initial["session_id"], tmp_path)
+    child_calls = []
+    registry = create_registry(
+        state, workspace_root=tmp_path,
+        subagent_llm=lambda *_args, **_kwargs: child_calls.append(1) or _report(),
+    )
+    parent, parent_calls = _parent_llm(_arguments())
+    runtime = AgentRuntime(
+        llm_client=parent, context=context, executor=ToolExecutor(registry),
+        policy=ParentRuntimePolicy(), max_rounds=3, session_boundary=boundary,
+    )
+    with pytest.raises(RuntimeError, match="parent delivery crash"):
+        runtime.run()
+    source = store.load(initial["session_id"])
+    original_write = store._write_atomic
+
+    def fail_derived_write(session_id, envelope):
+        if session_id != initial["session_id"]:
+            raise OSError("injected derived write failure")
+        return original_write(session_id, envelope)
+
+    monkeypatch.setattr(store, "_write_atomic", fail_derived_write)
+    with pytest.raises(OSError, match="derived write failure"):
+        prepare_resume(store, initial["session_id"], tmp_path).claim()
+    assert store.load(initial["session_id"])["integrity"] == source["integrity"]
+    preparing = store._read_crash_claims()
+    assert len(preparing) == 1 and preparing[0]["status"] == "preparing"
+    derived_id = preparing[0]["derived_session_id"]
+
+    monkeypatch.setattr(store, "_write_atomic", original_write)
+    resumed = prepare_resume(store, initial["session_id"], tmp_path).claim()
+    assert resumed.session_id == derived_id
+    assert resumed.context.history[-1]["content"] == source["tool_boundary"][
+        "pending_delegation_results"
+    ][0]["result_json"]
+    assert len(child_calls) == 1 and parent_calls[0] == 1
+    assert store._read_crash_claims()[0]["status"] == "committed"
 
 
 def test_running_crash_preserves_uncertainty_without_synthetic_child_result(tmp_path: Path):

@@ -689,18 +689,20 @@ delegations
 
 ### 10.3 阶段完成定义
 
+以下清单区分“版本功能已实现”与“阶段验收证据已齐备”。已勾选项有实现及回归测试支撑；未勾选项仍需逐项复核，不能由 §8.1 的版本实施状态自动推定通过。v0.39 的故障注入现已覆盖结果 ready 后、同轮多结果半轮提交及派生 session 写入失败重试；阶段级 E2E 仍须单独核销。安全审查另发现：当前 ScopeGate 可经指向 `config_local.py` 的符号链接读取本地配置；若 session 目录位于委派工作区内，也未禁止子代理访问。修复和回归测试完成前不得把 §7 的敏感路径边界视为验收通过。
+
 - [ ] `v0.34`–`v0.39` 各有独立教程、变更记录、测试和可复现验收场景。
-- [ ] Task / Result Contract 从第一个版本起就是结构化、可校验且有界的协议。
-- [ ] 可变 Runtime 完全隔离；不可变工具定义共享；子能力通过显式策略过滤。
-- [ ] 父子只有一个 canonical Runtime / Loop；Context、State、Tool View、Model、Budget、Permission、Completion Policy 表达差异，Runner 和适配器不复制控制循环。
+- [x] Task / Result Contract 从第一个版本起就是结构化、可校验且有界的协议。
+- [x] 可变 Runtime 完全隔离；不可变工具定义共享；子能力通过显式策略过滤。
+- [x] 父子只有一个 canonical Runtime / Loop；Context、State、Tool View、Model、Budget、Permission、Completion Policy 表达差异，Runner 和适配器不复制控制循环。
 - [x] v0.36 多 provider 支持同协议多配置及两种首批协议，父子模型可独立绑定；旧单模型配置兼容，来源可审计且不泄露真实配置。
-- [ ] 子代理始终只读、单层，不能修改父状态、权限、计划、generation 或 verification。
+- [x] 子代理始终只读、单层，不能修改父状态、权限、计划、generation 或 verification。
 - [x] 单子代理预算与父聚合预算在串行、并行、失败、取消和恢复路径上都不超发。
 - [ ] 所有 execution outcome 都形成结果，并经历可审计的 `result_ready → committed` 交付。
 - [x] 多子代理可以有界并行且按父模型顺序提交，每个 tool call 恰有一个结果。
-- [ ] 子 evidence 与父 authoritative completion evidence 明确分离；父仍独占修改和验证。
-- [ ] 活动或未提交委派阻止完成、clean save 和不安全任务切换。
-- [ ] Durable Delegation 与 v0.33 Crash Recovery 使用同一不确定事实和恢复语义，不自动伪造、重放或重复提交。
+- [x] 子 evidence 与父 authoritative completion evidence 明确分离；父仍独占修改和验证。
+- [x] 活动或未提交委派阻止完成、clean save 和不安全任务切换。
+- [x] Durable Delegation 与 v0.33 Crash Recovery 使用同一不确定事实和恢复语义，不自动伪造、重放或重复提交。
 - [ ] Trace 只读、Plan Contract、PermissionGate、Repair Loop、generation、session 和完整工具结果协议均未被绕过。
 - [ ] 默认测试、教程检查、README 检查与阶段级 E2E 全部通过；核心运行时仍只依赖标准库。
 - [ ] 各版本 tag 仅由用户手动创建，助手不执行任何 tag 操作。

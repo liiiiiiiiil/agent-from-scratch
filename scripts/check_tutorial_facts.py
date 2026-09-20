@@ -39,7 +39,18 @@ EXPECTED = {
     "25-plan-trace-evaluation.md": ("v0.25", "v0.24..v0.25"),
     "26-background-process-boundaries.md": ("v0.26", "v0.25..v0.26"),
     "27-process-observation.md": ("v0.27", "v0.26..v0.27"),
+    "28-process-control.md": ("v0.28", "v0.27..v0.28"),
     "29-interactive-process.md": ("v0.29", "v0.28..v0.29"),
+    "30-session-persistence.md": ("v0.30", "v0.29..v0.30"),
+    "31-safe-resume.md": ("v0.31", "v0.30..v0.31"),
+    "32-durable-tool-boundaries.md": ("v0.32", "v0.31..v0.32"),
+    "33-crash-recovery.md": ("v0.33", "v0.32..v0.33"),
+    "34-minimal-delegation.md": ("v0.34", "v0.33..v0.34"),
+    "35-shared-agent-runtime.md": ("v0.35", "v0.34..v0.35"),
+    "36-multi-provider.md": ("v0.36", "v0.35..v0.36"),
+    "37-subagent-lifecycle-budget.md": ("v0.37", "v0.36..v0.37"),
+    "38-parallel-delegation.md": ("v0.38", "v0.37..v0.38"),
+    "39-durable-delegation.md": ("v0.39", "v0.38..v0.39"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

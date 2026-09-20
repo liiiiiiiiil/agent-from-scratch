@@ -1,10 +1,10 @@
 # 第 36 课：多 provider 与统一协议适配
 
-上一课：[共享父子运行循环](35-shared-agent-runtime.md) · [教程总览](README.md) · 下一课：后续版本规划中
+上一课：[共享父子运行循环](35-shared-agent-runtime.md) · [教程总览](README.md) · 下一课：[子代理生命周期与聚合预算](37-subagent-lifecycle-budget.md)
 
-> 代码快照：`v0.36`（当前工作树；tag 由仓库维护者手动创建） · 相邻差异：`v0.35..v0.36` · 命令环境：Bash/zsh
+> 代码快照：`v0.36` · 相邻差异：`v0.35..v0.36` · 命令环境：Bash/zsh
 
-> 本课不执行任何 tag 操作。维护者创建 `v0.36` tag 后，可把本课新增 provider 文件的源码链接固定到该 tag。
+本课的源码链接固定到由仓库维护者创建的 `v0.36` tag；阅读和运行本课均不需要创建 tag。
 
 ## 本课目标
 
@@ -20,38 +20,38 @@ v0.35 的父子循环已经共享，但模型调用入口仍然以旧的 `BASE_U
 
 ## 前置条件
 
-前置条件是第 35 课、基础 Python、JSON 和 HTTP 请求的基本概念。先查看上一版的真实差异入口；最后一条命令回到当前分支：
+前置条件是第 35 课、基础 Python、JSON 和 HTTP 请求的基本概念。先查看相邻版本的真实差异，再切到本课代码快照：
 
 ```bash
 git checkout v0.35
-git diff --stat v0.34..v0.35
-git checkout -
+git diff --stat v0.35..v0.36
+git checkout v0.36
 ```
 
-当前工作树还包含本课实现，因此不能用 `git checkout v0.36` 运行；这一步只用于说明课程的版本工作流。真实配置仍只写入未跟踪的 `src/mini_agent/config_local.py`，不要把 endpoint、API key 或真实 model ID 写进提交的示例文件。
+第一条命令用于对照上一版，最后一条进入本课快照。真实配置仍只写入未跟踪的 `src/mini_agent/config_local.py`，不要把 endpoint、API key 或真实 model ID 写进提交的示例文件。
 
 ## 新增与改动文件
 
-下面的链接先固定到上一课中已经存在的组装入口；本课新增的 `providers/` 文件在维护者创建 `v0.36` tag 后再固定到新快照。
+下面的链接全部固定到本课的 `v0.36` 快照，便于将协议适配器和调用入口放在同一版本中阅读。
 
 | 文件 | 变化 | 作用 |
 |---|---|---|
-| `src/mini_agent/providers/base.py` | 新增 | 定义统一响应、usage、适配器协议和无凭据 provider 错误边界。 |
-| `src/mini_agent/providers/catalog.py` | 新增 | 校验 provider/profile 配置，生成冻结的父子 ModelBinding 和 fingerprint。 |
-| `src/mini_agent/providers/openai_chat.py` | 新增 | 实现 OpenAI-compatible Chat Completions 的请求、SSE 和 tool call 重组。 |
-| `src/mini_agent/providers/anthropic_messages.py` | 新增 | 实现 Anthropic Messages 的 system、tool block 和流式事件转换。 |
-| `src/mini_agent/providers/http.py` | 新增 | 用 `http.client` 提供独立连接、有界读取和 SSE 公共骨架。 |
-| [`src/mini_agent/runtime.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.35/src/mini_agent/runtime.py) | 修改 | 接收归一化响应并统一记录 provider、estimated、mixed usage。 |
-| [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.35/src/mini_agent/context.py) | 修改 | 使用绑定 profile 的上下文窗口，并让摘要请求使用同一个 binding。 |
-| [`src/mini_agent/delegation.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.35/src/mini_agent/delegation.py) | 修改 | 校验子 profile 白名单、冻结子绑定并把安全来源摘要放入结果。 |
+| [`src/mini_agent/providers/base.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/providers/base.py) | 新增 | 定义统一响应、usage、适配器协议和无凭据 provider 错误边界。 |
+| [`src/mini_agent/providers/catalog.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/providers/catalog.py) | 新增 | 校验 provider/profile 配置，生成冻结的父子 ModelBinding 和 fingerprint。 |
+| [`src/mini_agent/providers/openai_chat.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/providers/openai_chat.py) | 新增 | 实现 OpenAI-compatible Chat Completions 的请求、SSE 和 tool call 重组。 |
+| [`src/mini_agent/providers/anthropic_messages.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/providers/anthropic_messages.py) | 新增 | 实现 Anthropic Messages 的 system、tool block 和流式事件转换。 |
+| [`src/mini_agent/providers/http.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/providers/http.py) | 新增 | 用 `http.client` 提供独立连接、有界读取和 SSE 公共骨架。 |
+| [`src/mini_agent/runtime.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/runtime.py) | 修改 | 接收归一化响应并统一记录 provider、estimated、mixed usage。 |
+| [`src/mini_agent/context.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/context.py) | 修改 | 使用绑定 profile 的上下文窗口，并让摘要请求使用同一个 binding。 |
+| [`src/mini_agent/delegation.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/delegation.py) | 修改 | 校验子 profile 白名单、冻结子绑定并把安全来源摘要放入结果。 |
 
 如果想先确认文件数量和变更范围，使用：
 
 ```bash
-git diff --stat v0.35..HEAD
+git diff --stat v0.35..v0.36
 ```
 
-这个命令在当前工作树中会显示本课的未提交变化；它的用途是帮助读者看到 provider 层、Runtime、Context 和委派入口同时变化，但控制循环没有复制出第二份。
+这个命令只显示本课两个固定快照间的变化，帮助读者看到 provider 层、Runtime、Context 和委派入口同时变化，但控制循环没有复制出第二份。
 
 ## 版本变更定位
 
@@ -220,7 +220,7 @@ Runtime 不知道这些 provider 原生字段。它仍然追加一个 assistant 
 
 本版完成多 provider、两种首批协议、父子独立 profile、统一响应和 usage 归属；父子仍进入同一个 `AgentRuntime.run()`，每个 tool call 仍有唯一且按序的 `role=tool` 结果。旧三元组兼容，未授权 profile 在联网前拒绝，摘要调用不会成为免费调用。
 
-下一课的具体范围尚未实施。本课源码入口包括当前工作树的 `src/mini_agent/providers/`、`src/mini_agent/runtime.py`、`src/mini_agent/context.py`、`src/mini_agent/delegation.py`、`src/mini_agent/config.py` 和 `tests/test_providers_v036.py`；维护者创建 v0.36 tag 后，应把新增文件的链接固定到该 tag。
+下一课会在不改变子代理只读边界的前提下，为委派增加生命周期和父任务聚合预算。本课源码入口见上面的 `v0.36` 固定链接；配置入口是 [`src/mini_agent/config.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.36/src/mini_agent/config.py)。
 
 运行离线回归可观察到旧测试与 provider/catalog 测试同时通过；受限环境若不能绑定本地 TCP 端口，HTTP 集成测试会被安全地跳过，不会访问真实服务：
 
