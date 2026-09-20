@@ -1,6 +1,6 @@
 # 阶段十：受控子代理委派（Controlled Subagent Delegation）实施计划
 
-> 状态：`v0.34`、`v0.35` 已实现并保留；`v0.36`–`v0.39` 待实施
+> 状态：`v0.34`、`v0.35`、`v0.36` 已实现并保留；`v0.37`–`v0.39` 待实施
 > 建议版本范围：`v0.34`–`v0.39`
 > 能力前置：阶段七结构化计划（`v0.22`–`v0.25`）、阶段八任务与进程边界（`v0.26`–`v0.29`）、阶段九的安全恢复与持久化工具边界（`v0.30`–`v0.32`）
 > 关联计划：`adaptive-planning-plan.md`、`process-management-plan.md`、`session-persistence-resume-plan.md`
@@ -9,7 +9,7 @@
 
 ## 1. 目标与定位
 
-进入阶段十之前，`mini_agent` 的调查、判断、修改和验证由同一个模型上下文承担。已实现的 `v0.34` 增加了同步只读子代理和独立上下文，但尚未统一父子控制循环，也没有按实例选择 provider/model 的正式配置能力。
+进入阶段十之前，`mini_agent` 的调查、判断、修改和验证由同一个模型上下文承担。`v0.34` 增加了同步只读子代理，`v0.35` 统一了父子控制循环，`v0.36` 又把 provider/model 选择收敛为实例级冻结绑定。
 
 阶段十要回答的问题是：**怎样把认知调查分给多个受控子代理，同时继续由父 Agent 独占执行权、权限边界、主计划和完成判定？**
 
@@ -494,13 +494,13 @@ delegations
 
 验收重点：子代理能回答一个跨文件调查问题并提供结构化位置证据；它看不到任何写、shell、进程、计划、恢复、验证或委派工具；其结果不自动推进父 Plan 或父 verification。
 
-本次实现固定为单个同步子代理；可配置预算只允许请求更小额度，未实现父任务聚合预算、后台取消、多子代理并行、持久化 DelegationRecord 或跨 session 恢复。先由 `v0.35` 收敛唯一循环、`v0.36` 引入多 provider，再由 `v0.37` 接手生命周期、可配置/聚合预算和取消，`v0.38` 接手有界并行，`v0.39` 接手持久化交付与 crash recovery 协调。原有合同字段和失败结果保持兼容；新增模型绑定字段使用兼容默认值，不改写历史合同 hash。
+本次实现固定为单个同步子代理；可配置预算只允许请求更小额度，仍未实现父任务聚合预算、后台取消、多子代理并行、持久化 DelegationRecord 或跨 session 恢复。`v0.35` 已收敛唯一循环，`v0.36` 已引入多 provider，后续生命周期、并行和持久化交付仍分别留给 `v0.37`–`v0.39`。原有合同字段和失败结果保持兼容；新增模型绑定字段使用兼容默认值，不改写历史合同 hash。
 
 实施状态：
 
 - [x] `v0.34`：单个、同步、单层、只读委派与 Task / Result Contract。
 - [x] `v0.35`：共享 canonical Agent Runtime / Loop，父子差异配置化。
-- [ ] `v0.36`：多 provider、协议适配和父子独立模型绑定。
+- [x] `v0.36`：多 provider、协议适配和父子独立模型绑定。
 - [ ] `v0.37`：生命周期、取消和聚合预算。
 - [ ] `v0.38`：有界并行和按父顺序提交。
 - [ ] `v0.39`：持久委派、Trace、session 与 Crash Recovery 协调。
@@ -540,6 +540,12 @@ delegations
 建议新增或修改：`providers/`（标准库实现）、`config.py`、`config_example.py`、`agent.py`、`runtime.py`、`context.py`、`delegation.py`、`tests/test_providers_v036.py`。
 
 验收重点：用本地模拟 HTTP 服务验证至少两个同协议 provider 的配置隔离，以及父 Chat Completions / 子 Messages 跨协议委派；核对认证与 identity 请求头、消息转换、分片参数重组、唯一 call/result 关联和 usage。覆盖配置缺失、未知模型别名、无工具能力、截断响应、超时、usage 缺失及凭据不进入日志/State/session。默认测试不依赖真实 API key 或付费请求；旧配置仍能运行，切换 provider 不改变权限或完成条件。
+
+实施记录（v0.36）：新增 `ProviderConfig`、`ModelProfile`、`ModelBindingRef`、`ModelBinding` 和 `ProviderCatalog`。catalog 在 CLI 启动、恢复和 `DelegationManager` 创建子代理时校验配置并冻结绑定；旧 `BASE_URL` / `API_KEY` / `MODEL` 会映射到 `legacy-default`。适配器实现 `ProviderResponse`、`ProviderUsage` 和 `ProviderAdapter` 协议，OpenAI-compatible Chat Completions 与 Anthropic Messages 的原生结构都在适配层转换，Runtime 继续只处理统一 assistant/tool 消息。
+
+`ContextManager` 的摘要请求显式使用当前 binding，并和普通请求共享 `UsageMeter`；`RuntimeResult` 与 `UsageRecord` 暴露 input/output token 及 `provider` / `estimated` / `mixed` 来源。`delegate_task` 只接受白名单中的 `model_profile` 别名，结果和持久化投影只保留 profile、provider、protocol 与 fingerprint。请求层继续使用标准库 `http.client`、独立连接和 `Accept-Encoding: identity`，不做隐式重试或 provider fallback。
+
+与原建议的差异：本版保留 `call_llm()` 作为兼容 façade，并让已有 patch 入口继续可用；生产父/子 Runtime 仍通过冻结 binding 进入同一个 `AgentRuntime.run()`，而直接注入的测试 LLM 继续走兼容路径。为了保留 v0.34/v0.35 合同 hash，`model_profile` 和 `model_binding_ref` 作为新增元数据字段，不参与历史 `contract_hash`。受限执行环境无法绑定本地 TCP 端口时，HTTP 集成测试会跳过真实监听，但离线配置、解析、脱敏和 Runtime 回归仍必须通过。
 
 ### 8.4 `v0.37` Lifecycle & Budget
 
@@ -684,7 +690,7 @@ delegations
 - [ ] Task / Result Contract 从第一个版本起就是结构化、可校验且有界的协议。
 - [ ] 可变 Runtime 完全隔离；不可变工具定义共享；子能力通过显式策略过滤。
 - [ ] 父子只有一个 canonical Runtime / Loop；Context、State、Tool View、Model、Budget、Permission、Completion Policy 表达差异，Runner 和适配器不复制控制循环。
-- [ ] 多 provider 支持同协议多配置及两种首批协议，父子模型可独立绑定；旧单模型配置兼容，来源可审计且不泄露真实配置。
+- [x] v0.36 多 provider 支持同协议多配置及两种首批协议，父子模型可独立绑定；旧单模型配置兼容，来源可审计且不泄露真实配置。
 - [ ] 子代理始终只读、单层，不能修改父状态、权限、计划、generation 或 verification。
 - [ ] 单子代理预算与父聚合预算在串行、并行、失败、取消和恢复路径上都不超发。
 - [ ] 所有 execution outcome 都形成结果，并经历可审计的 `result_ready → committed` 交付。
@@ -738,7 +744,7 @@ result_ready / committed、session、Trace、崩溃协调
 - `docs/plans/README.md` 与本计划的实施状态
 - 真正新增全仓运行、授权或修改硬约束时更新 `AGENTS.md`
 
-本次仅调整本计划，不修改代码、当前版本号、其他路线或既有教程；上述同步工作属于未来各版实施范围，需要同步核对顺延版本与其他计划是否冲突。
+v0.36 实现已同步 provider 配置、Runtime usage、父子 binding、脱敏恢复边界、教程、运行手册、README、CHANGELOG 和版本信息；`v0.37`–`v0.39` 的生命周期、聚合预算、取消、并行和持久化交付仍保持为后续工作。
 
 教程先解释“工具并发”和“子代理委派”的区别，再解释为什么独立 State/Context 可以共用同一循环、如何通过配置限制能力；随后解释服务方、协议和模型的区别，再引入两级预算、结果顺序和 durable delivery。首次出现 canonical Runtime、provider、ModelBinding、Subagent、delegation、result_ready、committed、aggregate budget 和 authoritative verification 时必须就近用直观中文解释，不能只列字段。
 

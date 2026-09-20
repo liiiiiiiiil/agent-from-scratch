@@ -3,76 +3,20 @@
 import hashlib
 import http.client
 import json
-import math
-from urllib.parse import urlparse
 
 from mini_agent.config import BASE_URL, API_KEY, MODEL, MAX_ITERATIONS, OUTPUT_MODE
 from mini_agent.context import ContextManager
 from mini_agent.output import TerminalOutput
+from mini_agent.providers.base import ProviderHTTPError, ProviderProtocolError, ProviderStreamError
+from mini_agent.providers.catalog import legacy_binding
 from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
 from mini_agent.state import canonical_arguments_hash
 from mini_agent.tools import registry
 from mini_agent.tools.base import ExecutionResult, ToolExecutor, validate_arguments
 
 
-_MAX_PROVIDER_ERROR_LENGTH = 1000
-
-
 class LLMResponseError(RuntimeError):
     """Raised when the provider returns an unusable or error response."""
-
-
-def _response_text(value):
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value or "")
-
-
-def _clip_provider_detail(value):
-    text = " ".join(_response_text(value).split())
-    if len(text) <= _MAX_PROVIDER_ERROR_LENGTH:
-        return text
-    return text[: _MAX_PROVIDER_ERROR_LENGTH - 1] + "…"
-
-
-def _provider_error_detail(payload):
-    """Extract a bounded, human-readable error from a provider payload."""
-    if not isinstance(payload, dict):
-        return ""
-    error = payload.get("error")
-    if isinstance(error, dict):
-        for key in ("message", "detail", "error"):
-            value = error.get(key)
-            if value:
-                return _clip_provider_detail(value)
-        if error:
-            return _clip_provider_detail(error)
-    elif error:
-        return _clip_provider_detail(error)
-    for key in ("message", "detail"):
-        value = payload.get(key)
-        if value:
-            return _clip_provider_detail(value)
-    return ""
-
-
-def _provider_error_from_body(body):
-    text = _response_text(body)
-    if not text.strip():
-        return ""
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return _clip_provider_detail(text)
-    return _provider_error_detail(payload) or _clip_provider_detail(text)
-
-
-def _safe_print(*args, **kwargs):
-    """Best-effort observation output that cannot break agent execution."""
-    try:
-        print(*args, **kwargs)
-    except Exception:
-        pass
 
 
 def _recovery_rejection_content(state, arguments, detail):
@@ -149,145 +93,50 @@ def _stable_observation_hash(execution):
 
 
 def call_llm(messages, include_tools=True, stream_output=None, tool_registry=None,
-             on_content=None, timeout=None):
-    """流式调用 LLM，使用标准库 HTTP 和 ``Accept-Encoding: identity``。"""
+             on_content=None, timeout=None, binding=None):
+    """Compatibility façade for the historical parent LLM entry point.
+
+    New Runtime instances pass a frozen ``ModelBinding``.  The legacy path
+    builds one per call so existing callers that patch BASE_URL/API_KEY/MODEL
+    continue to work.  Its non-strict decoding mode is kept only for the old
+    raw-SSE compatibility test; Runtime-bound adapters are strict.
+    """
     if stream_output is None:
         stream_output = OUTPUT_MODE != "quiet"
-    request_timeout = 120 if timeout is None else timeout
-    if (isinstance(request_timeout, bool)
-            or not isinstance(request_timeout, (int, float))
-            or not math.isfinite(request_timeout)
-            or request_timeout <= 0):
-        raise ValueError("timeout 必须是正数")
-    p = urlparse(BASE_URL)
-    if p.scheme == "https":
-        conn = http.client.HTTPSConnection(p.hostname, p.port or 443, timeout=request_timeout)
-    else:
-        conn = http.client.HTTPConnection(p.hostname, p.port or 80, timeout=request_timeout)
-    request_body = {"model": MODEL, "messages": messages, "stream": True}
-    if include_tools:
-        request_body["tools"] = (
-            tool_registry if tool_registry is not None else registry
-        ).schemas()
-    body = json.dumps(request_body, ensure_ascii=False).encode()
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-        "Accept": "text/event-stream",
-    }
-    conn.request("POST", f"{p.path.rstrip('/')}/chat/completions", body=body, headers=headers)
-    resp = conn.getresponse()
-
-    status = getattr(resp, "status", None)
-    if isinstance(status, int) and not 200 <= status < 300:
-        try:
-            detail = _provider_error_from_body(resp.read())
-        finally:
-            conn.close()
-        reason = _clip_provider_detail(getattr(resp, "reason", ""))
-        message = f"服务商 HTTP {status}"
-        if reason:
-            message += f" {reason}"
-        if detail:
-            message += f": {detail}"
-        raise LLMResponseError(message)
-
-    content_parts = []
-    tool_calls_acc = {}
-    non_sse_parts = []
-    saw_sse_event = False
-    stream_error = ""
-
-    for raw in resp:
-        line = raw.decode("utf-8").strip()
-        if not line:
-            continue
-        if not line.startswith("data:"):
-            if len(non_sse_parts) < 8:
-                non_sse_parts.append(line)
-            continue
-        saw_sse_event = True
-        if line == "data: [DONE]":
-            break
-        chunk = json.loads(line[6:])
-        stream_error = stream_error or _provider_error_detail(chunk)
-        choices = chunk.get("choices", [])
-        if not choices:
-            continue
-        delta = choices[0].get("delta", {})
-        if delta.get("content"):
-            content = delta["content"]
-            content_parts.append(content)
-            if stream_output:
-                if on_content is None:
-                    _safe_print(content, end="", flush=True)
-                else:
-                    try:
-                        on_content(content)
-                    except Exception:
-                        pass
-        for tc in delta.get("tool_calls") or []:
-            if not isinstance(tc, dict):
-                idx = len(tool_calls_acc)
-                while idx in tool_calls_acc:
-                    idx += 1
-                slot = tool_calls_acc.setdefault(idx, {
-                    "id": "", "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                })
-                slot["function"] = tc
-                continue
-            idx = tc.get("index", 0)
+    selected = binding or legacy_binding(
+        base_url=BASE_URL, api_key=API_KEY, model=MODEL,
+    )
+    display_stream = OUTPUT_MODE != "quiet" if stream_output is None else bool(stream_output)
+    callback = on_content if display_stream else None
+    if display_stream and callback is None:
+        def callback(content):
             try:
-                hash(idx)
-            except TypeError:
-                idx = len(tool_calls_acc)
-                while idx in tool_calls_acc:
-                    idx += 1
-            slot = tool_calls_acc.setdefault(idx, {
-                "id": "", "type": "function",
-                "function": {"name": "", "arguments": ""},
-            })
-            if tc.get("id"):
-                slot["id"] = tc["id"]
-            if "function" not in tc:
-                continue
-            fn = tc["function"]
-            if not isinstance(fn, dict):
-                slot["function"] = fn
-                continue
-            if not isinstance(slot.get("function"), dict):
-                continue
-            if "name" in fn:
-                slot["function"]["name"] = fn["name"]
-            if "arguments" in fn:
-                raw_arguments = fn["arguments"]
-                if isinstance(raw_arguments, str):
-                    existing_arguments = slot["function"].get("arguments", "")
-                    if isinstance(existing_arguments, str):
-                        slot["function"]["arguments"] += raw_arguments
-                else:
-                    slot["function"]["arguments"] = raw_arguments
-
-    conn.close()
-    if stream_error:
-        raise LLMResponseError(f"服务商返回错误：{stream_error}")
-    if not saw_sse_event:
-        body = "\n".join(non_sse_parts)
-        detail = _provider_error_from_body(body)
-        if detail:
-            raise LLMResponseError(f"服务商返回了非 SSE 响应：{detail}")
-        raise LLMResponseError("服务商返回了无法解析的响应：预期 SSE data: 事件")
-
-    message = {"role": "assistant", "content": "".join(content_parts) or None}
-    if tool_calls_acc:
-        message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
-    return message
+                print(content, end="", flush=True)
+            except Exception:
+                pass
+    try:
+        response = selected.complete(
+            messages,
+            include_tools=include_tools,
+            tool_registry=tool_registry if tool_registry is not None else registry,
+            # The historical façade always requested SSE; stream_output only
+            # controls display/callback behavior.  Bound Runtime calls use the
+            # adapter directly and retain strict streaming semantics.
+            stream_output=True,
+            on_content=callback,
+            timeout=timeout,
+            strict_tool_calls=binding is not None,
+        )
+    except (ProviderHTTPError, ProviderProtocolError, ProviderStreamError) as error:
+        raise LLMResponseError(str(error)) from error
+    return response.message
 
 
-def summarize_messages(messages):
-    """Summarize context without tool schemas or terminal streaming."""
+def summarize_messages(messages, *, binding=None):
+    """Summarize context through the explicitly selected binding."""
+    if binding is not None:
+        response = binding.complete(messages, include_tools=False, stream_output=False)
+        return response.message.get("content", "") or ""
     return call_llm(messages, include_tools=False, stream_output=False).get("content", "") or ""
 
 
@@ -346,7 +195,10 @@ class ParentRuntimePolicy:
     def llm_options(self, runtime):
         options = {"stream_output": True}
         if runtime.output is not None and hasattr(runtime.output, "assistant_delta"):
-            options["on_content"] = runtime.output.assistant_delta
+            def on_content(content):
+                runtime._streamed_content = True
+                runtime.output.assistant_delta(content)
+            options["on_content"] = on_content
         return options
 
     @staticmethod
@@ -592,13 +444,24 @@ class ParentRuntimePolicy:
 def agent_loop(context_manager: ContextManager, tool_executor: ToolExecutor):
     """Compatibility entry point assembled through the canonical Runtime."""
     output = TerminalOutput(OUTPUT_MODE)
+    model_binding = (
+        getattr(tool_executor, "model_binding", None)
+        or getattr(context_manager, "model_binding", None)
+    )
+    if model_binding is None:
+        llm_client = lambda messages, **kwargs: call_llm(messages, **kwargs)
+    else:
+        llm_client = lambda messages, **kwargs: call_llm(
+            messages, binding=model_binding, **kwargs,
+        )
     runtime = AgentRuntime(
-        llm_client=lambda messages, **kwargs: call_llm(messages, **kwargs),
+        llm_client=llm_client,
         context=context_manager,
         executor=tool_executor,
         policy=ParentRuntimePolicy(),
         max_rounds=MAX_ITERATIONS,
         output=output,
         session_boundary=getattr(tool_executor, "session_boundary", None),
+        model_binding=model_binding,
     )
     return runtime.run().content

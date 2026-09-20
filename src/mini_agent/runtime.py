@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Callable, Protocol
 
 from mini_agent.context import ContextManager, count_tokens
+from mini_agent.providers.base import ProviderResponse, UsageMeter
 from mini_agent.tools.base import (
     ExecutionResult,
     ToolAdmission,
@@ -31,6 +32,10 @@ class RuntimeResult:
     llm_calls: int
     tool_calls: int
     estimated_tokens: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    token_accounting: str = "estimated"
+    model_binding_ref: Any = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,14 @@ class ToolRoundPlan:
 class NormalizedToolRound:
     calls: tuple[dict[str, Any], ...]
     errors_by_call_id: Mapping[str, str] = field(default_factory=dict)
+
+
+class LLMMessage(dict):
+    """Dict-compatible normalized message with private provider metadata."""
+
+    def __init__(self, message: Mapping[str, Any], response: ProviderResponse | None = None):
+        super().__init__(message)
+        self.provider_response = response
 
 
 class RuntimePolicy(Protocol):
@@ -112,14 +125,17 @@ def invoke_llm_once(
                    for item in parameters.values()):
             kwargs = {name: value for name, value in kwargs.items()
                       if name in parameters}
-    message = llm_client(messages, **kwargs)
+    response = llm_client(messages, **kwargs)
+    if isinstance(response, ProviderResponse):
+        return LLMMessage(response.message, response)
+    message = response
     if not isinstance(message, dict):
         raise TypeError("LLM 必须返回 message dict")
     if "choices" in message and isinstance(message.get("choices"), list):
         choice = message["choices"][0] if message["choices"] else {}
         if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
             message = choice["message"]
-    return message
+    return LLMMessage(message)
 
 
 def _invalid_call(
@@ -238,6 +254,8 @@ class AgentRuntime:
         max_rounds: int,
         output: Any = None,
         session_boundary: Any = None,
+        model_binding: Any = None,
+        usage_meter: UsageMeter | None = None,
     ) -> None:
         if context is None or executor is None:
             raise TypeError("AgentRuntime 需要 context 和 executor")
@@ -250,10 +268,16 @@ class AgentRuntime:
         self.max_rounds = max_rounds
         self.output = output
         self.session_boundary = session_boundary
+        self.model_binding = model_binding or getattr(context, "model_binding", None)
+        self.usage_meter = usage_meter or getattr(self.model_binding, "usage_meter", None)
+        self._usage_start = self.usage_meter.snapshot() if self.usage_meter is not None else None
         self.rounds = 0
         self.llm_calls = 0
         self.tool_calls = 0
         self.estimated_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.token_accounting = "estimated"
         self.request_tokens = 0
         self.response_tokens = 0
         self.prepared_messages: list[dict[str, Any]] = []
@@ -262,6 +286,7 @@ class AgentRuntime:
         self.effects: list[str] = []
         self.executions: list[ExecutionResult] = []
         self.suppress_next_round_output = False
+        self._streamed_content = False
 
     def invoke(
         self,
@@ -276,6 +301,7 @@ class AgentRuntime:
         )
 
     def _decision_result(self, decision: RuntimeDecision) -> RuntimeResult:
+        self._refresh_usage()
         return RuntimeResult(
             content=str(decision.content),
             stop_reason=decision.stop_reason or decision.action,
@@ -283,7 +309,22 @@ class AgentRuntime:
             llm_calls=self.llm_calls,
             tool_calls=self.tool_calls,
             estimated_tokens=self.estimated_tokens,
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            token_accounting=self.token_accounting,
+            model_binding_ref=getattr(self.model_binding, "reference", None),
         )
+
+    def _refresh_usage(self) -> None:
+        if self.usage_meter is None or self._usage_start is None:
+            self.estimated_tokens = self.input_tokens + self.output_tokens
+            return
+        delta = self.usage_meter.delta(self._usage_start)
+        self.llm_calls = int(delta["llm_calls"])
+        self.input_tokens = int(delta["input_tokens"])
+        self.output_tokens = int(delta["output_tokens"])
+        self.token_accounting = str(delta["token_accounting"])
+        self.estimated_tokens = self.input_tokens + self.output_tokens
 
     def _apply_decision(self, decision: RuntimeDecision | None) -> RuntimeResult | None:
         if decision is None:
@@ -585,6 +626,7 @@ class AgentRuntime:
             if early is not None:
                 return early
             self.prepared_messages = self.context.prepare_messages()
+            self._refresh_usage()
             self.request_tokens = count_tokens(self.prepared_messages)
             early = self._apply_decision(self.policy.before_llm(self))
             if early is not None:
@@ -595,15 +637,39 @@ class AgentRuntime:
                     and hasattr(self.output, "round_start")):
                 self.output.round_start(self.rounds)
             self.suppress_next_round_output = False
+            self._streamed_content = False
             # Count the request before invoking the provider so timeout and
             # provider-error results still report consumed input tokens.
-            self.estimated_tokens += self.request_tokens
-            message = self.invoke(
-                self.prepared_messages,
-                **self.policy.llm_options(self),
-            )
+            self.input_tokens += self.request_tokens
+            self.estimated_tokens = self.input_tokens + self.output_tokens
+            meter_before = self.usage_meter.snapshot() if self.usage_meter is not None else None
+            try:
+                message = self.invoke(
+                    self.prepared_messages,
+                    **self.policy.llm_options(self),
+                )
+            except Exception:
+                if (self.usage_meter is not None and meter_before is not None
+                        and self.usage_meter.snapshot()["llm_calls"] == meter_before["llm_calls"]):
+                    self.usage_meter.record(
+                        None, estimated_input_tokens=self.request_tokens,
+                    )
+                self._refresh_usage()
+                raise
             self.response_tokens = count_tokens(message)
-            self.estimated_tokens += self.response_tokens
+            if (self.usage_meter is not None and meter_before is not None
+                    and self.usage_meter.snapshot()["llm_calls"] == meter_before["llm_calls"]):
+                self.usage_meter.record(
+                    None,
+                    estimated_input_tokens=self.request_tokens,
+                    estimated_output_tokens=self.response_tokens,
+                )
+            if self.usage_meter is None:
+                self.output_tokens += self.response_tokens
+            self._refresh_usage()
+            if (not self._streamed_content and message.get("content")
+                    and self.output is not None and hasattr(self.output, "assistant_delta")):
+                self.output.assistant_delta(message["content"])
             if self.output is not None and hasattr(self.output, "assistant_end"):
                 self.output.assistant_end()
 

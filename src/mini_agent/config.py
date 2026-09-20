@@ -1,9 +1,16 @@
 # ===== 配置（占位值，真实配置见 config_local.py） =====
 # 提交进 git 的模板。本地真实配置请写进 config_local.py（不进 git）。
 # 用法：复制 config_example.py 为 config_local.py，填入你的真实值。
-BASE_URL = "http://your-gateway-host/v3/openai/model"
-API_KEY = "sk-YOUR_API_KEY_HERE"
-MODEL = "EB-GLM-5.2"
+BASE_URL = "https://gateway.example.invalid/v1"
+API_KEY = "sk-PLACEHOLDER_API_KEY"
+MODEL = "model-PLACEHOLDER"
+# v0.36 provider/profile mappings.  Empty mappings intentionally select the
+# legacy BASE_URL/API_KEY/MODEL compatibility path above.
+PROVIDERS = {}
+MODEL_PROFILES = {}
+PARENT_MODEL_PROFILE = "default"
+SUBAGENT_MODEL_PROFILE = None
+SUBAGENT_ALLOWED_MODEL_PROFILES = ("default",)
 MAX_ITERATIONS = 50
 CONTEXT_WINDOW = 128_000
 CONTEXT_OBSERVABILITY = True

@@ -24,12 +24,14 @@ from mini_agent.tools.plan import (make_begin_plan_tool, make_cancel_planning_to
                                    make_update_plan_progress_tool)
 from mini_agent.recovery import RecoveryRuntime
 from mini_agent.checkpoint import CheckpointStore, make_rollback_checkpoint_tool
+from mini_agent.providers.catalog import ProviderCatalog
 
 def create_registry(state: AgentState | None = None,
                     workspace_root: str | None = None,
                     process_manager: ProcessManager | None = None,
                     subagent_llm=None,
-                    include_delegation: bool | None = None) -> ToolRegistry:
+                    include_delegation: bool | None = None,
+                    provider_catalog: ProviderCatalog | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -44,6 +46,7 @@ def create_registry(state: AgentState | None = None,
             workspace_root=workspace_root or os.getcwd(),
             subagent_llm=subagent_llm,
             parent_registry=result,
+            provider_catalog=provider_catalog,
         )
         result._delegation_manager = manager
         result.register(make_delegate_task_tool(state, manager))

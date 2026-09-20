@@ -9,7 +9,7 @@ import os
 import stat
 from typing import Any
 
-from mini_agent.context import ContextManager
+from mini_agent.context import ContextBudget, ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.permission import PermissionGate
 from mini_agent.processes import ProcessManager
@@ -25,6 +25,7 @@ from mini_agent.session import (
 from mini_agent.state import AgentState
 from mini_agent.tools import create_registry
 from mini_agent.tools.base import ToolExecutor
+from mini_agent.providers.catalog import ProviderCatalog, load_provider_catalog
 
 
 class ResumeError(SessionError):
@@ -388,7 +389,8 @@ class ResumeCandidate:
 
 
 def prepare_resume(store: SessionStore, session_id: str,
-                   workspace_root: str | os.PathLike[str] | None = None) -> ResumeCandidate:
+                   workspace_root: str | os.PathLike[str] | None = None,
+                   provider_catalog: ProviderCatalog | None = None) -> ResumeCandidate:
     """Read, check, and build a candidate without calling LLMs or handlers."""
     try:
         envelope = store.load(session_id)
@@ -421,6 +423,11 @@ def prepare_resume(store: SessionStore, session_id: str,
             raise ResumeError("工作区检查失败：" + "；".join(issues[:20]))
 
     root = envelope["workspace_root"]
+    provider_catalog = provider_catalog or load_provider_catalog()
+    parent_binding = provider_catalog.parent_binding()
+    saved_binding_ref = envelope["context"].get("model_binding_ref")
+    if saved_binding_ref is not None and saved_binding_ref != parent_binding.reference.to_dict():
+        raise ResumeError("会话的父模型绑定配置已变化；请恢复原 provider/profile 配置后再继续")
     raw_state = envelope["state"]
     active_records = [
         item for item in raw_state.get("process_records", [])
@@ -475,6 +482,15 @@ def prepare_resume(store: SessionStore, session_id: str,
             })
     context = ContextManager.restore_session(
         state, context_payload, protected_messages=protected_messages,
+        budget=ContextBudget(
+            window=parent_binding.profile.context_window,
+            output_reserve_tokens=parent_binding.profile.max_output_tokens,
+        ),
+        summarizer=lambda messages: parent_binding.complete(
+            messages, include_tools=False, stream_output=False,
+        ).message.get("content", "") or "",
+        model_binding=parent_binding,
+        usage_meter=parent_binding.usage_meter,
     )
     historical_process_ids = [item.process_id for item in state.processes]
     process_manager = ProcessManager(historical_process_ids=historical_process_ids)
@@ -483,6 +499,7 @@ def prepare_resume(store: SessionStore, session_id: str,
     # workspace rather than the caller's ambient current directory.
     registry = create_registry(
         state, workspace_root=root, process_manager=process_manager,
+        provider_catalog=provider_catalog,
     )
     permission_gate = PermissionGate()
     tool_executor = ToolExecutor(

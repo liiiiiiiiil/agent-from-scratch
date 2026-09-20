@@ -8,6 +8,7 @@ import json
 from typing import Callable
 
 from mini_agent.config import CONTEXT_OBSERVABILITY, CONTEXT_WINDOW, OUTPUT_MODE
+from mini_agent.providers.base import UsageMeter
 from mini_agent.state import AgentState
 from mini_agent.tools.base import format_tool_result
 
@@ -122,9 +123,10 @@ class ContextBudget:
     window: int = CONTEXT_WINDOW
     output_reserve_ratio: float = 0.15
     history_ratio: float = 0.45
+    output_reserve_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        if self.window <= 0:
+        if isinstance(self.window, bool) or not isinstance(self.window, int) or self.window <= 0:
             raise ValueError("window 必须大于 0")
         for name, value in (
             ("output_reserve_ratio", self.output_reserve_ratio),
@@ -132,9 +134,16 @@ class ContextBudget:
         ):
             if not 0 <= value < 1:
                 raise ValueError(f"{name} 必须在 [0, 1) 内")
+        if self.output_reserve_tokens is not None:
+            if (isinstance(self.output_reserve_tokens, bool)
+                    or not isinstance(self.output_reserve_tokens, int)
+                    or not 0 <= self.output_reserve_tokens < self.window):
+                raise ValueError("output_reserve_tokens 必须是小于 window 的非负整数")
 
     @property
     def input_limit(self) -> int:
+        if self.output_reserve_tokens is not None:
+            return self.window - self.output_reserve_tokens
         return int(self.window * (1 - self.output_reserve_ratio))
 
     @property
@@ -280,16 +289,27 @@ class ContextManager:
         observability: bool = CONTEXT_OBSERVABILITY,
         observer: Observer | None = None,
         protected_messages: list[Message] | None = None,
+        model_binding: object | None = None,
+        usage_meter: UsageMeter | None = None,
     ) -> None:
         self.state = state
         self.history = history
         self.protected_messages = protected_messages
+        self.model_binding = model_binding
+        self.usage_meter = usage_meter or getattr(model_binding, "usage_meter", None)
         self.budget = budget or ContextBudget()
         self.trim_policy = trim_policy or TrimPolicy()
         if summarizer is None:
-            def summarizer(messages: list[Message]) -> str:
-                from mini_agent.agent import summarize_messages
-                return summarize_messages(messages)
+            if model_binding is not None:
+                def summarizer(messages: list[Message]) -> str:
+                    response = model_binding.complete(
+                        messages, include_tools=False, stream_output=False,
+                    )
+                    return response.message.get("content", "") or ""
+            else:
+                def summarizer(messages: list[Message]) -> str:
+                    from mini_agent.agent import summarize_messages
+                    return summarize_messages(messages)
         self.summarizer = summarizer
         self.keep_rounds = keep_rounds
         self._summary = ""
@@ -395,6 +415,9 @@ class ContextManager:
             "summarized_rounds": self._summarized_rounds,
             "runtime_notice": runtime_notice,
         }
+        binding_ref = getattr(getattr(self, "model_binding", None), "reference", None)
+        if binding_ref is not None:
+            payload["model_binding_ref"] = binding_ref.to_dict()
         normalized = json.loads(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         self.validate_session_export(normalized, allow_partial=allow_partial)
         return normalized
@@ -418,6 +441,17 @@ class ContextManager:
         notice = payload.get("runtime_notice")
         if notice is not None and not isinstance(notice, str):
             raise ValueError("Context runtime_notice 类型无效")
+        binding_ref = payload.get("model_binding_ref")
+        if binding_ref is not None:
+            from mini_agent.providers.catalog import ModelBindingRef
+            if not isinstance(binding_ref, dict) or set(binding_ref) != {
+                "profile", "provider", "protocol", "fingerprint",
+            }:
+                raise ValueError("Context model_binding_ref 结构无效")
+            try:
+                ModelBindingRef(**binding_ref)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Context model_binding_ref 无效") from error
         expected: list[str] = []
         partial_assistant = False
         seen_call_ids: set[str] = set()
@@ -477,6 +511,8 @@ class ContextManager:
         observability: bool = CONTEXT_OBSERVABILITY,
         observer: Observer | None = None,
         protected_messages: list[Message] | None = None,
+        model_binding: object | None = None,
+        usage_meter: UsageMeter | None = None,
     ) -> "ContextManager":
         """Rebuild history and compaction state without restoring prompts."""
         cls.validate_session_export(payload)
@@ -489,7 +525,8 @@ class ContextManager:
             state, history, budget=budget, trim_policy=trim_policy,
             summarizer=summarizer, keep_rounds=keep_rounds,
             observability=observability, observer=observer,
-            protected_messages=protected_messages,
+            protected_messages=protected_messages, model_binding=model_binding,
+            usage_meter=usage_meter,
         )
         context._summary = payload["summary"]
         context._compacted = payload["compacted"]

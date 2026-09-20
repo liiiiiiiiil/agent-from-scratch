@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.35` are complete (lesson 35: shared parent/child runtime loop), continuing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.36` are complete (lesson 36: multiple providers and one protocol boundary), continuing Stage 10. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -72,7 +72,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><th colspan="3"><a id="stage-10"></a>Stage 10 · Controlled subagent delegation</th></tr>
     <tr><td><strong>v0.34</strong></td><td><a href="./docs/tutorials/34-minimal-delegation.md">Minimal controlled subagent delegation</a></td><td>Synchronously delegate one isolated, single-level, read-only subagent with explicit capabilities, scope, and a structured result contract.</td></tr>
     <tr><td><strong>v0.35</strong></td><td><a href="./docs/tutorials/35-shared-agent-runtime.md">Shared parent/child runtime loop</a></td><td>The parent Agent and read-only Subagent use one AgentRuntime.run() protocol skeleton; policies express their Context, tools, budgets, and completion differences.</td></tr>
-    <tr><td>v0.36–v0.39</td><td>Models, lifecycle, parallelism, and durable delivery</td><td>Later versions add multiple providers, lifecycle and aggregate budgets, bounded parallelism, and durable delegation records.</td></tr>
+    <tr><td><strong>v0.36</strong></td><td><a href="./docs/tutorials/36-multi-provider.md">Multiple providers and one protocol boundary</a></td><td>Bind parent and child models through local profiles, support OpenAI-compatible Chat Completions and Anthropic Messages, and keep protocol differences in adapters.</td></tr>
+    <tr><td>v0.37–v0.39</td><td>Lifecycle, parallelism, and durable delivery</td><td>Later versions may add lifecycle and aggregate budgets, bounded parallelism, and durable delegation records; this release does not introduce them.</td></tr>
   </tbody>
 </table>
 
@@ -86,7 +87,7 @@ Requirements: Python 3.10+ and an accessible LLM gateway. Bash/zsh:
 git clone https://github.com/liiiiiiiiil/agent-from-scratch.git
 cd agent-from-scratch
 cp src/mini_agent/config_example.py src/mini_agent/config_local.py
-# edit config_local.py with BASE_URL / API_KEY / MODEL; it is not tracked
+# edit config_local.py with the provider mappings; legacy BASE_URL / API_KEY / MODEL still work, and it is not tracked
 python -m pip install -e .
 python -m mini_agent "calculate 123 * 456"
 ```

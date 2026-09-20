@@ -22,10 +22,12 @@ import time
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from mini_agent.context import ContextManager, count_tokens
+from mini_agent.context import ContextBudget, ContextManager, count_tokens
 from mini_agent.instructions import InstructionLoader
 from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
 from mini_agent.prompt import build_subagent_prompt
+from mini_agent.providers.base import ProviderResponse
+from mini_agent.providers.catalog import ModelBinding, ModelBindingRef, ProviderCatalog
 from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
 from mini_agent.state import AgentState
 from mini_agent.tools.base import (
@@ -116,8 +118,8 @@ class SubagentBudget:
             raise DelegationError(
                 f"budget.max_result_bytes 不能小于 {DELEGATION_MIN_RESULT_BYTES}"
             )
-        if self.token_accounting != "estimated":
-            raise DelegationError("v0.34 只支持 token_accounting=estimated")
+        if self.token_accounting not in {"provider", "estimated", "mixed"}:
+            raise DelegationError("token_accounting 必须是 provider、estimated 或 mixed")
 
     @classmethod
     def from_request(cls, value: Any) -> "SubagentBudget":
@@ -381,6 +383,8 @@ class DelegatedTask:
     depth: int = 1
     contract_hash: str = ""
     created_at: str = ""
+    model_profile: str | None = None
+    model_binding_ref: ModelBindingRef | None = None
 
     def __post_init__(self) -> None:
         if self.depth != 1:
@@ -403,6 +407,15 @@ class DelegatedTask:
             raise DelegationError("allowed_tools 为空或越权")
         if self.source_id is not None and (not isinstance(self.source_id, str) or not self.source_id.strip()):
             raise DelegationError("source_id 无效")
+        if self.model_profile is not None and (
+                not isinstance(self.model_profile, str) or not self.model_profile.strip()
+        ):
+            raise DelegationError("model_profile 无效")
+        if self.model_binding_ref is not None:
+            if not isinstance(self.model_binding_ref, ModelBindingRef):
+                raise DelegationError("model_binding_ref 无效")
+            if self.model_profile is not None and self.model_binding_ref.profile != self.model_profile:
+                raise DelegationError("model_profile 与 model_binding_ref 不一致")
         if not self.created_at:
             object.__setattr__(self, "created_at", _utc_now())
         expected = _contract_hash(self)
@@ -429,6 +442,10 @@ class DelegatedTask:
             "depth": self.depth,
             "contract_hash": self.contract_hash,
             "created_at": self.created_at,
+            "model_profile": self.model_profile,
+            "model_binding_ref": (
+                self.model_binding_ref.to_dict() if self.model_binding_ref is not None else None
+            ),
         }
 
 
@@ -472,6 +489,8 @@ class SubagentResult:
     finished_at: str = ""
     error_kind: str | None = None
     error_detail: str | None = None
+    model_profile: str | None = None
+    binding_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -490,6 +509,8 @@ class SubagentResult:
             "finished_at": self.finished_at,
             **({"error_kind": self.error_kind} if self.error_kind else {}),
             **({"error_detail": self.error_detail[:500]} if self.error_detail else {}),
+            **({"model_profile": self.model_profile} if self.model_profile else {}),
+            **({"binding_fingerprint": self.binding_fingerprint} if self.binding_fingerprint else {}),
         }
 
     def to_json(self) -> str:
@@ -513,12 +534,16 @@ def _safe_error_detail(value: Any, limit: int = 500) -> str:
     return text[:limit]
 
 
-def validate_delegation_arguments(arguments: Any, state: AgentState | None = None) -> dict[str, Any]:
+def validate_delegation_arguments(
+    arguments: Any,
+    state: AgentState | None = None,
+    provider_catalog: ProviderCatalog | None = None,
+) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise DelegationError("delegate_task 参数必须是对象")
     allowed = {
         "goal", "scope", "constraints", "expected_findings", "requested_tools",
-        "selected_parent_facts", "purpose", "source_id", "budget",
+        "selected_parent_facts", "purpose", "source_id", "budget", "model_profile",
     }
     unknown = set(arguments) - allowed
     if unknown:
@@ -555,6 +580,17 @@ def validate_delegation_arguments(arguments: Any, state: AgentState | None = Non
     if purpose != "investigation" and state is None:
         raise DelegationError(f"purpose={purpose} 必须绑定父 State 才能校验 source_id")
     budget = SubagentBudget.from_request(arguments.get("budget"))
+    requested_profile = arguments.get("model_profile")
+    if requested_profile is not None:
+        requested_profile = _require_string(
+            requested_profile, "model_profile", max_length=120,
+        )
+    selected_profile = requested_profile
+    if provider_catalog is not None:
+        try:
+            selected_profile = provider_catalog.resolve_child_profile(requested_profile)
+        except ValueError as error:
+            raise DelegationError(str(error)) from error
     if state is not None and hasattr(state, "delegation_gate"):
         detail = state.delegation_gate(
             "delegate_task", {**arguments, "purpose": purpose, "source_id": source_id}, "none",
@@ -570,6 +606,7 @@ def validate_delegation_arguments(arguments: Any, state: AgentState | None = Non
         "selected_parent_facts": list(facts),
         "purpose": purpose,
         "source_id": source_id,
+        "model_profile": selected_profile,
         "budget": {
             name: getattr(budget, name) for name in (
                 "max_rounds", "max_llm_calls", "max_tool_calls", "max_tokens",
@@ -580,12 +617,17 @@ def validate_delegation_arguments(arguments: Any, state: AgentState | None = Non
 
 
 def build_delegated_task(arguments: dict[str, Any], state: AgentState | None = None,
-                         *, workspace_root: str | os.PathLike[str]) -> DelegatedTask:
-    normalized = validate_delegation_arguments(arguments, state)
+                         *, workspace_root: str | os.PathLike[str],
+                         provider_catalog: ProviderCatalog | None = None) -> DelegatedTask:
+    normalized = validate_delegation_arguments(arguments, state, provider_catalog)
     ScopeGate(workspace_root, normalized["scope"])
     parent_task_id = getattr(state, "task_id", "") if state is not None else ""
     generation = getattr(state, "current_generation_id", 0) if state is not None else 0
     budget = SubagentBudget.from_request(normalized["budget"])
+    binding = (
+        provider_catalog.bind(normalized["model_profile"])
+        if provider_catalog is not None else None
+    )
     task = DelegatedTask(
         delegation_id=str(uuid4()),
         subagent_id=str(uuid4()),
@@ -603,6 +645,8 @@ def build_delegated_task(arguments: dict[str, Any], state: AgentState | None = N
         purpose=normalized["purpose"],
         source_id=normalized["source_id"],
         budget=budget,
+        model_profile=normalized["model_profile"],
+        model_binding_ref=binding.reference if binding is not None else None,
     )
     return task
 
@@ -629,18 +673,43 @@ class SubagentRunner:
 
     def __init__(self, workspace_root: str | os.PathLike[str], *, llm: Callable | None = None,
                  llm_callable: Callable | None = None,
-                 parent_registry: ToolRegistry | None = None):
+                 parent_registry: ToolRegistry | None = None,
+                 model_binding: ModelBinding | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root)))
         self.llm = llm if llm is not None else llm_callable
         self.parent_registry = parent_registry
+        self.model_binding = model_binding
         self.last_state: AgentState | None = None
         self.last_context: ContextManager | None = None
 
     def _llm_callable(self) -> Callable:
         if self.llm is not None:
             return self.llm
+        if self.model_binding is not None:
+            return self.model_binding.complete
         from mini_agent.agent import call_llm
         return call_llm
+
+    def _summarizer(self) -> Callable[[list[dict[str, Any]]], str]:
+        if self.model_binding is not None and self.llm is None:
+            def summarize(messages):
+                response = self.model_binding.complete(
+                    messages, include_tools=False, stream_output=False,
+                )
+                return response.message.get("content", "") or ""
+            return summarize
+        llm = self._llm_callable()
+
+        def summarize(messages):
+            response = llm(messages, include_tools=False, stream_output=False)
+            if isinstance(response, ProviderResponse):
+                return response.message.get("content", "") or ""
+            if isinstance(response, dict) and "choices" in response:
+                choices = response.get("choices") or []
+                if choices and isinstance(choices[0], dict):
+                    response = choices[0].get("message", response)
+            return response.get("content", "") if isinstance(response, dict) else ""
+        return summarize
 
     def _make_result(self, task: DelegatedTask, outcome: str, summary: str,
                      findings: tuple[Finding, ...] = (), evidence: tuple[EvidenceRef, ...] = (),
@@ -658,6 +727,12 @@ class SubagentRunner:
             usage=usage, contract_hash=task.contract_hash,
             started_at=started_at or _utc_now(), finished_at=_utc_now(), error_kind=error_kind,
             error_detail=_safe_error_detail(error_detail) if error_detail else None,
+            model_profile=task.model_profile or (
+                self.model_binding.profile.name if self.model_binding is not None else None
+            ),
+            binding_fingerprint=(task.model_binding_ref.fingerprint if task.model_binding_ref else (
+                self.model_binding.reference.fingerprint if self.model_binding is not None else None
+            )),
         )
         # A result-size guard is authoritative and is applied to failed reports too.
         encoded = result.to_json().encode("utf-8")
@@ -672,12 +747,26 @@ class SubagentRunner:
             encoded = result.to_json().encode("utf-8")
         if len(encoded) <= task.budget.max_result_bytes:
             return result
-        fallback = SubagentResult(
-            result.result_id, result.delegation_id, result.subagent_id, result.parent_task_id,
-            "failed", "子代理结果超过大小上限", (), (), ("result_too_large",),
-            UsageRecord(result.usage.rounds, result.usage.llm_calls, result.usage.tool_calls,
-                        result.usage.tokens, result.usage.token_accounting, 0, result.usage.elapsed_ms),
-            result.contract_hash, result.started_at, _utc_now(), "result_too_large",
+        fallback = replace(
+            result,
+            outcome="failed",
+            summary="子代理结果超过大小上限",
+            findings=(),
+            evidence=(),
+            limitations=("result_too_large",),
+            usage=UsageRecord(
+                result.usage.rounds,
+                result.usage.llm_calls,
+                result.usage.tool_calls,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                token_accounting=result.usage.token_accounting,
+                result_bytes=0,
+                elapsed_ms=result.usage.elapsed_ms,
+            ),
+            finished_at=_utc_now(),
+            error_kind="result_too_large",
+            error_detail="result_too_large",
         )
         fallback_bytes = fallback.to_json().encode("utf-8")
         for _ in range(4):
@@ -876,7 +965,16 @@ class SubagentRunner:
         }]
         context = ContextManager(
             child_state, history, observability=False,
+            budget=ContextBudget(
+                window=(self.model_binding.profile.context_window
+                        if self.model_binding is not None else 128_000),
+                output_reserve_tokens=(self.model_binding.profile.max_output_tokens
+                                       if self.model_binding is not None else None),
+            ),
+            summarizer=self._summarizer(),
             protected_messages=[{"role": "system", "content": system}],
+            model_binding=self.model_binding,
+            usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
         )
         self.last_context = context
         policy = SubagentRuntimePolicy(
@@ -894,6 +992,7 @@ class SubagentRunner:
             policy=policy,
             max_rounds=budget.max_rounds,
             output=None,
+            model_binding=self.model_binding,
         )
         try:
             runtime_result = runtime.run()
@@ -940,10 +1039,11 @@ class SubagentRuntimePolicy:
             runtime.rounds,
             runtime.llm_calls,
             runtime.tool_calls,
-            runtime.estimated_tokens,
-            "estimated",
-            0,
-            int((time.monotonic() - self.started_clock) * 1000),
+            input_tokens=runtime.input_tokens,
+            output_tokens=runtime.output_tokens,
+            token_accounting=runtime.token_accounting,
+            result_bytes=0,
+            elapsed_ms=int((time.monotonic() - self.started_clock) * 1000),
         )
 
     def _set_terminal(self, outcome: str, summary: str, error_kind: str,
@@ -1150,19 +1250,24 @@ class DelegationManager:
     def __init__(self, workspace_root: str | os.PathLike[str] | None = None, *,
                  subagent_llm: Callable | None = None, llm: Callable | None = None,
                  llm_callable: Callable | None = None,
-                 parent_registry: ToolRegistry | None = None):
+                 parent_registry: ToolRegistry | None = None,
+                 provider_catalog: ProviderCatalog | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root or os.getcwd())))
         self.subagent_llm = subagent_llm if subagent_llm is not None else (
             llm if llm is not None else llm_callable
         )
         self.parent_registry = parent_registry
+        self.provider_catalog = provider_catalog
         self._lock = Lock()
         self._active = False
         self.last_task: DelegatedTask | None = None
         self.last_result: SubagentResult | None = None
 
     def create_task(self, arguments: dict[str, Any], state: AgentState | None = None) -> DelegatedTask:
-        return build_delegated_task(arguments, state, workspace_root=self.workspace_root)
+        return build_delegated_task(
+            arguments, state, workspace_root=self.workspace_root,
+            provider_catalog=self.provider_catalog,
+        )
 
     def run(self, arguments: dict[str, Any] | DelegatedTask,
             state: AgentState | None = None) -> SubagentResult:
@@ -1187,9 +1292,14 @@ class DelegationManager:
             self._active = True
         self.last_task = task
         try:
+            binding = (
+                self.provider_catalog.bind(task.model_profile)
+                if self.provider_catalog is not None and task.model_profile is not None
+                else None
+            )
             result = SubagentRunner(
                 self.workspace_root, llm=self.subagent_llm,
-                parent_registry=self.parent_registry,
+                parent_registry=self.parent_registry, model_binding=binding,
             ).run(task)
             self.last_result = result
             return result

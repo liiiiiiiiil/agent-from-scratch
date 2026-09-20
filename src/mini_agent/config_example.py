@@ -1,9 +1,50 @@
 # ===== 本地真实配置（不进 git） =====
 # 用法：复制本文件为 config_local.py，填入你的真实值。
 # config.py 会自动 import config_local.py 覆盖占位值。
-BASE_URL = "http://your-gateway-host/v3/openai/model"
-API_KEY = "sk-YOUR_API_KEY_HERE"
-MODEL = "EB-GLM-5.2"
+BASE_URL = "https://gateway.example.invalid/v1"
+API_KEY = "sk-PLACEHOLDER_API_KEY"
+MODEL = "model-PLACEHOLDER"
+
+# 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。
+# 下面的值全部是占位值；真实值只应写入不进 git 的 config_local.py。
+PROVIDERS = {
+    "openai-gateway": {
+        "protocol": "openai_chat",
+        "endpoint": "https://api.example.invalid/v1/chat/completions",
+        "api_key": "sk-PLACEHOLDER_OPENAI_KEY",
+        "timeout_seconds": 120,
+    },
+    "anthropic-gateway": {
+        "protocol": "anthropic_messages",
+        "endpoint": "https://api.example.invalid/v1/messages",
+        "api_key": "PLACEHOLDER_ANTHROPIC_KEY",
+        "timeout_seconds": 120,
+    },
+}
+MODEL_PROFILES = {
+    "parent-openai": {
+        "provider_id": "openai-gateway",
+        "model_id": "placeholder-openai-model",
+        "context_window": 128_000,
+        "max_output_tokens": 8_192,
+    },
+    "child-anthropic": {
+        "provider_id": "anthropic-gateway",
+        "model_id": "placeholder-anthropic-model",
+        "context_window": 200_000,
+        "max_output_tokens": 8_192,
+    },
+}
+PARENT_MODEL_PROFILE = "parent-openai"
+SUBAGENT_MODEL_PROFILE = "child-anthropic"
+SUBAGENT_ALLOWED_MODEL_PROFILES = ("child-anthropic",)
+
+# 旧配置兼容示例（使用旧配置时将上面的两个映射设为空）：
+# PROVIDERS = {}
+# MODEL_PROFILES = {}
+# PARENT_MODEL_PROFILE = "default"
+# SUBAGENT_MODEL_PROFILE = None
+# SUBAGENT_ALLOWED_MODEL_PROFILES = ("default",)
 MAX_ITERATIONS = 50
 CONTEXT_WINDOW = 128_000
 CONTEXT_OBSERVABILITY = True

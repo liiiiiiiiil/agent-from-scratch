@@ -1,6 +1,64 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.35**（共享父子 Agent Runtime；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.36**（多 provider、统一协议适配和父子独立模型绑定；含此前可靠执行能力）。
+
+## v0.36 多 provider 与统一协议适配
+
+v0.36 将“模型服务配置”和“协议转换”从 Agent Runtime 中分离出来。`provider` 是服务配置身份，`protocol` 是请求/响应格式，`model profile` 是本地允许模型使用的别名。父 Agent 和 Subagent 在启动前分别冻结 `ModelBinding`，因此可以使用不同 provider/model，但仍进入同一个 `AgentRuntime.run()`。
+
+### 配置格式
+
+推荐在未跟踪的 `src/mini_agent/config_local.py` 中覆盖以下映射；仓库里的 `config_example.py` 只有占位值：
+
+```python
+PROVIDERS = {
+    "openai-gateway": {
+        "protocol": "openai_chat",
+        "endpoint": "https://gateway.example.invalid/v1/chat/completions",
+        "api_key": "sk-PLACEHOLDER",
+    },
+    "anthropic-gateway": {
+        "protocol": "anthropic_messages",
+        "endpoint": "https://gateway.example.invalid/v1/messages",
+        "api_key": "key-PLACEHOLDER",
+    },
+}
+MODEL_PROFILES = {
+    "parent-default": {
+        "provider_id": "openai-gateway",
+        "model_id": "model-PLACEHOLDER",
+        "context_window": 128000,
+        "max_output_tokens": 8192,
+    },
+    "child-anthropic": {
+        "provider_id": "anthropic-gateway",
+        "model_id": "model-PLACEHOLDER",
+        "context_window": 200000,
+        "max_output_tokens": 4096,
+    },
+}
+PARENT_MODEL_PROFILE = "parent-default"
+SUBAGENT_MODEL_PROFILE = "child-anthropic"
+SUBAGENT_ALLOWED_MODEL_PROFILES = ("child-anthropic",)
+```
+
+`openai_chat` 使用完整的 `/chat/completions` endpoint，`anthropic_messages` 使用完整的 `/v1/messages` endpoint。两个映射必须同时定义；只定义一半会在启动时失败。模型只能通过 `delegate_task(model_profile="child-anthropic")` 请求获准别名，不能传 endpoint、key、真实 model ID 或认证头。选择顺序是显式且获准的 profile、子默认 profile、父 profile；未知或越权别名不会回退。
+
+只配置旧的 `BASE_URL`、`API_KEY`、`MODEL` 时，程序会生成 `legacy-default` provider/profile，并在 OpenAI-compatible base URL 后补 `/chat/completions`。新旧配置不能局部混用。真实值不得提交到版本库。
+
+### 协议、请求和 usage
+
+首批支持 OpenAI-compatible Chat Completions 与 Anthropic Messages。OpenAI 使用 Bearer 认证和工具 schema；Anthropic 使用 `x-api-key`、`anthropic-version`、顶层 system、`tool_use` 与 `tool_result` block。两种协议都归一为内部 assistant message 和按 call ID 对应的 `role=tool` 结果；Runtime、工具执行和完成判定不读取 provider 原生字段。
+
+所有请求继续使用标准库 `http.client`，每次请求独立 connection，并发送 `Accept-Encoding: identity`。适配器不自动重试、不执行工具、不修改 State、不判断完成，也不做跨 provider fallback。流式 tool arguments 未闭合、流在结束标志前中断或收到 provider error 时，本次响应会被拒绝，不会进入 executor。
+
+`ProviderUsage.source` 为 `provider`、`estimated` 或 `mixed`。服务方提供完整 usage 时优先使用；缺失字段由保守 token 估算补足。Context 摘要也使用当前父/子 binding，并计入同一个 `UsageMeter`，不会成为免费调用。父、子 Context window 和 output reserve 分别来自各自 profile。
+
+### 脱敏和恢复
+
+State、Context、session、Trace、工具结果和用户可见错误最多保存 profile、provider ID、protocol 和 fingerprint；不保存 API key、真实 endpoint、认证头或真实 model ID。fingerprint 只由非认证配置生成，不包含 API key 或额外请求头，因此轮换凭据不会改变它。v0.36 创建的带模型绑定记录的会话在恢复时重新加载本地 catalog 并比较父 binding；配置缺失或 fingerprint 变化时报告问题，不重发历史请求，也不自动切换 profile。旧版会话没有模型绑定记录，无法核对原模型来源，恢复前需由用户自行核对本地配置。
+
+v0.36 仍只有一个同步、depth=1、只读 Subagent。它没有聚合预算、后台取消、多子代理并行或持久化 `DelegationRecord`；这些边界不由本版的 provider 适配改变。
 
 ## v0.35 共享父子运行循环
 
@@ -336,9 +394,13 @@ PYTHONPATH=src python -m mini_agent
 
 | 配置项 | 占位值 | 说明 |
 |---|---|---|
-| `BASE_URL` | `http://your-gateway-host/v3/openai/model` | LLM 网关地址 |
-| `API_KEY` | `sk-YOUR_API_KEY_HERE` | 网关密钥 |
-| `MODEL` | `EB-GLM-5.2` | 模型名 |
+| `BASE_URL` | `https://gateway.example.invalid/v1` | 旧配置兼容路径的 LLM 网关地址 |
+| `API_KEY` | `sk-PLACEHOLDER_API_KEY` | 网关密钥占位值 |
+| `MODEL` | `model-PLACEHOLDER` | 旧配置兼容路径的模型名占位值 |
+| `PROVIDERS` / `MODEL_PROFILES` | `{}` / `{}` | 两者同时为空时启用旧三元组兼容；推荐填写 v0.36 多 provider 映射 |
+| `PARENT_MODEL_PROFILE` | `default` | 新配置中的父 profile 别名 |
+| `SUBAGENT_MODEL_PROFILE` | `None` | 子默认 profile；为空时按白名单回退到父 profile |
+| `SUBAGENT_ALLOWED_MODEL_PROFILES` | `("default",)` | `delegate_task.model_profile` 可请求的 profile 白名单 |
 | `MAX_ITERATIONS` | `50` | agent loop 最大轮数 |
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
@@ -369,7 +431,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.35，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.36，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

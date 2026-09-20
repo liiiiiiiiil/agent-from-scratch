@@ -10,7 +10,7 @@ except ImportError:
     pass
 
 from mini_agent.agent import LLMResponseError, agent_loop
-from mini_agent.context import ContextManager
+from mini_agent.context import ContextBudget, ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.input_session import InputSession
 from mini_agent.config import OUTPUT_MODE
@@ -21,6 +21,7 @@ from mini_agent.tools.base import ToolExecutor
 from mini_agent.output import TerminalOutput
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
 from mini_agent.processes import ProcessManager
+from mini_agent.providers.catalog import ProviderCatalog, load_provider_catalog
 from mini_agent.resume import ResumeError, prepare_resume
 from mini_agent.session import (
     DurableToolBoundary, SessionCommitUncertainError, SessionError, SessionStore,
@@ -172,6 +173,12 @@ def main():
     recovery_mode = "safe_point"
     source_session_id = None
     persistence_halted = False
+    try:
+        provider_catalog = load_provider_catalog()
+        parent_binding = provider_catalog.parent_binding()
+    except (ValueError, TypeError) as error:
+        print(f"provider 配置错误：{_single_line_notice(error, 500)}")
+        return
     if argv and argv[0] == "--resume":
         if len(argv) != 2 or not argv[1].strip():
             print("用法: python -m mini_agent --resume <session_id>")
@@ -179,7 +186,9 @@ def main():
         session_id = argv[1]
         try:
             session_store = SessionStore()
-            candidate = prepare_resume(session_store, session_id, os.getcwd())
+            candidate = prepare_resume(
+                session_store, session_id, os.getcwd(), provider_catalog=provider_catalog,
+            )
             runtime = candidate.claim()
         except SessionCommitUncertainError as error:
             print(
@@ -208,6 +217,7 @@ def main():
         process_manager = ProcessManager()
         run_registry = create_registry(
             state, workspace_root=os.getcwd(), process_manager=process_manager,
+            provider_catalog=provider_catalog,
         )
         registry = run_registry
         instructions = InstructionLoader(os.getcwd()).load()
@@ -217,11 +227,31 @@ def main():
             "role": "system",
             "content": system_prompt,
         }]
+        # Keep the two-argument construction compatible with integrations that
+        # replace ContextManager, then freeze the v0.36 parent binding on the
+        # resulting context instance.
         context = ContextManager(state, history)
+        context.budget = ContextBudget(
+            window=parent_binding.profile.context_window,
+            output_reserve_tokens=parent_binding.profile.max_output_tokens,
+        )
+        context.summarizer = lambda messages: parent_binding.complete(
+            messages, include_tools=False, stream_output=False,
+        ).message.get("content", "") or ""
+        context.model_binding = parent_binding
+        context.usage_meter = parent_binding.usage_meter
         context.protected_messages = protected_messages
         # Kept as a compatibility observer for callers using ToolExecutor.execute().
         # The agent loop's structured path suppresses this legacy callback.
         tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
+    if resumed:
+        # prepare_resume rebuilt the binding alongside the restored Context;
+        # keep its UsageMeter so resumed summaries and parent calls share one
+        # accounting ledger instead of replacing it with the startup probe.
+        parent_binding = getattr(context, "model_binding", None) or parent_binding
+    else:
+        context.model_binding = parent_binding
+    tool_executor.model_binding = parent_binding
     if not resumed and argv and argv[0] == "--plan":
         if len(argv) != 2 or not argv[1].strip():
             print('用法: python -m mini_agent --plan "<任务>"')

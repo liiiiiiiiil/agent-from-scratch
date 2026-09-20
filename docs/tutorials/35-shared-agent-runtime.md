@@ -1,6 +1,6 @@
 # 第 35 课：共享父子运行循环
 
-上一课：[最小受控子代理委派](34-minimal-delegation.md) · [教程总览](README.md) · 下一课：v0.36（规划中）
+上一课：[最小受控子代理委派](34-minimal-delegation.md) · [教程总览](README.md) · 下一课：[v0.36 多 provider 与统一协议适配](36-multi-provider.md)
 
 > 代码快照：`v0.35` · 相邻差异：`v0.34..v0.35` · 命令环境：Bash/zsh
 
@@ -205,7 +205,7 @@ assistant(tool_calls=[A, B])
 
 代价是 Runtime 需要提供明确的策略钩子，父策略的完成提醒、process sync 和 repair gate 不能再偷偷依赖 legacy loop 的局部变量；并行 handler 的结果也必须额外保存并按模型顺序提交。这里选择小型 `Protocol`，而不是通用插件系统，是为了让 v0.35 的控制面保持可读、可审计。
 
-本版刻意不加入多 provider、模型选择、生命周期与聚合预算、取消、多子代理并行、持久化 `DelegationRecord` 或跨进程委派恢复。它们会改变依赖和资源所有权，分别留给 v0.36–v0.39。
+本版刻意不加入多 provider、模型选择、生命周期与聚合预算、取消、多子代理并行、持久化 `DelegationRecord` 或跨进程委派恢复。它们会改变依赖和资源所有权；多 provider 留给下一课，其他能力仍留给 v0.37–v0.39。
 
 ## 设计边界
 
@@ -219,7 +219,7 @@ assistant(tool_calls=[A, B])
 
 本版完成唯一的父子 Agent Loop：父 `agent_loop()` 和子 `SubagentRunner.run()` 都实际进入 `AgentRuntime.run()`；统一的 `NormalizedToolRound` 保证坏调用也有唯一 ID 和配对结果；父 Plan/Repair/process/session 语义、子固定预算和格式修正继续有效。
 
-下一课是 v0.36 多 provider 与模型选择。当前课涉及的固定源码入口如下：
+下一课是 [v0.36 多 provider 与统一协议适配](36-multi-provider.md)。当前课涉及的固定源码入口如下：
 
 - [`src/mini_agent/runtime.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.35/src/mini_agent/runtime.py)
 - [`src/mini_agent/agent.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.35/src/mini_agent/agent.py)

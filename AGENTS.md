@@ -27,7 +27,9 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.35`（共享父子 Agent Runtime）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.36`（多 provider、统一协议适配和父子独立模型绑定）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+
+模型绑定硬约束：provider/profile 只能从本地配置解析；父 binding 和子 binding 必须在对应 Runtime 创建前冻结，运行中不得通过全局变量切换模型。`delegate_task` 只能请求获准的本地 `model_profile` 别名，未知或越权别名必须在 HTTP 请求前拒绝；不得自动 provider fallback。State、Context、session、Trace、工具结果和用户可见错误只能保留无凭据的 profile/provider/protocol/fingerprint 来源摘要，不得持久化真实 endpoint、model ID、API key 或认证头。摘要请求必须使用同一 binding 并计入其 usage；provider usage 缺失时保守估算并标记来源。
 
 崩溃恢复硬约束：`active + schema 3 pending tool_boundary` 只能派生新的 session；源 session 保持只读，同一源完整性只能 claim 一次。未进入 handler 的调用补入明确的未执行结果；已准入调用一律记录为不确定事实，不自动重放。所有 issue 必须逐项由用户 `/resolve`；调查只允许获准的无副作用观察，全部 `continue` 后必须重新规划、重新授权并独立验证。恢复期间旧 PID、stdin 和当前验证资格不可继承。
 
@@ -42,7 +44,7 @@ State 保持一次提醒兼容行为。
 
 `/save` 仍是开启持久化的唯一入口；完整安全点保存当前任务的 State、Context 和会话元数据。持久化工具回合另允许最后一轮的有序结果前缀和待结算 attempt，但只写入 schema 3 的 `tool_boundary`，不作为普通安全点。未结算 attempt、活动进程或在途 stdin 不得保存为 safe point；`active + schema 3 + pending tool_boundary` 只能进入 v0.33 崩溃恢复并派生新 session。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。
 
-子代理硬约束：v0.35 的 `delegate_task` 只能同步创建一个 depth=1 的只读 Subagent；子代理拥有独立 State、Context、运行状态、提示词和固定白名单 PermissionGate，但父子调用同一个 canonical `AgentRuntime.run()`。它只能使用 `calculate`、`read_file`、`list_dir`、`grep`，不继承父 history、权限、Plan、generation 或 verification，不能写文件、运行 shell、操作进程、再次委派或决定父任务完成。子结果只能作为不可信调查材料，evidence 不进入父 `verification_evidence`；父 Agent 独占工作区修改、主计划、权限交互、generation、verification 和完成判定。固定预算、scope gate、结果合同和一次格式修正由子 Runtime policy 强制执行。
+子代理硬约束：v0.36 的 `delegate_task` 只能同步创建一个 depth=1 的只读 Subagent；子代理拥有独立 State、Context、运行状态、提示词、冻结 model binding 和固定白名单 PermissionGate，但父子调用同一个 canonical `AgentRuntime.run()`。它只能使用 `calculate`、`read_file`、`list_dir`、`grep`，不继承父 history、权限、Plan、generation 或 verification，不能写文件、运行 shell、操作进程、再次委派或决定父任务完成。子结果只能作为不可信调查材料，evidence 不进入父 `verification_evidence`；父 Agent 独占工作区修改、主计划、权限交互、generation、verification 和完成判定。固定预算、scope gate、结果合同和一次格式修正由子 Runtime policy 强制执行。
 
 ## 架构索引
 

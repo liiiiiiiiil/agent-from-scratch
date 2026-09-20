@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.36.0] - Multiple providers and unified protocol adapters
+
+- Added standard-library provider catalog, frozen parent/child model bindings, profile allowlists, legacy configuration compatibility, safe binding fingerprints, and redacted provider errors.
+- Added OpenAI-compatible Chat Completions and Anthropic Messages adapters with streaming/non-streaming tool-call normalization, ordered tool results, system/tool-result conversion, strict incomplete-stream handling, and provider/estimated/mixed usage accounting.
+- Bound Context windows, summaries, Subagent selection, and usage meters to the selected profile while keeping the canonical `AgentRuntime.run()` and v0.35 synchronous depth=1 read-only delegation boundary.
+- Kept credentials, real endpoints, model IDs, and authentication headers out of State, Context, session, Trace, tool results, and user-visible errors; lifecycle, cancellation, aggregate budgets, parallel delegation, and durable delegation records remain future work.
+- Fixed non-streaming answer display, timeout outcome classification, per-run usage source accounting, and local HTTP integration fixtures; saved parent binding references now reject changed model configuration on resume, while public fingerprints exclude authentication material.
+
 ## [v0.35.0] - Shared parent and subagent runtime
 
 - Converged the parent Agent and synchronous read-only Subagent onto one canonical `AgentRuntime.run()` loop.

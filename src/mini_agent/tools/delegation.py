@@ -14,11 +14,15 @@ from mini_agent.tools.base import Tool
 
 def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> Tool:
     def validate(arguments: dict[str, Any]) -> None:
-        validate_delegation_arguments(arguments, parent_state)
+        validate_delegation_arguments(arguments, parent_state, manager.provider_catalog)
 
     def delegate_task(**arguments: Any) -> str:
         result = manager.run(arguments, parent_state)
         return result.to_json()
+
+    profile_schema: dict[str, Any] = {"type": "string", "maxLength": 120}
+    if manager.provider_catalog is not None:
+        profile_schema["enum"] = list(manager.provider_catalog.subagent_allowed_profiles)
 
     return Tool(
         name="delegate_task",
@@ -53,6 +57,7 @@ def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> To
                     "enum": ["investigation", "diagnosis", "crash_investigation"],
                 },
                 "source_id": {"type": "string", "maxLength": 200},
+                "model_profile": profile_schema,
                 "budget": {
                     "type": "object", "additionalProperties": False,
                     "properties": {
