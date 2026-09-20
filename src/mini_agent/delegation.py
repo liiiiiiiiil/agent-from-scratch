@@ -18,7 +18,9 @@ import ntpath
 import os
 import re
 import socket
-from threading import Event, Lock
+from collections import deque
+from queue import Queue
+from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -1359,8 +1361,107 @@ class SubagentRuntimePolicy:
         return RuntimeDecision("finish", "子代理预算耗尽", "budget_exhausted")
 
 
+@dataclass(frozen=True)
+class _PreparedDelegation:
+    index: int
+    task: DelegatedTask
+    cancel_event: Event
+
+
+class DelegationScheduler:
+    """Run a reserved delegation batch with bounded, index-addressed workers."""
+
+    def __init__(self, manager: "DelegationManager", prepared: list[_PreparedDelegation],
+                 max_concurrency: int, *, ready: dict[int, SubagentResult] | None = None,
+                 on_result: Callable[[int, Any], None] | None = None):
+        self.manager = manager
+        self.prepared = tuple(prepared)
+        self.max_concurrency = max(1, min(max_concurrency, len(self.prepared)))
+        self.ready = dict(ready or {})
+        self.on_result = on_result
+        self._cancelled = False
+
+    def cancel(self, reason: str = "task_boundary") -> None:
+        self._cancelled = True
+        for item in self.prepared:
+            item.cancel_event.set()
+
+    def _drain_ordered(self, results: dict[int, SubagentResult], next_index: list[int]) -> None:
+        while next_index and next_index[0] in results:
+            index = next_index.pop(0)
+            result = results.pop(index)
+            if self.on_result is not None:
+                self.on_result(index, result)
+
+    def run(self) -> dict[int, SubagentResult]:
+        if not self.prepared:
+            for index in sorted(self.ready):
+                if self.on_result is not None:
+                    self.on_result(index, self.ready[index])
+            return {}
+        pending = deque(self.prepared)
+        active: dict[int, _PreparedDelegation] = {}
+        results = dict(self.ready)
+        next_index = sorted(set(results) | {item.index for item in self.prepared})
+        completed: Queue[tuple[int, SubagentResult]] = Queue()
+
+        def worker(item: _PreparedDelegation) -> None:
+            try:
+                result = self.manager._run_child(item.task, item.cancel_event)
+            except BaseException as error:
+                result = self.manager._runner_error_result(item.task, error)
+            self.manager._child_finished(item.task, result)
+            completed.put((item.index, result))
+
+        def launch() -> None:
+            if self._cancelled or self.manager.cancel_requested:
+                return
+            while pending and len(active) < self.max_concurrency:
+                item = pending.popleft()
+                active[item.index] = item
+                try:
+                    Thread(target=worker, args=(item,), daemon=True).start()
+                except Exception as error:
+                    active.pop(item.index)
+                    result = self.manager._runner_error_result(item.task, error)
+                    self.manager._child_finished(item.task, result)
+                    results[item.index] = result
+
+        try:
+            self._drain_ordered(results, next_index)
+            launch()
+            self._drain_ordered(results, next_index)
+            while active:
+                index, result = completed.get()
+                active.pop(index)
+                results[index] = result
+                self._drain_ordered(results, next_index)
+                launch()
+                self._drain_ordered(results, next_index)
+            # Cancellation leaves queued work without a worker. It still
+            # needs a bounded result in the current parent tool round.
+            while pending:
+                item = pending.popleft()
+                result = self.manager._cancelled_result(item.task, "scheduler_cancelled")
+                results[item.index] = result
+                self.manager._child_finished(item.task, result)
+                self._drain_ordered(results, next_index)
+        except BaseException:
+            # A failed parent commit must return promptly. Running workers
+            # keep their manager registration until they actually stop; daemon
+            # threads cannot hold the CLI open after its bounded cleanup.
+            self.manager.cancel(reason="parent_commit_failed", interrupt=False)
+            while pending:
+                item = pending.popleft()
+                self.manager._child_finished(
+                    item.task, self.manager._cancelled_result(item.task, "scheduler_cancelled"),
+                )
+            raise
+        return results
+
+
 class DelegationManager:
-    """Own the single synchronous child slot for one parent runtime."""
+    """Own compatible single-run and v0.38 parallel delegation entry points."""
 
     def __init__(self, workspace_root: str | os.PathLike[str] | None = None, *,
                  subagent_llm: Callable | None = None, llm: Callable | None = None,
@@ -1376,14 +1477,10 @@ class DelegationManager:
         self.provider_catalog = provider_catalog
         self.parent_state = parent_state
         self._lock = Lock()
-        self._active_task_id: str | None = None
-        self._active_delegation_id: str | None = None
-        self._cancel_event = Event()
+        self._active: dict[str, tuple[DelegatedTask, Event, AgentState | None]] = {}
         self._cancel_reason = ""
         self._done_event = Event()
         self._done_event.set()
-        self._reservation_state: AgentState | None = None
-        self._reservation: Any = None
         self._interrupted = False
         self.last_task: DelegatedTask | None = None
         self.last_result: SubagentResult | None = None
@@ -1394,23 +1491,49 @@ class DelegationManager:
             provider_catalog=self.provider_catalog,
         )
 
+    @staticmethod
+    def _contract_identity(task: DelegatedTask) -> str:
+        """Identify repeated work while ignoring per-call IDs and timestamps."""
+        payload = {
+            "goal": task.goal,
+            "scope": list(task.scope),
+            "constraints": list(task.constraints),
+            "expected_findings": list(task.expected_findings),
+            "requested_tools": list(task.requested_tools),
+            "allowed_tools": list(task.allowed_tools),
+            "selected_parent_facts": list(task.selected_parent_facts),
+            "purpose": task.purpose,
+            "source_id": task.source_id,
+            "budget": task.budget.__dict__,
+            "model_profile": task.model_profile,
+        }
+        return hashlib.sha256(json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
     @property
     def active_task_id(self) -> str | None:
         with self._lock:
-            return self._active_task_id
+            return next(iter(self._active.values()))[0].parent_task_id if self._active else None
 
     @property
     def active_delegation_id(self) -> str | None:
         with self._lock:
-            return self._active_delegation_id
+            return next(iter(self._active)) if self._active else None
 
-    def active_info(self) -> dict[str, str | bool | None]:
+    def active_info(self) -> dict[str, Any]:
         with self._lock:
+            entries = list(self._active.items())
+            first = entries[0][1][0] if entries else None
             return {
-                "active": self._active_task_id is not None,
-                "task_id": self._active_task_id,
-                "delegation_id": self._active_delegation_id,
-                "cancel_requested": self._cancel_event.is_set(),
+                "active": bool(entries),
+                "active_count": len(entries),
+                "task_ids": [item[1][0].parent_task_id for item in entries],
+                "delegation_ids": [item[0] for item in entries],
+                "subagent_ids": [item[1][0].subagent_id for item in entries],
+                "task_id": first.parent_task_id if first else None,
+                "delegation_id": entries[0][0] if entries else None,
+                "cancel_requested": bool(self._cancel_reason),
                 "cancel_reason": self._cancel_reason or None,
             }
 
@@ -1420,26 +1543,36 @@ class DelegationManager:
             self._interrupted = False
             return interrupted
 
-    def cancel(self, task_id: str | None = None, reason: str = "task_boundary") -> bool:
-        """Request cooperative cancellation; an in-flight HTTP call is not killed."""
+    @property
+    def cancel_requested(self) -> bool:
         with self._lock:
-            if self._active_task_id is None:
+            return bool(self._cancel_reason)
+
+    def cancel(self, task_id: str | None = None, reason: str = "task_boundary",
+               *, interrupt: bool = True) -> bool:
+        """Broadcast cooperative cancellation to all children of a parent task."""
+        with self._lock:
+            if not self._active:
                 return False
-            if task_id is not None and task_id != self._active_task_id:
+            if task_id is not None and task_id not in {
+                    item[0].parent_task_id for item in self._active.values()
+            }:
                 return False
             self._cancel_reason = _safe_error_detail(reason, 240)
-            self._cancel_event.set()
-            state = self._reservation_state
-            delegation_id = self._active_delegation_id
-        if state is not None and delegation_id is not None:
-            try:
-                state.note_delegation_cancellation(delegation_id, self._cancel_reason)
-            except ValueError:
-                pass
+            if interrupt:
+                self._interrupted = True
+            entries = list(self._active.values())
+        for task, cancel_event, state in entries:
+            cancel_event.set()
+            if state is not None:
+                try:
+                    state.note_delegation_cancellation(task.delegation_id, self._cancel_reason)
+                except ValueError:
+                    pass
         return True
 
     def wait(self, timeout: float | None = None) -> bool:
-        """Wait for a child call to reach its manager boundary."""
+        """Wait for all children of the current parent task to settle."""
         return self._done_event.wait(timeout)
 
     @staticmethod
@@ -1451,113 +1584,199 @@ class DelegationManager:
             task.contract_hash, now, now, "aggregate_budget" if outcome == "budget_exhausted" else "lifecycle_rejected",
         )
 
-    def run(self, arguments: dict[str, Any] | DelegatedTask,
-            state: AgentState | None = None) -> SubagentResult:
-        state = state or self.parent_state
-        try:
-            task = arguments if isinstance(arguments, DelegatedTask) else self.create_task(arguments, state)
-        except Exception as error:
-            # A direct Manager caller still receives the same bounded result shape.
-            now = _utc_now()
-            return SubagentResult(str(uuid4()), "", "", getattr(state, "task_id", "") if state else "",
-                                  "failed", "委派合同非法", (), (), (_safe_error_detail(error),),
-                                  UsageRecord(token_accounting="estimated"), "", now, now, "invalid_contract")
+    @staticmethod
+    def _cancelled_result(task: DelegatedTask, detail: str) -> SubagentResult:
+        now = _utc_now()
+        return SubagentResult(
+            str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
+            "cancelled", "子代理收到取消请求", (), (), (detail,),
+            UsageRecord(token_accounting="estimated"), task.contract_hash,
+            now, now, "cancelled", detail, task.model_profile,
+            task.model_binding_ref.fingerprint if task.model_binding_ref else None,
+        )
+
+    @staticmethod
+    def _runner_error_result(task: DelegatedTask, error: BaseException) -> SubagentResult:
+        now = _utc_now()
+        kind = "cancelled" if isinstance(error, KeyboardInterrupt) else "runner_error"
+        outcome = "cancelled" if kind == "cancelled" else "failed"
+        return SubagentResult(
+            str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
+            outcome, "子代理运行失败", (), (), (_safe_error_detail(error),),
+            UsageRecord(token_accounting="estimated"), task.contract_hash,
+            now, now, kind, _safe_error_detail(error), task.model_profile,
+            task.model_binding_ref.fingerprint if task.model_binding_ref else None,
+        )
+
+    def _register(self, tasks: list[tuple[DelegatedTask, Event, AgentState | None]]) -> None:
         with self._lock:
-            if self._active_task_id is not None:
-                result = SubagentResult(
-                    str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
-                    "failed", "当前已有子代理运行", (), (), ("delegation_busy",),
-                    UsageRecord(token_accounting="estimated"), task.contract_hash,
-                    _utc_now(), _utc_now(), "delegation_busy",
-                )
-                self.last_result = result
-                return result
-            self._active_task_id = getattr(state, "task_id", None) or task.parent_task_id
-            self._active_delegation_id = task.delegation_id
-            self._cancel_event = Event()
-            self._cancel_reason = ""
-            self._done_event.clear()
-            self._reservation_state = state
-            self._reservation = None
-            self._interrupted = False
-        reservation = None
-        if state is not None:
-            try:
-                reservation = state.reserve_delegation(task)
-                state.start_delegation(task.delegation_id)
-                with self._lock:
-                    self._reservation = reservation
-            except Exception as error:
-                result = self._rejected_result(
-                    task, "budget_exhausted", _safe_error_detail(error),
-                )
-                self.last_task = task
-                self.last_result = result
-                if state is not None:
-                    try:
-                        state.record_delegation_rejection(task, result, result.error_detail)
-                    except Exception:
-                        # The deterministic tool result remains authoritative
-                        # if the bounded audit list itself is full.
-                        pass
-                with self._lock:
-                    self._active_task_id = None
-                    self._active_delegation_id = None
-                    self._reservation_state = None
-                    self._reservation = None
-                    self._done_event.set()
-                return result
-        self.last_task = task
+            if not self._active:
+                self._cancel_reason = ""
+                self._interrupted = False
+            for task, event, state in tasks:
+                self._active[task.delegation_id] = (task, event, state)
+            if tasks:
+                self._done_event.clear()
+
+    def _child_finished(self, task: DelegatedTask, result: SubagentResult) -> None:
+        with self._lock:
+            self._active.pop(task.delegation_id, None)
+            self.last_task = task
+            self.last_result = result
+            if result.outcome == "cancelled" and result.error_detail == "user_interrupt":
+                self._interrupted = True
+            if not self._active:
+                self._done_event.set()
+
+    def _run_child(self, task: DelegatedTask, cancel_event: Event) -> SubagentResult:
         try:
             binding = (
                 self.provider_catalog.bind(task.model_profile)
                 if self.provider_catalog is not None and task.model_profile is not None
                 else None
             )
-            result = SubagentRunner(
+            return SubagentRunner(
                 self.workspace_root, llm=self.subagent_llm,
                 parent_registry=self.parent_registry, model_binding=binding,
             ).run(
-                task, cancel_event=self._cancel_event,
+                task, cancel_event=cancel_event,
                 cancellation_reason=lambda: self._cancel_reason,
             )
-            if result.outcome == "cancelled" and result.error_detail == "user_interrupt":
-                with self._lock:
-                    self._interrupted = True
-            if state is not None:
-                state.delegation_result_ready(task.delegation_id, result)
-            self.last_result = result
-            return result
-        except KeyboardInterrupt as error:
-            with self._lock:
-                self._interrupted = True
-            result = SubagentResult(
-                str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
-                "cancelled", "子代理收到取消请求", (), (), ("cancelled",),
-                UsageRecord(token_accounting="estimated"), task.contract_hash,
-                _utc_now(), _utc_now(), "cancelled", _safe_error_detail(error),
-            )
-            if state is not None:
-                state.delegation_result_ready(task.delegation_id, result)
-            self.last_result = result
-            return result
+        except BaseException as error:
+            return self._runner_error_result(task, error)
+
+    def prepare_batch(self, admissions: dict[int, Any], state: AgentState | None) -> tuple[
+            dict[int, DelegatedTask], dict[int, SubagentResult], dict[int, DelegatedTask]]:
+        """Freeze contracts and reserve all accepted calls in model order."""
+        tasks: list[tuple[int, DelegatedTask]] = []
+        ready: dict[int, SubagentResult] = {}
+        rejected_tasks: dict[int, DelegatedTask] = {}
+        seen_identities: set[str] = set()
+        for index, admission in sorted(admissions.items()):
+            try:
+                task = self.create_task(admission.arguments, state)
+                identity = self._contract_identity(task)
+                if identity in seen_identities:
+                    ready[index] = self._rejected_result(
+                        task, "budget_exhausted", "重复的委派合同",
+                    )
+                    rejected_tasks[index] = task
+                    continue
+                seen_identities.add(identity)
+                tasks.append((index, task))
+            except Exception as error:
+                # ToolExecutor already performed schema and permission checks;
+                # this is the remaining contract/binding boundary.
+                ready[index] = SubagentResult(
+                    str(uuid4()), "", "", getattr(state, "task_id", "") if state else "",
+                    "failed", "委派合同非法", (), (), (_safe_error_detail(error),),
+                    UsageRecord(token_accounting="estimated"), "", _utc_now(), _utc_now(),
+                    "invalid_contract", _safe_error_detail(error),
+                )
+        if not tasks:
+            return {}, ready, rejected_tasks
+        task_values = [task for _, task in tasks]
+        accepted: dict[int, DelegatedTask] = {}
+        if state is None:
+            accepted = dict(tasks)
+        else:
+            outcomes = state.reserve_delegation_batch(task_values)
+            for (index, task), outcome in zip(tasks, outcomes):
+                if isinstance(outcome, Exception):
+                    result = self._rejected_result(
+                        task, "budget_exhausted", _safe_error_detail(outcome),
+                    )
+                    ready[index] = result
+                    rejected_tasks[index] = task
+                else:
+                    state.start_delegation(task.delegation_id)
+                    accepted[index] = task
+        return accepted, ready, rejected_tasks
+
+    def run_prepared_batch(
+        self, tasks: dict[int, DelegatedTask], state: AgentState | None = None,
+        *, ready: dict[int, Any] | None = None,
+        rejected_tasks: dict[int, DelegatedTask] | None = None,
+        on_result: Callable[[int, Any], None] | None = None,
+    ) -> dict[int, SubagentResult]:
+        """Run already reserved tasks; only the parent thread settles State."""
+        if not tasks and not ready:
+            return {}
+        entries = [
+            _PreparedDelegation(index, task, Event())
+            for index, task in sorted(tasks.items())
+        ]
+        self._register([(item.task, item.cancel_event, state) for item in entries])
+        scheduler = DelegationScheduler(
+            self, entries,
+            getattr(getattr(state, "delegation_budget", None), "max_concurrency", 1),
+            ready=ready,
+            on_result=(lambda index, result: self._deliver_prepared_result(
+                index, result, tasks, rejected_tasks or {}, state, on_result,
+            ))
+        )
+        return scheduler.run()
+
+    def _deliver_prepared_result(
+        self, index: int, result: Any, tasks: dict[int, DelegatedTask],
+        rejected_tasks: dict[int, DelegatedTask],
+        state: AgentState | None, on_result: Callable[[int, Any], None] | None,
+    ) -> None:
+        if state is not None and index in tasks:
+            state.delegation_result_ready(tasks[index].delegation_id, result)
+        elif state is not None and index in rejected_tasks:
+            try:
+                state.record_delegation_rejection(
+                    rejected_tasks[index],
+                    result, result.error_detail,
+                )
+            except Exception:
+                pass
+        if on_result is not None:
+            on_result(index, result)
+
+    def run(self, arguments: dict[str, Any] | DelegatedTask,
+            state: AgentState | None = None) -> SubagentResult:
+        """Compatibility single-task entry point retained for v0.34–v0.37."""
+        state = state or self.parent_state
+        try:
+            task = arguments if isinstance(arguments, DelegatedTask) else self.create_task(arguments, state)
         except Exception as error:
-            result = SubagentResult(
-                str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
-                "failed", "子代理运行失败", (), (), (_safe_error_detail(error),),
-                UsageRecord(token_accounting="estimated"), task.contract_hash,
-                _utc_now(), _utc_now(), "runner_error",
+            now = _utc_now()
+            return SubagentResult(
+                str(uuid4()), "", "", getattr(state, "task_id", "") if state else "",
+                "failed", "委派合同非法", (), (), (_safe_error_detail(error),),
+                UsageRecord(token_accounting="estimated"), "", now, now, "invalid_contract",
             )
-            if state is not None:
-                state.delegation_result_ready(task.delegation_id, result)
-            self.last_result = result
-            return result
-        finally:
-            with self._lock:
-                self._active_task_id = None
-                self._active_delegation_id = None
-                self._reservation_state = None
-                self._reservation = None
-                self._done_event.set()
+        with self._lock:
+            if self._active:
+                now = _utc_now()
+                result = SubagentResult(
+                    str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
+                    "failed", "当前已有子代理运行", (), (), ("delegation_busy",),
+                    UsageRecord(token_accounting="estimated"), task.contract_hash,
+                    now, now, "delegation_busy",
+                )
+                self.last_result = result
+                return result
+        if state is not None:
+            try:
+                record = state.reserve_delegation(task)
+                state.start_delegation(task.delegation_id)
+            except Exception as error:
+                result = self._rejected_result(task, "budget_exhausted", _safe_error_detail(error))
+                try:
+                    state.record_delegation_rejection(task, result, result.error_detail)
+                except Exception:
+                    pass
+                self.last_result = result
+                return result
+        event = Event()
+        self._register([(task, event, state)])
+        result = self._run_child(task, event)
+        self._child_finished(task, result)
+        if state is not None:
+            state.delegation_result_ready(task.delegation_id, result)
+        return result
 
     delegate = run

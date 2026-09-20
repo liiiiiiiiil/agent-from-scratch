@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.38.0] - Bounded parallel subagents
+
+- Added a dedicated standard-library `DelegationScheduler` for multiple independent read-only `delegate_task` calls in one parent assistant round.
+- Kept parent State, Context, `role=tool` history, and schema 3 tool boundaries in model tool-call order while allowing child workers to finish out of order.
+- Split reserved aggregate budget from running slots, added batch reservation and ordered settlement, and preserved actual usage when a provider reports over-reservation.
+- Added partial-failure delivery, batch budget and duplicate-contract rejection before child LLM calls, broadcast cancellation, and cleanup reporting for all unfinished subagent IDs.
+- Added lesson 38, parallel delegation regression coverage, updated defaults to 3 subagents / 2 concurrent workers / 24 LLM calls / 72 tool calls / 96,000 tokens, and synchronized manuals and navigation.
+
 ## [v0.37.0] - Subagent lifecycle and aggregate budgets
 
 - Added parent-side `DelegationRecord` lifecycle facts with ordered `created → running → result_ready → committed` delivery and independent execution outcomes.

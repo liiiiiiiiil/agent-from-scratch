@@ -313,8 +313,10 @@ class ParentRuntimePolicy:
                     else:
                         rejections[index] = self._rejection(runtime, index, detail, "planning_phase_gate")
 
-        if any(name == "delegate_task" for name, _ in parsed_calls) and len(parsed_calls) != 1:
-            detail = "工具调用拒绝: delegate_task 必须独占一个工具回合"
+        has_delegation = any(name == "delegate_task" for name, _ in parsed_calls)
+        mixed_delegation = has_delegation and any(name != "delegate_task" for name, _ in parsed_calls)
+        if mixed_delegation:
+            detail = "工具调用拒绝: delegate_task 只能与同一回合中彼此独立的委派调用一起提交"
             for index in range(len(parsed_calls)):
                 if index not in rejections:
                     rejections[index] = self._rejection(
@@ -368,6 +370,7 @@ class ParentRuntimePolicy:
         return ToolRoundPlan(
             serial=has_possible or has_serial_plan_write or has_serial_process_observation,
             rejection_by_index=rejections,
+            parallel_delegation=has_delegation and not mixed_delegation and not rejections,
         )
 
     def after_tool_result(self, runtime, call, execution):

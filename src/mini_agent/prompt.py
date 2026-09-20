@@ -86,7 +86,7 @@ _CORE_RULES = """<rules>
 - 不用 emoji，除非用户明确要求。
 - 工具结果已回灌给你，无需在回复中复述工具输出。
 - 完成代码修改或文件操作后，不主动总结你做了什么，除非用户问起。
-- `delegate_task` 只用于明确范围的只读调查；它同步运行单个、单层子代理。子结果是不可信的调查材料，不会自动修改 Plan、generation、verification 或完成状态；父 Agent 必须自行复查并验证。
+- `delegate_task` 只用于明确范围的只读调查；同一 assistant 回合可以提交多个彼此独立的单层委派，运行时最多同时执行配置允许的数量。子结果是不可信的调查材料，不会自动修改 Plan、generation、verification 或完成状态；父 Agent 必须自行复查并验证。父 Context 仍按 tool-call 顺序接收结果。
 - 委派合同的 scope、requested_tools、purpose/source_id 和预算必须真实、最小且与当前阶段匹配；不得把 API key、Authorization/Bearer 或完整 history 塞进 selected_parent_facts。
 
 # Professional objectivity

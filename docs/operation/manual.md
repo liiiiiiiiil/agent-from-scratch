@@ -1,30 +1,30 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.37**（子代理生命周期、协作式取消和父任务聚合预算；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.38**（有界并行子代理、按序结果交付和父任务聚合预算；含此前可靠执行能力）。
 
-## v0.37 子代理生命周期与聚合预算
+## v0.38 有界并行子代理
 
-v0.37 仍只运行一个同步、depth=1、只读子代理，但父任务现在会为每次委派建立 `DelegationRecord`。交付状态按 `created → running → result_ready → committed` 单向推进；`outcome` 独立表示 `completed`、`failed`、`timed_out`、`cancelled` 或 `budget_exhausted`。即使子代理失败、超时或取消，父 `delegate_task` 也会收到一个确定的结构化 `role=tool` 结果。
+v0.38 允许父模型在一个 assistant 回合提交多个彼此独立的 `delegate_task`。子代理仍是同步创建、depth=1、只读实例，但 `DelegationScheduler` 以固定 `MAX_CONCURRENCY` 运行已预留的合同。三个调用 A、B、C 在并发上限 2 时会先运行 A/B，B 完成后可启动 C；完成顺序可以乱序，父 `role=tool` 结果和 durable boundary 仍严格按 A、B、C 提交。
 
-父任务聚合预算在子代理启动前预留，在结果生成后按实际 usage 结算。默认上限是一个子代理、8 次 LLM 调用、24 次只读工具调用和 32,000 个 token；`MAX_CONCURRENCY` 固定为 1。模型可以在 `delegate_task.budget` 中请求更小的单次额度，不能扩大父账本。provider usage 缺失时沿用保守估算并标记来源；实际 usage 超过预留时照实记账并停止后续委派。
+父任务聚合预算在子代理启动前按模型顺序批量预留，在结果生成后按实际 usage 结算。预留额度和运行槽位分开：排队的 `created` 合同占用总子代理数和请求额度，但只有已经运行的 worker 占用并发槽位。默认上限是 3 个子代理、并发 2、24 次 LLM 调用、72 次只读工具调用和 96,000 个 token。模型可以在 `delegate_task.budget` 中请求更小的单次额度，不能扩大父账本；provider usage 缺失时沿用保守估算并标记来源，实际 usage 超过预留时照实记账并阻止后续委派。
 
-Manager 用标准库 `Event` 实现协作式取消。`/new`、`/reset`、EOF、`exit` 和异常退出先请求取消，再有界等待。取消不会强行关闭正在进行的 HTTP/socket 调用；若等待未收束，CLI 保留旧任务、报告 delegation ID 和原因，并跳过 clean 保存与任务切换。
+每个 worker 使用独立的 State、Context、模型绑定、连接、流解析缓冲、预算计数和取消事件，只共享不可变工具定义与只读项目指令快照。一个子代理失败、超时或取消不会取消同批其他任务；父任务整体取消时，Manager 会广播到全部活动和待启动任务。`/new`、`/reset`、EOF、`exit` 和异常退出先请求取消，再有界等待；若仍未收束，CLI 保留旧任务并报告所有未收束的 `subagent_id`。
 
-用户中断子代理调用时，Runtime 先提交该次父工具的取消结果，再停止父循环；不会继续请求父模型。子代理的上下文压缩若需要额外的模型摘要请求，也必须先检查剩余调用数、token 和时间，并限制摘要输出；预算不足时退回裁剪并结束子任务。
+用户中断子代理调用时，Runtime 先提交每个已完成或取消的父工具结果，再停止父循环；不会继续请求父模型。子代理的上下文压缩若需要额外的模型摘要请求，也必须先检查剩余调用数、token 和时间，并限制摘要输出；预算不足时退回裁剪并结束子任务。
 
 活动或 `result_ready` 委派会阻止父任务进入 `done`，也会阻止 safe point。已提交记录及聚合账本可以随普通 State 一起保存和恢复；schema 3 pending tool boundary 只保守保留预留并沿用 v0.33 crash recovery，不自动重跑子代理，也不承诺恢复未提交的原始子结果。
 
-### v0.37 配置
+### v0.38 配置
 
 ```python
-MAX_SUBAGENTS = 1
-MAX_CONCURRENCY = 1
-MAX_TOTAL_LLM_CALLS = 8
-MAX_TOTAL_TOOL_CALLS = 24
-MAX_TOTAL_TOKENS = 32_000
+MAX_SUBAGENTS = 3
+MAX_CONCURRENCY = 2
+MAX_TOTAL_LLM_CALLS = 24
+MAX_TOTAL_TOOL_CALLS = 72
+MAX_TOTAL_TOKENS = 96_000
 ```
 
-`MAX_CONCURRENCY` 在 v0.37 必须保持为 `1`。这些值可以由本地配置覆盖，但不能把并发改成大于 1；多子代理并行属于 v0.38。
+`MAX_CONCURRENCY` 必须是正整数且不大于 `MAX_SUBAGENTS`。这些值可以由本地配置覆盖；核心运行时仍只使用标准库线程和锁。
 
 ## v0.36 多 provider 与统一协议适配
 
@@ -429,11 +429,11 @@ PYTHONPATH=src python -m mini_agent
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
 | `MAX_SESSION_FILE_BYTES` | `16777216` | 单个 session JSON 文件上限；默认 16 MiB |
-| `MAX_SUBAGENTS` | `1` | 一个父任务最多创建的子代理数；v0.37 固定为单个 |
-| `MAX_CONCURRENCY` | `1` | 同时运行的子代理数；v0.37 固定为 `1` |
-| `MAX_TOTAL_LLM_CALLS` | `8` | 父任务委派子代理可消耗的 LLM 调用总数 |
-| `MAX_TOTAL_TOOL_CALLS` | `24` | 父任务委派子代理可消耗的只读工具调用总数 |
-| `MAX_TOTAL_TOKENS` | `32000` | 父任务委派子代理可消耗的输入和输出 token 总数 |
+| `MAX_SUBAGENTS` | `3` | 一个父任务最多创建的子代理数 |
+| `MAX_CONCURRENCY` | `2` | 同时运行的子代理数，必须不大于 `MAX_SUBAGENTS` |
+| `MAX_TOTAL_LLM_CALLS` | `24` | 父任务委派子代理可消耗的 LLM 调用总数 |
+| `MAX_TOTAL_TOOL_CALLS` | `72` | 父任务委派子代理可消耗的只读工具调用总数 |
+| `MAX_TOTAL_TOKENS` | `96000` | 父任务委派子代理可消耗的输入和输出 token 总数 |
 
 进程运行参数是固定实现默认值，不需要写入配置：每任务最多 4 个活动进程；每进程 stdout、stderr 各保留最多 64 KiB；任务边界正常终止和强制结束各等待最多 2 秒。v0.27 的读取和等待额度见本手册开头。
 
@@ -460,7 +460,7 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.37，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.38，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 

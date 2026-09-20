@@ -25,16 +25,14 @@ MAX_REPLAN_REVISIONS = 3
 MAX_NO_PROGRESS_REPLANS = 2
 MAX_STAGNANT_ROUNDS = 3
 
-# v0.37 parent-task delegation budgets.  v0.37 intentionally remains
-# synchronous, so concurrency is fixed at one even though it is represented
-# explicitly in the ledger and snapshots.
-MAX_SUBAGENTS = 1
-MAX_CONCURRENCY = 1
+# v0.38 parent-task delegation budgets.
+MAX_SUBAGENTS = 3
+MAX_CONCURRENCY = 2
 # Descriptive alias kept for callers that namespace the child scheduler limit.
 MAX_SUBAGENT_CONCURRENCY = MAX_CONCURRENCY
-MAX_TOTAL_LLM_CALLS = 8
-MAX_TOTAL_TOOL_CALLS = 24
-MAX_TOTAL_TOKENS = 32_000
+MAX_TOTAL_LLM_CALLS = 24
+MAX_TOTAL_TOOL_CALLS = 72
+MAX_TOTAL_TOKENS = 96_000
 
 # 本地真实配置覆盖（config_local.py 不进 git）
 try:
@@ -60,8 +58,6 @@ def validate_runtime_config() -> None:
         raise ValueError(
             "MAX_ATTEMPT_FINGERPRINTS 必须不小于 MAX_STAGNANT_ROUNDS + 1"
         )
-    if MAX_CONCURRENCY != 1:
-        raise ValueError("v0.37 MAX_CONCURRENCY 固定为 1")
     if MAX_SUBAGENTS < MAX_CONCURRENCY:
         raise ValueError("MAX_SUBAGENTS 不能小于 MAX_CONCURRENCY")
 

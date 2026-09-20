@@ -121,8 +121,8 @@ class DelegationBudget:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"delegation budget.{name} 必须是非负整数")
-        if self.max_subagents <= 0 or self.max_concurrency != 1:
-            raise ValueError("v0.37 delegation budget 必须允许且固定为单并发")
+        if self.max_subagents <= 0 or self.max_concurrency <= 0:
+            raise ValueError("delegation budget 必须允许正数子代理和并发数")
         if self.max_concurrency > self.max_subagents:
             raise ValueError("max_concurrency 不能超过 max_subagents")
 
@@ -1099,58 +1099,99 @@ class AgentState:
 
     def reserve_delegation(self, task: Any) -> DelegationRecord:
         """Atomically create a record and reserve its requested child budget."""
-        requested = getattr(task, "budget", None)
-        if requested is None:
-            raise ValueError("委派合同缺少 budget")
-        request_usage = DelegationUsage(
-            rounds=int(getattr(requested, "max_rounds", 0)),
-            llm_calls=int(getattr(requested, "max_llm_calls", 0)),
-            tool_calls=int(getattr(requested, "max_tool_calls", 0)),
-            input_tokens=0,
-            output_tokens=int(getattr(requested, "max_tokens", 0)),
-        )
+        records = self.reserve_delegation_batch([task])
+        record = records[0]
+        if isinstance(record, Exception):
+            raise record
+        return record
+
+    def reserve_delegation_batch(self, tasks: list[Any]) -> list[DelegationRecord | Exception]:
+        """Reserve a model-ordered batch while holding the State ledger lock.
+
+        A later refusal never reallocates an earlier reservation.  Each item
+        therefore returns either its created record or the exact refusal that
+        belongs to that tool-call index.
+        """
+        if not isinstance(tasks, list):
+            raise TypeError("tasks 必须是 list")
+        if not tasks:
+            return []
+        prepared: list[tuple[Any, DelegationUsage]] = []
+        for task in tasks:
+            requested = getattr(task, "budget", None)
+            if requested is None:
+                prepared.append((task, DelegationUsage()))
+                continue
+            prepared.append((task, DelegationUsage(
+                rounds=int(getattr(requested, "max_rounds", 0)),
+                llm_calls=int(getattr(requested, "max_llm_calls", 0)),
+                tool_calls=int(getattr(requested, "max_tool_calls", 0)),
+                input_tokens=0,
+                output_tokens=int(getattr(requested, "max_tokens", 0)),
+            )))
         with self._lock:
             budget = self.delegation_budget
-            active = [item for item in self.delegation_records
-                      if item.delivery_status != "committed"]
-            if len(self.delegation_records) >= _DELEGATION_RECORD_LIMIT:
-                raise ValueError("委派记录达到有界上限")
-            if budget.created_subagents >= budget.max_subagents:
-                raise ValueError("父任务 max_subagents 预算已耗尽")
-            if len(active) >= budget.max_concurrency:
-                raise ValueError("父任务 max_concurrency 预算已耗尽")
-            if request_usage.llm_calls > budget.remaining_llm_calls:
-                raise ValueError("父任务 max_total_llm_calls 预算不足")
-            if request_usage.tool_calls > budget.remaining_tool_calls:
-                raise ValueError("父任务 max_total_tool_calls 预算不足")
-            if request_usage.tokens > budget.remaining_tokens:
-                raise ValueError("父任务 max_total_tokens 预算不足")
-            record = DelegationRecord(
-                delegation_id=str(getattr(task, "delegation_id", "")),
-                subagent_id=str(getattr(task, "subagent_id", "")),
-                parent_task_id=self.task_id,
-                parent_generation_id=int(getattr(task, "parent_generation_id", self._verification_generation)),
-                task_contract_hash=str(getattr(task, "contract_hash", "")),
-                delivery_status="created", outcome="pending",
-                created_at=_delegation_now(),
-                contract_summary=self._delegation_summary(task),
-                reserved_usage=request_usage,
-            )
-            if not record.delegation_id or not record.subagent_id or not record.task_contract_hash:
-                raise ValueError("委派合同 ID 或 hash 无效")
-            self.delegation_records.append(record)
-            self.delegation_budget = replace(
-                budget,
-                created_subagents=budget.created_subagents + 1,
-                reserved_subagents=budget.reserved_subagents + 1,
-                reserved_llm_calls=budget.reserved_llm_calls + request_usage.llm_calls,
-                reserved_tool_calls=budget.reserved_tool_calls + request_usage.tool_calls,
-                reserved_tokens=budget.reserved_tokens + request_usage.tokens,
-            )
-            self._append_trace_event_locked(
-                "delegation_created", record_type="delegation", record_id=record.delegation_id,
-            )
-            return record
+            seen_batch: set[str] = set()
+            results: list[DelegationRecord | Exception] = []
+            for task, request_usage in prepared:
+                contract_hash = str(getattr(task, "contract_hash", ""))
+                delegation_id = str(getattr(task, "delegation_id", ""))
+                if getattr(task, "budget", None) is None:
+                    results.append(ValueError("委派合同缺少 budget"))
+                    continue
+                if not delegation_id or not getattr(task, "subagent_id", "") or not contract_hash:
+                    results.append(ValueError("委派合同 ID 或 hash 无效"))
+                    continue
+                if delegation_id in {item.delegation_id for item in self.delegation_records}:
+                    results.append(ValueError("delegation_id 已存在"))
+                    continue
+                if contract_hash in seen_batch or any(
+                        item.task_contract_hash == contract_hash
+                        for item in self.delegation_records):
+                    results.append(ValueError("重复的委派合同"))
+                    continue
+                if len(self.delegation_records) >= _DELEGATION_RECORD_LIMIT:
+                    results.append(ValueError("委派记录达到有界上限"))
+                    continue
+                if budget.created_subagents >= budget.max_subagents:
+                    results.append(ValueError("父任务 max_subagents 预算已耗尽"))
+                    continue
+                if request_usage.llm_calls > budget.remaining_llm_calls:
+                    results.append(ValueError("父任务 max_total_llm_calls 预算不足"))
+                    continue
+                if request_usage.tool_calls > budget.remaining_tool_calls:
+                    results.append(ValueError("父任务 max_total_tool_calls 预算不足"))
+                    continue
+                if request_usage.tokens > budget.remaining_tokens:
+                    results.append(ValueError("父任务 max_total_tokens 预算不足"))
+                    continue
+                record = DelegationRecord(
+                    delegation_id=delegation_id,
+                    subagent_id=str(getattr(task, "subagent_id", "")),
+                    parent_task_id=self.task_id,
+                    parent_generation_id=int(getattr(task, "parent_generation_id", self._verification_generation)),
+                    task_contract_hash=contract_hash,
+                    delivery_status="created", outcome="pending",
+                    created_at=_delegation_now(),
+                    contract_summary=self._delegation_summary(task),
+                    reserved_usage=request_usage,
+                )
+                self.delegation_records.append(record)
+                budget = replace(
+                    budget,
+                    created_subagents=budget.created_subagents + 1,
+                    reserved_subagents=budget.reserved_subagents + 1,
+                    reserved_llm_calls=budget.reserved_llm_calls + request_usage.llm_calls,
+                    reserved_tool_calls=budget.reserved_tool_calls + request_usage.tool_calls,
+                    reserved_tokens=budget.reserved_tokens + request_usage.tokens,
+                )
+                seen_batch.add(contract_hash)
+                self._append_trace_event_locked(
+                    "delegation_created", record_type="delegation", record_id=record.delegation_id,
+                )
+                results.append(record)
+            self.delegation_budget = budget
+            return results
 
     def record_delegation_rejection(self, task: Any, result: Any,
                                     reason: str | None = None) -> DelegationRecord:

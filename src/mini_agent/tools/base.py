@@ -758,6 +758,30 @@ class ToolExecutor:
             raise TypeError("需要 ToolAdmission")
         return self._execute_admitted_result(admission, notify=notify)
 
+    def execute_admitted_delegation(self, admission: ToolAdmission, result: Any,
+                                    *, notify: bool = False) -> ExecutionResult:
+        """Render a pre-reserved delegate result through the executor boundary.
+
+        The batch scheduler owns the frozen child contract and worker.  This
+        narrow entry point keeps the parent handler/result shape and callbacks
+        identical to the ordinary ``delegate_task`` path without exposing an
+        internal field in the public tool schema.
+        """
+        if not isinstance(admission, ToolAdmission) or admission.name != "delegate_task":
+            raise TypeError("需要已准入的 delegate_task")
+        if not hasattr(result, "to_json"):
+            raise TypeError("子代理结果必须支持 to_json")
+        started = admission.started
+        content = result.to_json()
+        execution = ExecutionResult(
+            admission.name, admission.arguments, "allowed", True, "succeeded",
+            int((monotonic() - started) * 1000), admission.effect_class,
+            content, _brief(content), reservation=admission.reservation,
+        )
+        if notify:
+            self._notify_result(execution)
+        return execution
+
     def execute(self, name: str, arguments: dict[str, Any]) -> Any:
         """Compatibility API returning the handler/tool-protocol value."""
         # Preserve the historical unknown-tool exception at this API boundary.

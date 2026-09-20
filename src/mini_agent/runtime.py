@@ -54,6 +54,7 @@ class RuntimeDecision:
 class ToolRoundPlan:
     serial: bool
     rejection_by_index: Mapping[int, ExecutionResult] = field(default_factory=dict)
+    parallel_delegation: bool = False
 
 
 @dataclass(frozen=True)
@@ -537,6 +538,8 @@ class AgentRuntime:
         self._start_durable_round(calls)
         if self.output is not None and hasattr(self.output, "tools_start"):
             self.output.tools_start(calls)
+        if plan.parallel_delegation:
+            return self._run_parallel_delegation_round(calls, plan)
         records: list[tuple[ExecutionResult | None, ExecutionResult, str] | None] = [None] * len(calls)
         if plan.serial:
             for index, call in enumerate(calls):
@@ -611,6 +614,120 @@ class AgentRuntime:
                     function.get("arguments", "{}"),
                     content,
                     rendered_execution,
+                )
+            if hasattr(self.output, "close"):
+                self.output.close()
+        if self.session_boundary is not None:
+            self.session_boundary.complete_round(
+                getattr(self.context, "state", None), self.context,
+            )
+        self.executions = [record[1] for record in records]
+        self.tool_calls += len(calls)
+        return tuple(self.executions)
+
+    def _run_parallel_delegation_round(
+        self,
+        calls: tuple[dict[str, Any], ...],
+        plan: ToolRoundPlan,
+    ) -> tuple[ExecutionResult, ...]:
+        """Run a pure delegate batch through its dedicated scheduler.
+
+        Admission and durable ``handler_admitted`` commits stay in model
+        order.  Only the frozen child workers may complete out of order; the
+        callback below is invoked by the scheduler for the next ready prefix.
+        """
+        records: list[tuple[ExecutionResult | None, ExecutionResult, str] | None] = [None] * len(calls)
+        admissions: dict[int, ToolAdmission] = {}
+        immediate: dict[int, tuple[ExecutionResult | None, ExecutionResult, str]] = {}
+        for index, call in enumerate(calls):
+            if self.normalized and call["id"] in self.normalized.errors_by_call_id:
+                immediate[index] = self._run_tool_call(index, call, plan)
+                continue
+            if index in plan.rejection_by_index:
+                immediate[index] = self._run_tool_call(index, call, plan)
+                continue
+            name, arguments = self.parsed_calls[index]
+            admission = self.executor.admit(name, arguments, self.context.state)
+            if isinstance(admission, ToolAdmission):
+                if self.session_boundary is not None:
+                    self.session_boundary.record_admission(
+                        f"r-{self.rounds}-c-{index}", admission,
+                        self.context.state, self.context,
+                    )
+                admissions[index] = admission
+            else:
+                content = self.policy.after_tool_result(self, call, admission)
+                if not isinstance(content, str):
+                    content = format_tool_result(content)
+                immediate[index] = (admission, admission, content)
+
+        manager = getattr(getattr(self.executor, "registry", None), "_delegation_manager", None)
+        if manager is None or not hasattr(manager, "prepare_batch"):
+            # This should only be reachable for a custom registry.  Preserve
+            # the normal executor behavior rather than bypassing a handler.
+            for index, call in enumerate(calls):
+                if index not in immediate:
+                    admission = admissions[index]
+                    execution = self.executor.execute_admitted(admission, notify=False)
+                    content = self.policy.after_tool_result(self, call, execution)
+                    if not isinstance(content, str):
+                        content = format_tool_result(content)
+                    immediate[index] = (execution, execution, content)
+            for index, call in enumerate(calls):
+                record = immediate[index]
+                records[index] = record
+                self._commit_one(index, call, *record)
+        else:
+            tasks, ready, rejected_tasks = manager.prepare_batch(admissions, self.context.state)
+
+            def commit_ready(index: int, result: Any) -> None:
+                if isinstance(result, tuple) and len(result) == 3:
+                    record = result
+                elif index in admissions:
+                    admission = admissions[index]
+                    execution = self.executor.execute_admitted_delegation(admission, result)
+                    call = calls[index]
+                    content = self.policy.after_tool_result(self, call, execution)
+                    if not isinstance(content, str):
+                        content = format_tool_result(content)
+                    record = (execution, execution, content)
+                else:
+                    # A contract failure happened after ToolExecutor's normal
+                    # admission boundary.  Keep a unique bounded tool result,
+                    # but do not claim that its handler ran.
+                    name, arguments = self.parsed_calls[index]
+                    content = result.to_json() if hasattr(result, "to_json") else format_tool_result(result)
+                    execution = ExecutionResult(
+                        name, arguments, "not_checked", False, "invalid", 0,
+                        self.effects[index], content, content[:200],
+                        error_kind=getattr(result, "error_kind", "invalid_contract"),
+                    )
+                    content = self.policy.after_tool_result(self, calls[index], execution)
+                    record = (None, execution, format_tool_result(content))
+                records[index] = record
+                self._commit_one(index, calls[index], *record)
+
+            # Immediate results are safe to deliver only through the same
+            # ordered prefix.  The scheduler includes them in its ready map.
+            for index, record in immediate.items():
+                records[index] = record
+            all_ready = dict(ready)
+            all_ready.update(immediate)
+            manager.run_prepared_batch(
+                tasks, self.context.state, ready=all_ready,
+                rejected_tasks=rejected_tasks,
+                on_result=commit_ready,
+            )
+            if any(record is None for record in records):
+                raise RuntimeError("委派调度器未返回对应结果")
+
+        if self.output is not None and hasattr(self.output, "tool_result"):
+            for call, record in zip(calls, records):
+                actual, display, content = record
+                function = call.get("function", {})
+                self.output.tool_result(
+                    function.get("name", "<missing>"),
+                    function.get("arguments", "{}"), content, display,
                 )
             if hasattr(self.output, "close"):
                 self.output.close()

@@ -26,7 +26,7 @@ def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> To
 
     return Tool(
         name="delegate_task",
-        description="同步委派一个单层、只读的调查子代理，并返回结构化 JSON 发现",
+        description="委派一个单层、只读的调查子代理；同一回合可提交多个相互独立的委派，结果按 tool-call 顺序返回结构化 JSON 发现",
         parameters={
             "type": "object",
             "additionalProperties": False,

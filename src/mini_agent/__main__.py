@@ -285,21 +285,27 @@ def main():
         state.sync_processes(process_manager.sync_processes(task_id))
 
     def cleanup_delegation_boundary() -> bool:
-        """Cancel the one synchronous child before a task boundary or clean save."""
+        """Cancel every child before a task boundary or clean save."""
         manager = getattr(run_registry, "_delegation_manager", None)
-        if manager is None or not manager.active_info().get("active"):
-            return True
-        task_id = getattr(state, "task_id", "") or None
-        manager.cancel(task_id, "task_boundary")
-        if manager.wait(2.0):
-            return True
-        info = manager.active_info()
-        cli_notice(
-            "子代理取消未在限定时间内收束；旧任务已保留，"
-            f"delegation_id={info.get('delegation_id') or '-'}；"
-            f"原因={_single_line_notice(info.get('cancel_reason') or 'timeout', 300)}。"
-        )
-        return False
+        if manager is not None and manager.active_info().get("active"):
+            task_id = getattr(state, "task_id", "") or None
+            manager.cancel(task_id, "task_boundary")
+            if not manager.wait(2.0):
+                info = manager.active_info()
+                cli_notice(
+                    "子代理取消未在限定时间内收束；旧任务已保留，"
+                    f"subagent_id={','.join(info.get('subagent_ids') or ['-'])}；"
+                    f"原因={_single_line_notice(info.get('cancel_reason') or 'timeout', 300)}。"
+                )
+                return False
+        pending = getattr(state, "active_delegation_records", [])
+        if pending:
+            cli_notice(
+                "委派结果尚未提交；旧任务已保留，delegation_id="
+                + ",".join(item.delegation_id for item in pending)
+            )
+            return False
+        return True
 
     def save_session(handoff_status="active", manual=False):
         """Save only a complete safe point; failed saves leave State untouched."""
