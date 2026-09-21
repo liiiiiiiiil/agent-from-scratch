@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.41.0] - Relevant memory retrieval
+
+- Added standard-library lexical `MemoryRetriever`, validated read-only snapshots, Unicode normalization, Chinese fragments, weighted fields, phrase scoring, deterministic ordering, bounded snippets, and conservative `source_status="unverified"` results.
+- Added parent-only read-only `search_memories(query, limit)` with a complete 16 KiB JSON result limit and default-allow permission; Subagents still cannot access Memory.
+- Added per-request parent Context retrieval from the task and latest user message, with at most four candidates and 2400 characters, an independent memory token bucket, ephemeral untrusted system material, and no State/history/session/verification persistence.
+- Added retrieval disable configuration, current-workspace rebinding on resume, observable bounded failure degradation with retry-on-next-request, lesson 41, and synchronized manuals, plans, README files, and version metadata.
+
 ## [v0.40.0] - Lightweight persistent workspace memory
 
 - Added a standard-library schema 1 `MemoryStore` with workspace SHA-256 isolation, bounded CRUD records, private permissions, exclusive locks, atomic replacement, directory sync, and explicit uncertain-commit halting.

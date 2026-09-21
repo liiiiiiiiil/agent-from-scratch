@@ -5,6 +5,7 @@ BASE_URL = "https://gateway.example.invalid/v1"
 API_KEY = "sk-PLACEHOLDER_API_KEY"
 MODEL = "model-PLACEHOLDER"
 MEMORY_DIR = "~/.mini_agent/memory"
+MEMORY_RETRIEVAL_ENABLED = True
 # v0.36 provider/profile mappings.  Empty mappings intentionally select the
 # legacy BASE_URL/API_KEY/MODEL compatibility path above.
 PROVIDERS = {}
@@ -46,6 +47,8 @@ def validate_runtime_config() -> None:
     """Validate bounded runtime budgets after local configuration overrides."""
     if not isinstance(MEMORY_DIR, str) or not MEMORY_DIR.strip():
         raise ValueError("MEMORY_DIR 必须是非空字符串")
+    if not isinstance(MEMORY_RETRIEVAL_ENABLED, bool):
+        raise ValueError("MEMORY_RETRIEVAL_ENABLED 必须是 bool")
     for name in (
         "MAX_ATTEMPT_FINGERPRINTS", "MAX_REPLAN_REVISIONS",
         "MAX_NO_PROGRESS_REPLANS", "MAX_STAGNANT_ROUNDS", "MAX_SUBAGENTS",

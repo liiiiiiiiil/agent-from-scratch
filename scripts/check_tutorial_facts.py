@@ -51,6 +51,8 @@ EXPECTED = {
     "37-subagent-lifecycle-budget.md": ("v0.37", "v0.36..v0.37"),
     "38-parallel-delegation.md": ("v0.38", "v0.37..v0.38"),
     "39-durable-delegation.md": ("v0.39", "v0.38..v0.39"),
+    "40-persistent-memory.md": ("v0.40", "v0.39..v0.40"),
+    "41-memory-retrieval.md": ("v0.41", "v0.40..v0.41"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),
@@ -82,13 +84,21 @@ def check_tutorial(name: str, expected: tuple[str, str | None]) -> list[str]:
     errors = [f"缺少或错误的版本声明：{item}" for item in required if item not in metadata]
 
     declared_tags = {tag for tag, _ in required}
+    missing_tags = {
+        tag for tag in declared_tags
+        if not git_exists(f"refs/tags/{tag}^{{commit}}")
+    }
+    for tag in sorted(missing_tags):
+        errors.append(f"tag 不存在：{tag}（请由用户手动创建后重跑）")
     for tag in declared_tags:
-        if not git_exists(f"refs/tags/{tag}^{{commit}}"):
+        if tag not in missing_tags and not git_exists(f"refs/tags/{tag}^{{commit}}"):
             errors.append(f"tag 不存在：{tag}")
     for _, baseline in required:
         if baseline:
             left, right = baseline.split("..", 1)
-            if not git_exists(f"refs/tags/{left}^{{commit}}") or not git_exists(f"refs/tags/{right}^{{commit}}"):
+            if (not git_exists(f"refs/tags/{left}^{{commit}}")
+                    or (right not in missing_tags
+                        and not git_exists(f"refs/tags/{right}^{{commit}}"))):
                 errors.append(f"diff 基线不存在：{baseline}")
 
     links = list(LINK_RE.finditer(text))
@@ -102,7 +112,7 @@ def check_tutorial(name: str, expected: tuple[str, str | None]) -> list[str]:
         tag, path = match.group("tag"), match.group("path")
         if tag not in declared_tags:
             errors.append(f"源码链接 tag 未在本课声明：{tag}/{path}")
-        if not git_exists(f"{tag}:{path}"):
+        if tag not in missing_tags and not git_exists(f"{tag}:{path}"):
             errors.append(f"tag 中路径不存在：{tag}:{path}")
     return errors
 

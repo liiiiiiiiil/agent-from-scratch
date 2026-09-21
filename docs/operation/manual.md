@@ -1,6 +1,22 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.40**（轻量持久 Memory；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.41**（相关记忆检索与有界 Context；含此前可靠执行能力）。
+
+## v0.41 相关记忆检索
+
+v0.41 在 v0.40 的 Memory 文件之上增加两条只读路径。父 Agent 可以显式调用 `search_memories(query, limit=5)`，默认最多返回 5 条、最多允许 10 条；显式工具会拒绝纯空白 `query`，底层检索 API 则把空查询解释为空集合，不会退化为列出全部记忆。结果包含 `memory_id`、标题、240 字符以内片段、来源、更新时间、分数和 `matched_fields`，并始终标记 `source_status="unverified"`。来源字符串不会被当作路径访问，也不会被宣称为当前文件证据；需要正文时继续调用 `read_memory(memory_id)`。
+
+父 Runtime 默认在每次请求 LLM 前，以 `AgentState.task` 和 history 中最近一条 `role=user` 文本重新检索。候选最多 4 条、资料区最多 2400 字符，按标题、标签、来源、正文的词法命中加权并稳定排序；低排名候选按完整条目丢弃。候选只存在于本次 prepared Context 的临时 system 资料区，明确标记为不可信，不进入 history、State、Plan、Trace、verification evidence 或 session。子代理既没有 Memory 工具，也没有自动候选。
+
+自动检索默认开启。复制 `config_example.py` 时可在不提交的 `config_local.py` 中设置：
+
+```python
+MEMORY_RETRIEVAL_ENABLED = False
+```
+
+关闭后不读取 Memory 文件，也不生成资料区；`ContextManager` 没有绑定 retriever 时同样保持旧消息形状。每次准备消息都重新读取快照，因此其他进程刚提交或修订的记忆会在下一次 LLM 请求中生效。
+
+Memory 文件缺失表示空集合；如果文件损坏、schema 未知或读取失败，当前 Context 会加入一条有界的“记忆检索不可用”提示，并在下一次请求重试。错误不会冒泡成 LLM 顶层异常，也不会修改 Memory、State、history 或 session。检索候选不会绕过 PermissionGate、Plan 或验证边界。
 
 ## v0.40 轻量持久 Memory
 
@@ -14,7 +30,7 @@ Memory 是按规范化工作区隔离的长期资料集合，与当前任务的 
 
 记忆修改工具仍是 `effect_class=possible`，所以会预留 generation、使旧 verification 失效，并受只读规划和 crash recovery gate 约束。开启 `/save` 后，相关工具调用会像其他调用一样先提交 `handler_admitted`，再提交 State、对应 `role=tool` 和 boundary；如果 Memory 文件已写入但父结果未提交，恢复不会重放 handler，而是把调用标为不确定事实。Memory 文件不参与 session 回滚。
 
-Memory 不加入子代理固定白名单；子代理仍只能使用 `calculate`、`read_file`、`list_dir`、`grep`。State 摘要和普通终端输出不展开正文，但工具参数仍属于当前模型 history；开启 `/save` 后，单次记忆正文可能随 Context 进入 session。因此本版只是不复制整份 Memory 快照，不承诺 session 绝无某次记忆正文。相关性检索和自动选择上下文候选属于 v0.41，References 属于 v0.42。
+Memory 不加入子代理固定白名单；子代理仍只能使用 `calculate`、`read_file`、`list_dir`、`grep`。State 摘要和普通终端输出不展开正文，但工具参数仍属于当前模型 history；开启 `/save` 后，单次记忆正文可能随 Context 进入 session。因此本版只是不复制整份 Memory 快照，不承诺 session 绝无某次记忆正文。References 属于 v0.42。
 
 ### v0.40 配置
 
@@ -492,11 +508,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.40，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.41，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
+
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。详情见[第 41 课](../tutorials/41-memory-retrieval.md)和[上下文架构说明](context-architecture.md)。
 
 ### 3.1 上下文架构
 

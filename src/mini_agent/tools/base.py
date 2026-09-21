@@ -92,11 +92,13 @@ class ExecutionResult:
             return format_tool_result(self.output, max_chars=12 * 1024)
         if self.tool in {
             "list_memories", "read_memory", "remember", "revise_memory", "forget_memory",
+            "search_memories",
         }:
             # Memory handlers already serialize a bounded JSON document.  Do
             # not apply the generic 4 KiB text truncation, which could turn a
             # valid list response into invalid JSON.
-            return format_tool_result(self.output, max_chars=64 * 1024)
+            limit = 16 * 1024 if self.tool == "search_memories" else 64 * 1024
+            return format_tool_result(self.output, max_chars=limit)
         return format_tool_result(self.output)
 
 
@@ -525,7 +527,7 @@ class ToolExecutor:
             output = f"{output}\n{_checkpoint_notice(checkpoint)}"
         excerpt = (
             _memory_excerpt(output)
-            if name in {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory"}
+            if name in {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory", "search_memories"}
             else _brief(output)
         )
         exit_code = None

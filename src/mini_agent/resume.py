@@ -26,6 +26,8 @@ from mini_agent.state import AgentState
 from mini_agent.tools import create_registry
 from mini_agent.tools.base import ToolExecutor
 from mini_agent.providers.catalog import ProviderCatalog, load_provider_catalog
+from mini_agent.config import MEMORY_RETRIEVAL_ENABLED
+from mini_agent.retrieval import MemoryRetriever
 
 
 class ResumeError(SessionError):
@@ -580,6 +582,10 @@ def prepare_resume(store: SessionStore, session_id: str,
         state, workspace_root=root, process_manager=process_manager,
         provider_catalog=provider_catalog,
     )
+    # Do not restore candidates from the session.  Bind a fresh parent-side
+    # retriever to the current workspace store for the next LLM request.
+    context.memory_retriever = MemoryRetriever(registry._memory_store)
+    context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
     permission_gate = PermissionGate()
     tool_executor = ToolExecutor(
         registry, gate=permission_gate, on_result=state.record_tool,

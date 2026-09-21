@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.40` are complete (lesson 40: lightweight persistent memory), beginning Stage 11. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.41` are complete (lesson 41: relevant memory retrieval), completing the retrieval slice of Stage 11. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -78,6 +78,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">Durable delegation delivery</a></td><td>Persist validated child results, deliver them in parent call order atomically, and recover them across processes.</td></tr>
     <tr><th colspan="3"><a id="stage-11"></a>Stage 11 · Workspace memory and references</th></tr>
     <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">Lightweight persistent memory</a></td><td>Let the parent Agent explicitly view, save, revise, and forget workspace memory with pagination, workspace-external storage, uncertain-commit inspection, permission, revision, atomic storage, and recovery boundaries.</td></tr>
+    <tr><td><strong>v0.41</strong></td><td><a href="./docs/tutorials/41-memory-retrieval.md">Relevant memory retrieval</a></td><td>Use standard-library lexical retrieval to recover a few relevant candidates and inject untrusted summaries into the parent Context within budget; explicit and automatic retrieval leave Memory, State, and sessions unchanged.</td></tr>
   </tbody>
 </table>
 

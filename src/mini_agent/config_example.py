@@ -5,6 +5,7 @@ BASE_URL = "https://gateway.example.invalid/v1"
 API_KEY = "sk-PLACEHOLDER_API_KEY"
 MODEL = "model-PLACEHOLDER"
 MEMORY_DIR = "~/.mini_agent/memory"
+MEMORY_RETRIEVAL_ENABLED = True
 
 # 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。
 # 下面的值全部是占位值；真实值只应写入不进 git 的 config_local.py。

@@ -8,12 +8,33 @@
 
 ```text
 view = Runtime Notice? + 只读底座(System Prompt) + [Structured State](语义轨道，含 Repair Loop 阶段)
-     + [Historical Summary]? + Task + 历史轮次(协议轨道)     —— 再过一遍预算闸门
+     + [Relevant Memory — Untrusted Reference]? + [Historical Summary]? + Task + 历史轮次(协议轨道)
+     —— 再过一遍预算闸门
 ```
 
 - **一个只读底座**：`protected_messages`，启动时构建一次，永不变化。
 - **两条写入轨道**：同一次工具执行被记录两次——`history` 里的协议原文（给 LLM 直接读，可被裁剪）和 `AgentState` 里的语义事实（免疫裁剪，每轮重渲染）。
 - **一个反馈环**：视图超预算时，改写的是视图本身（trim → compact），`history` 本体永远完整。
+
+v0.41 新增的 Memory 不是第四条持久轨道，而是每轮临时生成的资料视图：
+
+```text
+[工作区外部的 schema 1 JSON]
+            │ snapshot()（只读校验、深拷贝；不建目录、不加写锁）
+            ▼
+MemoryRetriever（NFKC/casefold、词元/中文双字片段、字段加权、稳定排序）
+            │ 最多 4 条、最多 2400 字符；失败只产生有界降级提示
+            ▼
+[Relevant Memory — Untrusted Reference]（单个临时 system 消息）
+            │ 插在 [Structured State] 后、首条 user 任务前
+            ▼
+不回写 history、AgentState、session、Plan、Trace 或 verification_evidence
+```
+
+父 Runtime 在每次 `prepare_messages()` 重新读取当前快照。查询只由稳定的
+`AgentState.task` 和完整本地 history 中最近一条 `role=user` 文本组成；assistant 输出、
+tool result、历史摘要和 Memory 正文不会反向扩大查询。子 Runtime 不绑定 retriever，
+所以既没有 Memory 工具，也没有自动候选。
 
 ## 1. 主图：一轮的上下文生产线（闭环）
 
@@ -37,6 +58,7 @@ agent_loop 每一轮（agent.py:141，上限 MAX_ITERATIONS=50）
 │  │    view = [Runtime Notice]?        一次性提醒，插最顶，发出即消费
 │  │         + System Prompt            来自 protected_messages（拷贝）
 │  │         + [Structured State]       来自 state.snapshot()，本轮重新渲染
+│  │         + [Relevant Memory]?        基础 trim/compact 后单次快照检索，再适配候选预算
 │  │         + [Historical Summary]?    来自 compact()，触发过压缩才存在
 │  │         + Task                     首条 user 消息
 │  │         + 历史轮次                  assistant + 其 tool result，原子成组
@@ -126,7 +148,7 @@ Repair Loop 的阶段约束也在这里重新渲染：`diagnosis_required` 要�
 window = CONTEXT_WINDOW
 ├─ reserve   15%              输出预留，不发送
 └─ input_limit 85%
-   ├─ system / task / state   受保护区：裁剪永不触碰
+   ├─ system / task / state / memory   受保护区：候选先按整体丢弃，裁剪永不拆半条
    └─ history / tool_result   可压缩区：上限约 window × 45%（history_ratio）
 ```
 
@@ -148,7 +170,10 @@ window = CONTEXT_WINDOW
 6. Trace & Replay 读取独立的 `state.snapshot()` 视图，不进入 LLM 消息，不调用执行链，也不改变上下文或 State。
 7. 可观测性与结果回调都是纯观察者，异常被吞（base.py:128、context.py:281），不破坏执行。
 
-8. v0.33 的 `crash_recoveries`、`crash_issues` 和 `crash_decisions` 是不可裁剪的恢复事实；Structured State 只显示有界摘要，包含 issue ID、工具、分类、准入状态、公开原因和下一动作，不显示原始参数、shell 命令或 stdin。未结算 issue 存在时只允许获准的无副作用观察，所有 issue 结算后仍需新计划和独立 verification。
+8. v0.41 的 Memory 资料区遵循“基础 Context trim/compact → 单次检索 → 候选适配 → 最终 trim”，
+   每个请求只使用一个 Memory 快照；它只在 prepared view 中存在。`ContextStats.memory` 单独计数，
+   `memory_retrieved` / `memory_retrieval_failed` 每次 prepare 至多一次，只记录有界元数据，不记录正文或真实存储路径。
+9. v0.33 的 `crash_recoveries`、`crash_issues` 和 `crash_decisions` 是不可裁剪的恢复事实；Structured State 只显示有界摘要，包含 issue ID、工具、分类、准入状态、公开原因和下一动作，不显示原始参数、shell 命令或 stdin。未结算 issue 存在时只允许获准的无副作用观察，所有 issue 结算后仍需新计划和独立 verification。
 
 ## 6. 代码速查
 
@@ -157,6 +182,7 @@ window = CONTEXT_WINDOW
 | System Prompt | `prompt.py:112` + `instructions.py:48`，`__main__.py:30` 组装 | 进程级一次 |
 | `[Runtime Notice]` | `context.py:414`（`set_runtime_notice` 设置） | 单次请求 |
 | `[Structured State]` | `context.py:312 _render_state` ← `state.py:171 snapshot` | 每轮 |
+| `[Relevant Memory — Untrusted Reference]` | `retrieval.py` → `context.py:prepare_messages()` | 父侧每次请求；临时视图 |
 | `[Historical Summary]` | `context.py:360 compact` ← `agent.py:136 summarize_messages` | 压缩后增量 |
 | Task / 历史轮次 | `__main__.py:45`、`agent.py:236,304` 追加 | 事件驱动 |
 | 语义事实 | `agent.py` 提交 `ExecutionResult` → `state.py record_execution_result` | 每次结构化工具执行 |

@@ -253,6 +253,16 @@ class MemoryStore:
         _json_bytes({"schema_version": SCHEMA_VERSION, "memories": result})
         return result
 
+    def snapshot(self) -> list[dict[str, Any]]:
+        """Return a validated, detached read-only view of all records.
+
+        This intentionally does not create the memory directory or acquire the
+        writer lock.  A retrieval pass is observational only; the next pass
+        reads the file again so another process's committed update becomes
+        visible without a cache invalidation protocol.
+        """
+        return deepcopy(self._read_records())
+
     def _acquire_lock(self) -> int:
         deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
         while True:

@@ -1,6 +1,6 @@
 # 第 40 课：让 Agent 明确保存和修订工作区记忆
 
-上一课：[把子代理结果安全地交给父 Agent](39-durable-delegation.md) · [教程总览](README.md) · 下一课：阶段十一（相关性检索，规划中）
+上一课：[把子代理结果安全地交给父 Agent](39-durable-delegation.md) · [教程总览](README.md) · 下一课：[相关记忆检索](41-memory-retrieval.md)
 
 > 代码快照：`v0.40` · 相邻差异：`v0.39..v0.40` · 命令环境：Bash/zsh
 >
@@ -151,7 +151,7 @@ PYTHONPATH=src python -m pytest -q tests/test_memory_v040.py
 
 ## 本版特性、下一课与代码索引
 
-本版完成了跨任务、跨进程的显式工作区记忆 CRUD，以及权限、并发、容量和恢复边界。下一课 v0.41 才会讨论相关性检索和有限的上下文候选选择；v0.42 再讨论具名本地 References。
+本版完成了跨任务、跨进程的显式工作区记忆 CRUD，以及权限、并发、容量和恢复边界。下一课是[第 41 课：相关记忆检索](41-memory-retrieval.md)；v0.42 再讨论具名本地 References。
 
 - [`memory.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.40/src/mini_agent/memory.py)：schema、路径键、锁和原子提交。
 - [`tools/memory.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.40/src/mini_agent/tools/memory.py)：五个父 Agent 工具和有界 JSON 结果。

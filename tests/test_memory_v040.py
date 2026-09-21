@@ -214,7 +214,7 @@ def test_registry_parent_only_memory_tools_and_permissions(tmp_path: Path):
     state = AgentState()
     registry = create_registry(state, workspace_root=tmp_path, memory_store=_store(tmp_path))
     names = {tool.name for tool in registry.list_tools()}
-    assert {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory"} <= names
+    assert {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory", "search_memories"} <= names
     assert {tool.name for tool in registry.filtered_for_subagent({"list_memories", "read_memory"}).list_tools()} == set()
     assert registry.get("list_memories").effect_class == "none"
     assert registry.get("remember").effect_class == "possible"
@@ -222,6 +222,7 @@ def test_registry_parent_only_memory_tools_and_permissions(tmp_path: Path):
     gate = PermissionGate(PermissionPolicy())
     assert gate.policy.check("list_memories") == ALLOW
     assert gate.policy.check("read_memory") == ALLOW
+    assert gate.policy.check("search_memories") == ALLOW
     assert gate.policy.check("remember") != ALLOW
     assert "secret body" in gate._prompt_arguments(
         "remember", {"title": "t", "body": "secret body", "tags": [], "source": "user"}

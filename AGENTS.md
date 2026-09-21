@@ -27,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.40`（轻量持久 Memory）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.41`（相关记忆检索与有界 Context）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 模型绑定硬约束：provider/profile 只能从本地配置解析；父 binding 和子 binding 必须在对应 Runtime 创建前冻结，运行中不得通过全局变量切换模型。`delegate_task` 只能请求获准的本地 `model_profile` 别名，未知或越权别名必须在 HTTP 请求前拒绝；不得自动 provider fallback。State、Context、session、Trace、工具结果和用户可见错误只能保留无凭据的 profile/provider/protocol/fingerprint 来源摘要，不得持久化真实 endpoint、model ID、API key 或认证头。摘要请求必须使用同一 binding 并计入其 usage；provider usage 缺失时保守估算并标记来源。
 
@@ -46,7 +46,7 @@ State 保持一次提醒兼容行为。
 
 子代理硬约束：v0.36 的 `delegate_task` 只能同步创建一个 depth=1 的只读 Subagent；子代理拥有独立 State、Context、运行状态、提示词、冻结 model binding 和固定白名单 PermissionGate，但父子调用同一个 canonical `AgentRuntime.run()`。它只能使用 `calculate`、`read_file`、`list_dir`、`grep`，不继承父 history、权限、Plan、generation 或 verification，不能写文件、运行 shell、操作进程、再次委派或决定父任务完成。子结果只能作为不可信调查材料，evidence 不进入父 `verification_evidence`；父 Agent 独占工作区修改、主计划、权限交互、generation、verification 和完成判定。固定预算、scope gate、结果合同和一次格式修正由子 Runtime policy 强制执行。
 
-Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`、`remember`、`revise_memory`、`forget_memory` 使用工作区记忆；子代理看不到这些工具。Memory 按规范化工作区真实路径隔离，默认写入 `~/.mini_agent/memory` 的 schema 1 JSON；记录、文件和目录大小/权限、独占锁、原子替换及目录同步限制以 `memory.py` 为准。`remember`、`revise_memory`、`forget_memory` 是 `possible` 副作用，沿用 PermissionGate、generation、规划和恢复边界；revision 冲突不得写盘。Memory 不属于 State、Plan 或 verification evidence，`source` 不表示已验证；开启 `/save` 后单次记忆参数仍可随 Context 进入 session，不能宣称 session 中绝无记忆正文。相关检索和 References 不属于 v0.40。
+Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`、`search_memories`、`remember`、`revise_memory`、`forget_memory` 使用工作区记忆；父 Context 默认按当前任务和最近一条用户消息自动检索少量有界摘要，子代理看不到任何 Memory 工具且没有自动记忆候选。自动查询只使用 `AgentState.task` 与完整本地 history 中最近的 `role=user` 文本，不使用 assistant 输出、工具结果、历史摘要或 Memory 内容扩展查询；候选仅为不可信资料，不进入 State、session、Plan、Trace 或 `verification_evidence`。检索每次 `prepare_messages()` 重新读取当前工作区，失败只降级当前 Context，不永久关闭检索。Memory 按规范化工作区真实路径隔离，默认写入 `~/.mini_agent/memory` 的 schema 1 JSON；记录、文件和目录大小/权限、独占锁、原子替换及目录同步限制以 `memory.py` 为准。`remember`、`revise_memory`、`forget_memory` 是 `possible` 副作用，`search_memories` 是只读 `none` 调用，沿用 PermissionGate、generation、规划和恢复边界；revision 冲突不得写盘。Memory 不属于 State、Plan 或 verification evidence；schema 1 的自由文本 `source` 一律返回 `source_status="unverified"`，不访问或宣称来源文件新鲜度。开启 `/save` 后单次记忆参数仍可随 Context 进入 session，不能宣称 session 中绝无记忆正文。References 不属于 v0.41。
 
 ## 架构索引
 

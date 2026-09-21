@@ -40,6 +40,7 @@ PERMISSION_RULES = {
     "grep": ALLOW,  # 只读，放行
     "list_memories": ALLOW,
     "read_memory": ALLOW,
+    "search_memories": ALLOW,
     "remember": ASK,
     "revise_memory": ASK,
     "forget_memory": ASK,

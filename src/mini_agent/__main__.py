@@ -13,7 +13,7 @@ from mini_agent.agent import LLMResponseError, agent_loop
 from mini_agent.context import ContextBudget, ContextManager
 from mini_agent.instructions import InstructionLoader
 from mini_agent.input_session import InputSession
-from mini_agent.config import OUTPUT_MODE
+from mini_agent.config import MEMORY_RETRIEVAL_ENABLED, OUTPUT_MODE
 from mini_agent.prompt import build_system_prompt
 from mini_agent.state import AgentState, PlanRejected
 from mini_agent.tools import create_registry, registry
@@ -22,6 +22,7 @@ from mini_agent.output import TerminalOutput
 from mini_agent.trace import TraceQueryError, build_trace, render_trace
 from mini_agent.processes import ProcessManager
 from mini_agent.providers.catalog import ProviderCatalog, load_provider_catalog
+from mini_agent.retrieval import MemoryRetriever
 from mini_agent.resume import ResumeError, prepare_resume
 from mini_agent.session import (
     DurableToolBoundary, SessionCommitUncertainError, SessionError, SessionStore,
@@ -251,6 +252,10 @@ def main():
         context.model_binding = parent_binding
         context.usage_meter = parent_binding.usage_meter
         context.protected_messages = protected_messages
+        # Bind one parent-side retriever to the current workspace store.  The
+        # store is still read afresh by ContextManager before every request.
+        context.memory_retriever = MemoryRetriever(run_registry._memory_store)
+        context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
         # Kept as a compatibility observer for callers using ToolExecutor.execute().
         # The agent loop's structured path suppresses this legacy callback.
         tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
