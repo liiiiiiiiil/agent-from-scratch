@@ -129,7 +129,12 @@ class PermissionPolicy:
         """
         merged = self._rules + self._approved
         for rule in reversed(merged):
-            if fnmatch.fnmatch(tool_name, rule["permission"]) and fnmatch.fnmatch(pattern, rule["pattern"]):
+            pattern_matches = (
+                pattern == rule["pattern"]
+                if rule.get("literal_pattern")
+                else fnmatch.fnmatch(pattern, rule["pattern"])
+            )
+            if fnmatch.fnmatch(tool_name, rule["permission"]) and pattern_matches:
                 return rule["action"]
         return ASK
 
@@ -140,6 +145,11 @@ class PermissionPolicy:
         """
         self._approved.append({
             "permission": tool_name, "pattern": pattern, "action": ALLOW,
+            # Reference approvals name one alias-relative target.  A literal
+            # '*' or '[' in that target must not widen an ``always`` decision
+            # into a glob rule.  Other tools retain the established pattern
+            # approval behavior.
+            "literal_pattern": tool_name in {"search_reference", "read_reference"},
         })
 
 

@@ -282,6 +282,52 @@ def test_one_prepare_reads_one_snapshot_and_does_not_compact_for_memory():
         assert prepared[index + 1].get("role") == "tool"
 
 
+def test_runtime_notice_is_counted_once_when_fitting_memory():
+    class FixedRetriever:
+        def search_with_total(self, query, limit=4):
+            return MemorySearchResult(
+                query=query,
+                memories=({
+                    "memory_id": "memory-1", "title": "relevant",
+                    "snippet": "small", "source": "test",
+                    "source_status": "unverified",
+                    "updated_at": "2026-01-01T00:00:00Z", "score": 10,
+                    "matched_fields": ["body"],
+                },),
+                total_matches=1,
+            )
+
+    context = ContextManager(
+        AgentState(task="task"), [{"role": "user", "content": "task"}],
+        budget=ContextBudget(window=210, output_reserve_ratio=0, history_ratio=0.5),
+        memory_retriever=FixedRetriever(), observability=False,
+    )
+    context.set_runtime_notice("continue with the next tool call")
+
+    prepared = context.prepare_messages()
+
+    assert sum("[Runtime Notice]" in str(item.get("content")) for item in prepared) == 1
+    assert any(MEMORY_CONTEXT_PREFIX in str(item.get("content")) for item in prepared)
+
+
+def test_search_memories_is_allowed_during_crash_investigation():
+    state = AgentState()
+    state.begin_task("recover")
+    state.begin_crash_recovery(
+        "source-session", 1, 1, "a" * 64, 0, [{
+            "invocation_id": "call-1", "tool": "remember",
+            "effect_class": "possible", "handler_admitted": True,
+            "attempt_id": "a-1", "generation_id": 1, "pre_generation_id": 0,
+            "permission": "allowed", "arguments_summary": {},
+            "arguments_hash": "b" * 64,
+        }],
+    )
+    issue = state.crash_issues[0]
+    state.resolve_crash_issue(issue.issue_id, "investigate", "search current memory")
+
+    assert state.crash_recovery_gate("search_memories", {"query": "task"}, "none") is None
+
+
 def test_memory_failure_degrades_current_view_and_retries(tmp_path: Path):
     store = _store(tmp_path)
     state = AgentState(task="task")

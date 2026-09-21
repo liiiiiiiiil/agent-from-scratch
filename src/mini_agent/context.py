@@ -1369,6 +1369,7 @@ class ContextManager:
         notice = self._runtime_notice
 
         def with_notice(source: list[Message]) -> list[Message]:
+            source = list(source)
             if notice:
                 source.insert(0, {"role": "system", "content": "[Runtime Notice]\n" + notice})
             return source

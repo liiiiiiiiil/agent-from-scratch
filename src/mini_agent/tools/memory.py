@@ -17,6 +17,7 @@ from mini_agent.retrieval import (
     MAX_QUERY_CHARS,
     MAX_SEARCH_LIMIT,
     MemoryRetriever,
+    SOURCE_STATUS_UNVERIFIED,
 )
 from mini_agent.tools.base import Tool
 
@@ -44,12 +45,14 @@ def _search_result(payload: dict[str, Any]) -> str:
 
 
 def _summary(record: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         key: record[key]
         for key in (
             "memory_id", "revision", "title", "tags", "source", "created_at", "updated_at",
         )
     }
+    result["source_status"] = SOURCE_STATUS_UNVERIFIED
+    return result
 
 
 def list_memories(store: MemoryStore, limit: int = 20, offset: int = 0) -> str:
@@ -63,7 +66,9 @@ def list_memories(store: MemoryStore, limit: int = 20, offset: int = 0) -> str:
 
 
 def read_memory(store: MemoryStore, memory_id: str) -> str:
-    return _result({"status": "ok", "memory": store.read(memory_id)})
+    memory = store.read(memory_id)
+    memory["source_status"] = SOURCE_STATUS_UNVERIFIED
+    return _result({"status": "ok", "memory": memory})
 
 
 def remember(store: MemoryStore, title: str, body: str, tags: list[str], source: str) -> str:

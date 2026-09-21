@@ -95,6 +95,29 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
+def _within_filesystem(path: str, root: str) -> bool:
+    """Return whether an existing path is rooted at ``root`` by identity.
+
+    ``realpath`` preserves caller-supplied casing on common macOS filesystems,
+    so string-only containment can miss a sensitive directory reached through
+    a differently-cased spelling.  Walk the existing ancestor chain and use
+    ``samefile`` to retain the filesystem's own identity semantics.
+    """
+    if _within(path, root):
+        return True
+    current = path
+    while True:
+        try:
+            if os.path.samefile(current, root):
+                return True
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def _relative(root: str, path: str) -> str:
     result = os.path.relpath(path, root)
     return "." if result == os.curdir else result.replace(os.sep, "/")
@@ -174,7 +197,7 @@ class ReferenceCatalog:
                 raise ReferenceConfigError(f"Reference {alias} 目录无法访问") from error
             if not stat.S_ISDIR(info.st_mode):
                 raise ReferenceConfigError(f"Reference {alias} path 不是目录")
-            if any(_within(root, sensitive) for sensitive in frozen_sensitive):
+            if any(_within_filesystem(root, sensitive) for sensitive in frozen_sensitive):
                 raise ReferenceConfigError(f"Reference {alias} 目录位于敏感目录内")
             definitions.append(ReferenceDefinition(
                 alias, description, root, int(info.st_dev), int(info.st_ino),
@@ -221,7 +244,7 @@ class ReferenceCatalog:
         return value
 
     def _sensitive(self, path: str) -> bool:
-        return any(_within(path, root) for root in self._sensitive_roots)
+        return any(_within_filesystem(path, root) for root in self._sensitive_roots)
 
     @staticmethod
     def _same_identity(info: os.stat_result, definition: ReferenceDefinition) -> bool:
@@ -247,7 +270,8 @@ class ReferenceCatalog:
         """Validate one already-canonical target without resolving it again."""
         if not _within(resolved, definition.root):
             raise ReferenceAccessError("Reference 路径越界")
-        if self._sensitive(resolved) or os.path.basename(resolved) == "config_local.py":
+        if (self._sensitive(resolved)
+                or os.path.basename(resolved).casefold() == "config_local.py"):
             raise ReferenceAccessError("Reference 目标位于敏感路径")
         self._check_root_identity(definition)
         try:
@@ -664,7 +688,7 @@ class ReferenceCatalog:
                             break
                         name = entry.name
                         relative = name if current_relative == "." else f"{current_relative}/{name}"
-                        if name == "config_local.py":
+                        if name.casefold() == "config_local.py":
                             continue
                         try:
                             if entry.is_dir(follow_symlinks=False):
@@ -703,7 +727,7 @@ class ReferenceCatalog:
                                 if (
                                     not _within(resolved, definition.root)
                                     or self._sensitive(resolved)
-                                    or os.path.basename(resolved) == "config_local.py"
+                                    or os.path.basename(resolved).casefold() == "config_local.py"
                                 ):
                                     continue
                                 if os.path.isdir(resolved):

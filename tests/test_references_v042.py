@@ -393,6 +393,26 @@ def test_sensitive_files_and_wide_root_search_skip(tmp_path: Path):
         catalog.read_reference("wide", "sensitive/secret.txt")
 
 
+def test_sensitive_paths_reject_case_aliases_on_case_insensitive_filesystems(tmp_path: Path):
+    root = tmp_path / "wide"
+    root.mkdir()
+    sensitive = root / "sensitive"
+    sensitive.mkdir()
+    (sensitive / "secret.txt").write_text("hidden", encoding="utf-8")
+    (root / "config_local.py").write_text("API_KEY='hidden'", encoding="utf-8")
+    catalog = ReferenceCatalog(
+        [{"alias": "wide", "path": str(root), "description": "x"}],
+        sensitive_roots=(sensitive,), config_base_dir=tmp_path,
+    )
+    if not (root / "CONFIG_LOCAL.PY").exists():
+        pytest.skip("filesystem is case-sensitive")
+
+    with pytest.raises(ReferenceAccessError):
+        catalog.read_reference("wide", "CONFIG_LOCAL.PY")
+    with pytest.raises(ReferenceAccessError):
+        catalog.read_reference("wide", "SENSITIVE/secret.txt")
+
+
 def test_search_limits_and_include(tmp_path: Path):
     catalog, root = _catalog(tmp_path)
     for index in range(105):
@@ -437,6 +457,17 @@ def test_parent_tools_permissions_and_child_isolation(tmp_path: Path, monkeypatc
     assert result.outcome == "denied" and not result.handler_admitted
     assert "alias=docs" in asked[0] and "path=a.txt" in asked[0]
     assert str(root) not in asked[0]
+
+
+def test_reference_always_approval_is_literal_not_glob():
+    policy = PermissionPolicy({"read_reference": "ask", "search_reference": "ask"})
+    policy.approve("read_reference", "docs:chapter*.txt")
+    policy.approve("search_reference", "docs:section[1]")
+
+    assert policy.check("read_reference", "docs:chapter*.txt") == ALLOW
+    assert policy.check("read_reference", "docs:chapter1.txt") != ALLOW
+    assert policy.check("search_reference", "docs:section[1]") == ALLOW
+    assert policy.check("search_reference", "docs:section1") != ALLOW
 
 
 def test_reference_results_are_complete_json_and_excerpt_is_metadata_only(tmp_path: Path):

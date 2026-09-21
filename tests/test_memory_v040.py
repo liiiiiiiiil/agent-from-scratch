@@ -235,9 +235,12 @@ def test_registry_parent_only_memory_tools_and_permissions(tmp_path: Path):
     }))
     listed = json.loads(executor.execute("list_memories", {}))
     assert "body" not in listed["memories"][0]
-    assert json.loads(executor.execute("read_memory", {
+    assert listed["memories"][0]["source_status"] == "unverified"
+    read = json.loads(executor.execute("read_memory", {
         "memory_id": result["memory"]["memory_id"],
-    }))['memory']['body'] == "secret body"
+    }))["memory"]
+    assert read["body"] == "secret body"
+    assert read["source_status"] == "unverified"
 
 
 def _durable_memory_runtime(tmp_path: Path):

@@ -1016,7 +1016,7 @@ class AgentState:
             allowed = {
                 "read_file", "list_dir", "grep", "calculate",
                 "get_process", "read_process", "list_processes", "wait_process",
-                "list_memories", "read_memory",
+                "list_memories", "read_memory", "search_memories",
                 "list_references", "search_reference", "read_reference",
             }
             if name == "delegate_task" and isinstance(arguments, dict):
