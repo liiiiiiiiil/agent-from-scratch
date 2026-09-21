@@ -41,6 +41,9 @@ PERMISSION_RULES = {
     "list_memories": ALLOW,
     "read_memory": ALLOW,
     "search_memories": ALLOW,
+    "list_references": ALLOW,
+    "search_reference": ASK,
+    "read_reference": ASK,
     "remember": ASK,
     "revise_memory": ASK,
     "forget_memory": ASK,
@@ -206,6 +209,20 @@ class PermissionGate:
                 return json.dumps(args, ensure_ascii=False, sort_keys=True)
             except (TypeError, ValueError):
                 return str(args)
+        if tool_name in {"search_reference", "read_reference"}:
+            # Reference authorization is alias-scoped.  Keep the prompt
+            # useful without ever rendering a configured filesystem root.
+            if tool_name == "search_reference":
+                return (
+                    f"alias={args.get('alias', '<missing>')}, "
+                    f"path={args.get('path', '.')}, "
+                    f"query={args.get('query', '<missing>')}"
+                )
+            return (
+                f"alias={args.get('alias', '<missing>')}, "
+                f"path={args.get('path', '<missing>')}, "
+                f"offset={args.get('offset', 0)}, limit={args.get('limit', 200)}"
+            )
         return str(args)
 
     @staticmethod
@@ -222,4 +239,8 @@ class PermissionGate:
             return args.get("command", "*")
         if tool_name in ("read_file", "write_file", "edit_file", "rollback_checkpoint"):
             return args.get("path", "*")
+        if tool_name in {"search_reference", "read_reference"}:
+            alias = args.get("alias", "*")
+            path = args.get("path", ".")
+            return f"{alias}:{path}"
         return "*"

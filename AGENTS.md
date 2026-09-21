@@ -27,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.41`（相关记忆检索与有界 Context）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.42`（具名本地 References）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 模型绑定硬约束：provider/profile 只能从本地配置解析；父 binding 和子 binding 必须在对应 Runtime 创建前冻结，运行中不得通过全局变量切换模型。`delegate_task` 只能请求获准的本地 `model_profile` 别名，未知或越权别名必须在 HTTP 请求前拒绝；不得自动 provider fallback。State、Context、session、Trace、工具结果和用户可见错误只能保留无凭据的 profile/provider/protocol/fingerprint 来源摘要，不得持久化真实 endpoint、model ID、API key 或认证头。摘要请求必须使用同一 binding 并计入其 usage；provider usage 缺失时保守估算并标记来源。
 
@@ -46,7 +46,9 @@ State 保持一次提醒兼容行为。
 
 子代理硬约束：v0.36 的 `delegate_task` 只能同步创建一个 depth=1 的只读 Subagent；子代理拥有独立 State、Context、运行状态、提示词、冻结 model binding 和固定白名单 PermissionGate，但父子调用同一个 canonical `AgentRuntime.run()`。它只能使用 `calculate`、`read_file`、`list_dir`、`grep`，不继承父 history、权限、Plan、generation 或 verification，不能写文件、运行 shell、操作进程、再次委派或决定父任务完成。子结果只能作为不可信调查材料，evidence 不进入父 `verification_evidence`；父 Agent 独占工作区修改、主计划、权限交互、generation、verification 和完成判定。固定预算、scope gate、结果合同和一次格式修正由子 Runtime policy 强制执行。
 
-Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`、`search_memories`、`remember`、`revise_memory`、`forget_memory` 使用工作区记忆；父 Context 默认按当前任务和最近一条用户消息自动检索少量有界摘要，子代理看不到任何 Memory 工具且没有自动记忆候选。自动查询只使用 `AgentState.task` 与完整本地 history 中最近的 `role=user` 文本，不使用 assistant 输出、工具结果、历史摘要或 Memory 内容扩展查询；候选仅为不可信资料，不进入 State、session、Plan、Trace 或 `verification_evidence`。检索每次 `prepare_messages()` 重新读取当前工作区，失败只降级当前 Context，不永久关闭检索。Memory 按规范化工作区真实路径隔离，默认写入 `~/.mini_agent/memory` 的 schema 1 JSON；记录、文件和目录大小/权限、独占锁、原子替换及目录同步限制以 `memory.py` 为准。`remember`、`revise_memory`、`forget_memory` 是 `possible` 副作用，`search_memories` 是只读 `none` 调用，沿用 PermissionGate、generation、规划和恢复边界；revision 冲突不得写盘。Memory 不属于 State、Plan 或 verification evidence；schema 1 的自由文本 `source` 一律返回 `source_status="unverified"`，不访问或宣称来源文件新鲜度。开启 `/save` 后单次记忆参数仍可随 Context 进入 session，不能宣称 session 中绝无记忆正文。References 不属于 v0.41。
+Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`、`search_memories`、`remember`、`revise_memory`、`forget_memory` 使用工作区记忆；父 Context 默认按当前任务和最近一条用户消息自动检索少量有界摘要，子代理看不到任何 Memory 工具且没有自动记忆候选。自动查询只使用 `AgentState.task` 与完整本地 history 中最近的 `role=user` 文本，不使用 assistant 输出、工具结果、历史摘要或 Memory 内容扩展查询；候选仅为不可信资料，不进入 State、session、Plan、Trace 或 `verification_evidence`。检索每次 `prepare_messages()` 重新读取当前工作区，失败只降级当前 Context，不永久关闭检索。Memory 按规范化工作区真实路径隔离，默认写入 `~/.mini_agent/memory` 的 schema 1 JSON；记录、文件和目录大小/权限、独占锁、原子替换及目录同步限制以 `memory.py` 为准。`remember`、`revise_memory`、`forget_memory` 是 `possible` 副作用，`search_memories` 是只读 `none` 调用，沿用 PermissionGate、generation、规划和恢复边界；revision 冲突不得写盘。Memory 不属于 State、Plan 或 verification evidence；schema 1 的自由文本 `source` 一律返回 `source_status="unverified"`，不访问或宣称来源文件新鲜度。开启 `/save` 后单次记忆参数仍可随 Context 进入 session，不能宣称 session 中绝无记忆正文。
+
+References 硬约束：配置使用 `REFERENCES` 列表，父 Runtime 只通过 `ReferenceCatalog` 冻结 alias、description 和真实本地目录；真实根只存在于进程内，不写入 State、Context、session 或 Trace。父侧仅提供只读的 `list_references`、`search_reference`、`read_reference`，配置 alias 不自动授权；列表默认允许，搜索和读取默认询问，并按 `alias:relative_path` 匹配权限，`always` 只记住精确 pattern。每次访问重新校验 alias 内相对路径、真实符号链接终点和固定资源上限；绝对路径、`..`、越界符号链接、`config_local.py`、Memory/session 敏感目录、非 UTF-8 和特殊文件不得泄露。正文只作为普通 tool history 结果，State/Trace excerpt 只保留无正文的 alias-relative 摘要；成功结果为有界 JSON，访问失败由 handler 抛出并由 Executor 记录为 `outcome="failed"`、`error_kind="reference_access_error"`，不新增应用层错误 JSON 协议。文件打开从冻结根目录 fd 逐段复核 canonical 路径及文件身份，竞态变化拒绝读取；References 不自动进入 Context、不进入 Memory 或 verification evidence、不证明 workspace drift，也不加入 Subagent 白名单。恢复和新任务都从当前本地配置重新组装 catalog，不信任 session 中的旧配置。
 
 ## 架构索引
 
@@ -58,6 +60,7 @@ Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`�
 - `processes.py`：CLI 生命周期内的后台进程句柄、进程组、双流排空、环形缓冲和有界清理；不可快照资源不进入 State。
 - `session.py`：schema 1/2/3 会话、完整性校验、原子存取和工具边界提交，不承担恢复执行。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
+- `references.py`：父侧具名本地 References 的配置冻结、路径校验、敏感目录和有界读取；`tools/references.py`：三个父侧只读工具合同。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。
 
 完整目录、参数、数据结构和运行时流程以[操作手册](docs/operation/manual.md)、[上下文架构说明](docs/operation/context-architecture.md)及对应版本教程为准。

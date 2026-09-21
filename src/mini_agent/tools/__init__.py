@@ -28,6 +28,8 @@ from mini_agent.providers.catalog import ProviderCatalog
 from mini_agent.memory import MemoryStore
 import mini_agent.config as runtime_config
 from mini_agent.tools.memory import make_memory_tools
+from mini_agent.references import ReferenceCatalog
+from mini_agent.tools.references import make_reference_tools
 
 def create_registry(state: AgentState | None = None,
                     workspace_root: str | None = None,
@@ -35,7 +37,8 @@ def create_registry(state: AgentState | None = None,
                     subagent_llm=None,
                     include_delegation: bool | None = None,
                     provider_catalog: ProviderCatalog | None = None,
-                    memory_store: MemoryStore | None = None) -> ToolRegistry:
+                    memory_store: MemoryStore | None = None,
+                    reference_catalog: ReferenceCatalog | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -100,6 +103,20 @@ def create_registry(state: AgentState | None = None,
         )
         result._memory_store = memory_store
         for tool in make_memory_tools(memory_store):
+            result.register(tool)
+        # References are a parent-only local resource.  Their real roots are
+        # retained only by this in-process catalog; registry/session/state
+        # metadata contains aliases and ordinary tool facts, never roots.
+        reference_catalog = reference_catalog or ReferenceCatalog(
+            runtime_config.REFERENCES,
+            config_base_dir=getattr(runtime_config, "CONFIG_BASE_DIR", None),
+            sensitive_roots=(
+                memory_store.root,
+                os.path.join(os.path.expanduser("~"), ".mini_agent", "sessions"),
+            ),
+        )
+        result._reference_catalog = reference_catalog
+        for tool in make_reference_tools(reference_catalog):
             result.register(tool)
     return result
 

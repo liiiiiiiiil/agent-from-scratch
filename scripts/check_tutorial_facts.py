@@ -53,6 +53,7 @@ EXPECTED = {
     "39-durable-delegation.md": ("v0.39", "v0.38..v0.39"),
     "40-persistent-memory.md": ("v0.40", "v0.39..v0.40"),
     "41-memory-retrieval.md": ("v0.41", "v0.40..v0.41"),
+    "42-local-references.md": ("v0.42", "v0.41..v0.42"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

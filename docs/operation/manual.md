@@ -1,6 +1,73 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.41**（相关记忆检索与有界 Context；含此前可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.42**（具名本地 References；含此前 Memory、相关检索与可靠执行能力）。
+
+## v0.42 具名本地 References
+
+References 是用户在本地配置中登记的、工作区外的资料目录。它们只通过稳定 alias
+被父 Agent 发现和读取，不会自动进入 Context、Memory、Plan 或 verification evidence，
+也不会提供给 Subagent。资料内容是不可信的，不能覆盖 system/project instructions、
+PermissionGate 或用户要求。
+
+### 配置
+
+默认配置是空列表，不影响未配置用户：
+
+```python
+# src/mini_agent/config_local.py（未跟踪）
+REFERENCES = [
+    {
+        "alias": "python-docs",
+        "path": "/absolute/or/relative/path",
+        "description": "本地 Python 设计资料",
+    },
+]
+```
+
+相对 `path` 以 `src/mini_agent/config_local.py` 所在目录为基准。父 Runtime 创建时
+执行 `expanduser`、绝对化和 `realpath`，冻结真实目录；配置变更不会影响已经创建的
+catalog。alias 必须以小写字母开头，只能包含小写字母、数字、`_`、`-`，最长 64 个
+字符；重复 alias、缺少字段、缺失目录和非目录路径会阻止父 Runtime 启动。description
+最长 240 个字符，最多登记 32 个目录。
+
+### 工具与返回值
+
+父侧有三个只读工具：成功结果是有界 JSON；路径、文件或搜索访问失败时由
+Executor 统一记录为工具失败，不再把错误 JSON 当作成功结果：
+
+| 工具 | 参数和默认值 | 返回的关键事实 |
+|---|---|---|
+| `list_references()` | 无参数 | `alias`、`description`；不返回真实根路径 |
+| `search_reference(alias, query, path=".", include="*", limit=20)` | 单 alias 内大小写不敏感的字面量搜索；`limit` 最多 100 | alias 内相对文件路径、行号、行片段、文件 SHA-256、`total_matches`、`returned_matches`、`scan_truncated`、`truncated` |
+| `read_reference(alias, path, offset=0, limit=200)` | 按 0-based offset 选取行片段；limit 最多 200 | 带行号的 UTF-8 行、实际 `returned_lines`、自洽的起止行、`omitted_lines`、总行数、文件 SHA-256、`truncated` |
+
+单个文件最多读取 1 MiB；搜索最多访问 2,000 个文件、10,000 个目录项并读取 64 MiB
+正文，保留 100 条命中。结果还报告实际 `scanned_files`、`visited_entries` 和
+`scanned_bytes`。达到搜索资源预算时设置 `scan_truncated=true`；仅因命中/展示 JSON
+上限移除结果项时设置 `truncated=true`，两者不混淆。文件和目录按 alias 内相对路径
+排序，搜索后文件发生变化时，后续读取按新内容重新计算摘要。
+
+### 权限、敏感路径与恢复
+
+`list_references` 默认 `allow`。`search_reference` 和 `read_reference` 默认 `ask`，
+权限 pattern 是精确的 `alias:relative_path`，例如 `python-docs:guide`；`always` 只记住
+这一个 pattern，不自动授权整个子树。查询词或读取的
+offset/limit 只用于提示，不会成为真实根路径。登记 alias 不会自动批准读取，权限拒绝
+发生在 handler 之前。
+
+绝对路径、空路径、`.` 文件读取、`..`、NUL、越界符号链接、目录符号链接遍历、目录、
+设备文件、非 UTF-8 文件和过大文件都会被拒绝。名为 `config_local.py` 的目标、位于
+MemoryStore 根或默认 `~/.mini_agent/sessions` 内的 Reference 根会拒绝启动；较宽的
+Reference 根包含敏感子目录时，递归搜索跳过该子树，显式读取报错。错误不显示真实根。
+
+References 的根只保留在进程内 `ReferenceCatalog`。完整正文可以随普通 tool history
+进入 Context，并遵循既有 `/save` session 行为；State/Trace 的 `output_excerpt` 只保留
+alias、相对路径、行号、数量、SHA-256 和截断状态，不保留正文或真实根。路径和文件错误
+由 handler 抛出，再由 Executor 记录为 `outcome="failed"`、`error_kind="reference_access_error"`。
+恢复时 registry
+从当前本地配置重新组装 catalog，不信任 session 中的旧配置。References 可作为 crash
+recovery 的普通只读调查，但不能证明 workspace drift；只有
+`run_shell(purpose="verification")` 能产生 verification evidence。
 
 ## v0.41 相关记忆检索
 
@@ -508,13 +575,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.41，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.42，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。详情见[第 41 课](../tutorials/41-memory-retrieval.md)和[上下文架构说明](context-architecture.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。
 
 ### 3.1 上下文架构
 
@@ -613,6 +680,9 @@ $env:PYTHONPATH="src"; python -c "from mini_agent.prompt import build_system_pro
 | `edit_file` | `path: str, old_string: str, new_string: str, replace_all?: bool` | **ASK** | 精确字符串替换，多匹配时需 replace_all 或更长上下文 |
 | `list_dir` | `path?: str` | allow | 列出目录内容，目录加 `/` 后缀，上限 200 条 |
 | `grep` | `pattern: str, path?: str, include?: str` | allow | 正则搜索文件内容，返回 `file:line: content`，上限 100 条 |
+| `list_references` | 无 | allow | 列出 alias 和说明，不显示真实根路径 |
+| `search_reference` | `alias, query, path?, include?, limit?` | **ASK** | alias 内字面量搜索；最多 2,000 个文件、10,000 个目录项、64 MiB 正文 |
+| `read_reference` | `alias, path, offset?, limit?` | **ASK** | 读取有界 UTF-8 行片段；成功结果为有界 JSON，失败进入统一工具错误协议 |
 | `run_shell` | `command: str` | **按命令模式** | 执行 shell 命令，超时 30s，输出截断 2000 字符 |
 | `start_process` | `command: str, cwd?: str, stdin_mode?: "closed" / "pipe"` | **独立按命令模式 ASK** | 启动后台 shell 命令，立即返回 `process_id`；默认 stdin 关闭，每任务最多 4 个活动进程 |
 | `get_process` | `process_id: str` | allow | 查询本任务进程的状态、退出码与两流累计位置 |

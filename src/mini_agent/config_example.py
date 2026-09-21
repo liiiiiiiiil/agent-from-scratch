@@ -7,6 +7,17 @@ MODEL = "model-PLACEHOLDER"
 MEMORY_DIR = "~/.mini_agent/memory"
 MEMORY_RETRIEVAL_ENABLED = True
 
+# 具名本地资料（真实路径只写入未跟踪的 config_local.py）。
+# 相对 path 以 src/mini_agent/config_local.py 所在目录为基准。
+# REFERENCES = [
+#     {
+#         "alias": "python-docs",
+#         "path": "/absolute/or/relative/path",
+#         "description": "本地 Python 设计资料",
+#     },
+# ]
+REFERENCES = []
+
 # 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。
 # 下面的值全部是占位值；真实值只应写入不进 git 的 config_local.py。
 PROVIDERS = {

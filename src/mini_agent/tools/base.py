@@ -99,6 +99,10 @@ class ExecutionResult:
             # valid list response into invalid JSON.
             limit = 16 * 1024 if self.tool == "search_memories" else 64 * 1024
             return format_tool_result(self.output, max_chars=limit)
+        if self.tool in {"list_references", "search_reference", "read_reference"}:
+            # Reference handlers construct complete bounded JSON.  Preserve
+            # it for ordinary tool history instead of generic truncation.
+            return format_tool_result(self.output, max_chars=64 * 1024)
         return format_tool_result(self.output)
 
 
@@ -339,6 +343,67 @@ def _memory_excerpt(value: Any) -> str:
         return _brief(value)
 
 
+def _reference_excerpt(value: Any) -> str:
+    """Keep Reference正文 out of State/Trace excerpts."""
+    if not isinstance(value, str):
+        return _brief(value)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _brief(value)
+    if not isinstance(parsed, dict):
+        return _brief(value)
+    if "references" in parsed:
+        scrubbed = {
+            key: parsed[key]
+            for key in ("status", "total")
+            if key in parsed
+        }
+        scrubbed["references"] = [
+            {
+                key: item[key]
+                for key in ("alias", "description")
+                if isinstance(item, dict) and key in item
+            }
+            for item in parsed.get("references", [])
+            if isinstance(item, dict)
+        ]
+    elif "matches" in parsed:
+        scrubbed = {
+            key: parsed[key]
+            for key in (
+                "status", "alias", "path", "total_matches", "returned_matches",
+                "scanned_files", "scanned_bytes", "visited_entries",
+                "scan_truncated", "truncated",
+            )
+            if key in parsed
+        }
+        scrubbed["matches"] = [
+            {
+                key: item[key]
+                for key in ("path", "line", "sha256")
+                if isinstance(item, dict) and key in item
+            }
+            for item in parsed.get("matches", [])
+            if isinstance(item, dict)
+        ]
+    else:
+        scrubbed = {
+            key: parsed[key]
+            for key in (
+                "status", "alias", "path", "offset", "start_line", "end_line",
+                "returned_lines", "omitted_lines", "total_lines", "sha256", "truncated",
+            )
+            if key in parsed
+        }
+        if isinstance(parsed.get("lines"), list):
+            scrubbed["line_count"] = len(parsed["lines"])
+    try:
+        return _brief(json.dumps(scrubbed, ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return _brief(value)
+
+
 def _checkpoint_notice(checkpoint: Any) -> str:
     """Return metadata-only checkpoint information for a file-tool result."""
     fields = (
@@ -525,11 +590,15 @@ class ToolExecutor:
             output = json.dumps(public, ensure_ascii=False)
         if checkpoint is not None:
             output = f"{output}\n{_checkpoint_notice(checkpoint)}"
-        excerpt = (
-            _memory_excerpt(output)
-            if name in {"list_memories", "read_memory", "remember", "revise_memory", "forget_memory", "search_memories"}
-            else _brief(output)
-        )
+        if name in {
+            "list_memories", "read_memory", "remember", "revise_memory", "forget_memory",
+            "search_memories",
+        }:
+            excerpt = _memory_excerpt(output)
+        elif name in {"list_references", "search_reference", "read_reference"}:
+            excerpt = _reference_excerpt(output)
+        else:
+            excerpt = _brief(output)
         exit_code = None
         outcome: Literal["succeeded", "failed", "denied", "timeout", "invalid"] = "succeeded"
         error_kind = None

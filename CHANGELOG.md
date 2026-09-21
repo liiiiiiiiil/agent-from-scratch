@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.42.0] - Named local references
+
+- Added parent-only, standard-library `ReferenceCatalog` with frozen named local directories, bounded UTF-8 reads, literal case-insensitive search, SHA-256 provenance, and deterministic alias-relative results.
+- Added `list_references`, `search_reference`, and `read_reference`; listing is allowed by default while search and read remain alias/path-scoped permission prompts.
+- Rejected traversal, absolute paths, directory symlink escapes, sensitive configuration/memory/session paths, oversized or non-UTF-8 files, and unsafe reference roots without exposing real roots.
+- Unified Reference access failures with Executor failure semantics (`reference_access_error`), hardened canonical descriptor-based opens and race checks, and made line/match truncation metadata self-consistent with bounded search scan budgets.
+- Kept References out of Context auto-retrieval, Memory, verification evidence, session schema, and the fixed Subagent whitelist; added lesson 42 and synchronized manuals, plans, README files, and version metadata.
+
 ## [v0.41.0] - Relevant memory retrieval
 
 - Added standard-library lexical `MemoryRetriever`, validated read-only snapshots, Unicode normalization, Chinese fragments, weighted fields, phrase scoring, deterministic ordering, bounded snippets, and conservative `source_status="unverified"` results.

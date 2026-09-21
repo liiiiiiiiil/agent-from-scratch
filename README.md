@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程已完成 `v0.41`（第 41 课：相关记忆检索），阶段十一已完成相关检索这一版。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程已完成 `v0.42`（第 42 课：具名本地资料），阶段十一全部完成。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -79,6 +79,7 @@
     <tr><th colspan="3"><a id="stage-11"></a>阶段十一 · 工作区记忆与资料引用</th></tr>
     <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">轻量持久 Memory</a></td><td>由父 Agent 显式查看、保存、修订和遗忘工作区记忆，支持分页、工作区外存储和不确定提交核查，并通过权限、revision、原子存储和恢复边界保持可核查。</td></tr>
     <tr><td><strong>v0.41</strong></td><td><a href="./docs/tutorials/41-memory-retrieval.md">相关记忆检索</a></td><td>用标准库词法检索找回少量相关候选，并把不可信摘要按 Context 预算临时注入父 Agent；显式搜索与自动检索都不改变 Memory、State 或 session。</td></tr>
+    <tr><td><strong>v0.42</strong></td><td><a href="./docs/tutorials/42-local-references.md">具名本地资料</a></td><td>通过稳定 alias 发现、搜索和按行读取工作区外的本地资料；每次访问重新检查权限、符号链接和敏感目录，References 不进入自动 Context 或子代理。</td></tr>
   </tbody>
 </table>
 

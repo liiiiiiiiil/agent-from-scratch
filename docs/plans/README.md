@@ -14,9 +14,9 @@
 
 阶段九已完成：v0.30–v0.33 已实现安全点保存、跨进程恢复、持久工具边界和崩溃后的不确定调用交接；源 session 不覆盖，旧调用不自动 replay。
 - [`subagent-delegation-plan.md`](subagent-delegation-plan.md) — 阶段十受控子代理委派实施计划；v0.34 最小同步只读委派、v0.35 共享父子运行循环、v0.36 多 provider/统一协议适配、v0.37 生命周期与聚合预算、v0.38 有界并行和 v0.39 持久委派交付已实现。保持子代理只读、单层，由父 Agent 独占修改和完成判定。
-- [`memory-retrieval-references-plan.md`](memory-retrieval-references-plan.md) — 阶段十一轻量记忆、相关检索与资料引用实施计划；v0.40–v0.41 工作区持久 Memory 与相关检索已实现，v0.42 具名本地 References 仍在计划中。
+- [`memory-retrieval-references-plan.md`](memory-retrieval-references-plan.md) — 阶段十一轻量记忆、相关检索与资料引用实施计划；v0.40–v0.42 工作区持久 Memory、相关检索与具名本地 References 已实现。
 
-阶段十一已完成 v0.40–v0.41：工作区 Memory 支持显式 CRUD 与相关检索，父 Context 可按预算临时注入不可信候选；v0.42 References 仍未实现。
+阶段十一已完成 v0.40–v0.42：工作区 Memory 支持显式 CRUD 与相关检索，父 Context 可按预算临时注入不可信候选，父 Agent 可按稳定 alias 查阅受权限保护的本地资料。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

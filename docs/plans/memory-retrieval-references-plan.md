@@ -1,6 +1,6 @@
 # 阶段十一：轻量记忆、相关检索与资料引用实施计划
 
-> 状态：`v0.40`–`v0.41` 已实现；`v0.42` 仍在计划中
+> 状态：`v0.40`–`v0.42` 已实现
 > 建议版本范围：`v0.40`–`v0.42`
 > 能力前置：阶段四的 State / Context 分离、阶段五的项目指令、阶段九的持久工具边界与崩溃恢复、阶段十的父子权限边界
 > 关联计划：`context-management-plan.md`、`session-persistence-resume-plan.md`、`subagent-delegation-plan.md`
@@ -27,7 +27,7 @@
 用户或模型按别名查阅 ──→ 路径与权限校验 ──→ 有界文件片段及来源
 ```
 
-三个版本各讲一个概念：`v0.40` 解决「什么值得跨会话保存、怎样安全修改」，`v0.41` 解决「何时取回、如何说明命中来源」，`v0.42` 解决「怎样具名读取工作区外的本地资料」。前两版已实现，References 仍是下一版边界。
+三个版本各讲一个概念：`v0.40` 解决「什么值得跨会话保存、怎样安全修改」，`v0.41` 解决「何时取回、如何说明命中来源」，`v0.42` 解决「怎样具名读取工作区外的本地资料」。三版均已实现。
 
 ## 2. 范围与非目标
 
@@ -143,7 +143,7 @@ Runtime 不绑定 retriever。失败只注入有界提示并在下一次请求�
 
 验收：一个跨会话新任务能看到相关记忆摘要并按 ID 读取原文；无关条目不会批量进入 Context；旧文件变化时来源标记不会宣称仍然新鲜。
 
-### 4.3 `v0.42`：本地 References
+### 4.3 `v0.42`：本地 References（已实现）
 
 目标是让工作区外的本地资料以稳定别名被发现和读取，同时保持工具权限与路径边界。
 
@@ -151,6 +151,25 @@ Runtime 不绑定 retriever。失败只注入有界提示并在下一次请求�
 2. 新增 `references.py` 解析别名、说明和真实目录；实现具名列表、搜索和分段读取。复用文件工具的输出限制或建立等价上限，输出别名、相对路径、行号与内容摘要。
 3. 在父工具视图注册只读引用能力；每次操作分别经过 PermissionGate、真实路径检查和敏感路径排除。不把引用目录接入 `write_file` / `edit_file`，不放宽子代理白名单。
 4. 覆盖相对路径解析、目录缺失、遍历与符号链接逃逸、权限拒绝、文件变化、搜索上限和多个别名互不串读。
+
+实现边界：配置项为 `REFERENCES = [{"alias", "path", "description"}]`，相对
+`config_local.py` 所在目录解析，并在父 Runtime 创建时冻结真实目录。父侧提供
+`list_references()`、`search_reference(alias, query, path=".", include="*", limit=20)`
+和 `read_reference(alias, path, offset=0, limit=200)`；列表默认允许，搜索和读取默认
+询问，权限 pattern 为 `alias:relative_path`，`always` 只记住精确 pattern。搜索是大小写
+不敏感的字面量匹配，读取和搜索都返回 alias 内相对路径、行号及本次读取计算的
+SHA-256；单文件最多 1 MiB，搜索最多访问 2,000 个文件、10,000 个目录项并读取 64 MiB
+正文，保留 100 条命中，输出按 JSON 字节上限安全裁剪；展示裁剪与 `scan_truncated`
+分别表示结果集合裁剪和资料扫描未完成。
+
+References 的真实根只存在于进程内 `ReferenceCatalog`。`config_local.py`、Memory
+根目录、默认 session 根目录、越界路径、目录符号链接逃逸和非 UTF-8/特殊文件都会被
+拒绝或跳过；正文只作为普通 tool history 结果存在，State/Trace excerpt 仅保留来源
+摘要。访问失败由 handler 抛出并由 Executor 记录为 `outcome="failed"`、
+`error_kind="reference_access_error"`；文件打开从冻结根目录 fd 逐段复核 canonical
+路径，竞态变化拒绝读取。它不进入自动 Context 检索、Memory、verification evidence 或 Subagent 白名单，
+也不改变 session schema。Memory schema 1 的自由文本 `source` 仍统一返回
+`source_status="unverified"`，本版没有迁移这一边界。
 
 验收：配置好的本地资料可按别名查找并引用具体文件位置；未授权目录、越界路径和敏感文件不能因 Reference 配置而读出。
 
