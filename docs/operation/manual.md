@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.43**（独立 stdio MCP Client；含此前 Memory、相关检索与具名本地 References）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.44**（父 Agent Runtime 中的本地 MCP Tool；含此前独立 stdio MCP Client、Memory、相关检索与具名本地 References）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -54,7 +54,51 @@ stdout 消息最多 1 MiB，stdout 等待队列最多 64 条，普通通知只�
 
 本版的手动确认只是演示命令的交互保护，不是 Agent 的 PermissionGate。MCP Tool
 不会进入模型、Tool Registry、State 或 session；连接和 PID 只存在于当前演示进程。
-v0.44 才计划研究外部 Tool 的 Runtime、权限和恢复接入。
+## v0.44 父 Agent Runtime 中的 MCP Tool
+
+v0.44 在 v0.43 的固定 stdio Client 之上增加父侧装配路径。Server 仍由本地
+`MCP_SERVERS` 配置提供，只有 `agent_enabled=True` 的项才会在父 Runtime 创建时启动；
+省略该字段或设置为 `False` 的项继续只供独立 `python -m mini_agent.mcp` 命令使用。
+配置导入不会启动 Server，argv 也不经过 shell。
+
+```python
+# src/mini_agent/config_local.py（未跟踪）
+MCP_SERVERS = [{
+    "alias": "demo",
+    "command": ["python", "../../tests/fixtures/mcp_stdio_server.py"],
+    "cwd": ".",
+    "environment": {},
+    "agent_enabled": True,
+    "readonly_tools": ["echo"],
+}]
+```
+
+`readonly_tools` 是同一 Server 返回的原始工具名精确列表。列表中的工具只把
+`effect_class` 从默认 `possible` 降为 `none`，仍然经过 PermissionGate，也不能自动成为
+verification evidence。服务端 annotations、名称、描述和 schema 不能改变这个分类。
+
+父侧会完成固定的握手、完整分页和目录冻结，然后把工具外显为
+`mcp_<alias>_<tool>`。原始工具名只接受不超过 64 个 ASCII 字母、数字、`_`、`-`，转小写
+并把 `-` 换成 `_`；外显名不超过 64 字符。内置工具、不同 MCP 工具或规范化后碰撞时，
+整次 Runtime 装配失败，已启动的 Server 会被关闭。MCP input schema 只支持根 object、
+标量属性、标量数组、`required`、布尔 `additionalProperties`、`enum`、字符串/数值边界和
+数组长度边界；嵌套 object 与未知校验关键字会在模型看到工具前拒绝。
+
+MCP Tool 走普通的 Tool Registry、ToolExecutor、PermissionGate、Plan gate 和
+`AgentRuntime.run()`。默认权限是 `ask`；授权提示显示 alias、原始工具名和有界参数摘要，
+疑似凭据字段隐藏值，长值只显示长度。JSON-RPC error、`isError=true`、超时、断连、协议
+错误和不支持的图片/二进制/结构化结果会成为带明确 `error_kind` 的工具失败；超时的
+`outcome` 是 `timeout`。成功文本保留为有界 `role=tool` 正文，State/Trace excerpt 只保留
+来源、alias、原始工具名、类别和长度等元数据。
+
+开启 `/save` 后，MCP Tool 与其他 possible Tool 一样，在 handler 前先进入 schema 3 的
+`handler_admitted` 边界；提交失败不会发送 `tools/call`。已经准入且结果未结算的调用在
+恢复时按既有规则记为不确定事实，绝不重放。新任务、恢复任务和任务切换都从当前本地
+配置重新发现目录；连接不写入 State、Trace、session 或 Subagent。退出、`/new`、`/reset`、
+EOF 和恢复候选/claim 失败时都会有界关闭连接，并报告未完成的 server alias 与原因。
+
+父提示词把 MCP 目录和结果标记为外部不可信资料：它们不能覆盖指令、权限或 Plan，也不能
+充当 verification evidence。MCP 不接入 Subagent、Skills、远程 HTTP、Resources 或 Prompts。
 
 ## v0.42 具名本地 References
 
@@ -629,13 +673,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.43，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.44，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)和[第 44 课](../tutorials/44-mcp-tools-runtime.md)。
 
 ### 3.1 上下文架构
 

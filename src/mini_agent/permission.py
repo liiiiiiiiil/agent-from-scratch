@@ -168,7 +168,7 @@ class PermissionGate:
         self.policy = policy or PermissionPolicy()
         self._ask_lock = threading.Lock()
 
-    def guard(self, tool_name: str, args: dict) -> str | None:
+    def guard(self, tool_name: str, args: dict, *, display_context: dict | None = None) -> str | None:
         """
         返回 None 表示放行，返回 str 表示拒绝原因。
         """
@@ -181,7 +181,9 @@ class PermissionGate:
         if action == ASK:
             with self._ask_lock:
                 try:
-                    prompt_args = self._prompt_arguments(tool_name, args)
+                    prompt_args = self._prompt_arguments(
+                        tool_name, args, display_context=display_context,
+                    )
                     choice = input(
                         f"\n授权确认\n允许执行 {tool_name}({prompt_args})? [once/always/reject] "
                     ).strip().lower()
@@ -198,8 +200,43 @@ class PermissionGate:
         return None
 
     @staticmethod
-    def _prompt_arguments(tool_name: str, args: dict) -> str:
+    def _prompt_arguments(
+        tool_name: str, args: dict, *, display_context: dict | None = None,
+    ) -> str:
         """Render only non-sensitive authorization facts for stdin writes."""
+        if display_context is not None:
+            alias = str(display_context.get("alias", "<unknown>"))[:64]
+            raw_tool = str(display_context.get("tool", "<unknown>"))[:64]
+            facts: dict[str, object] = {}
+            sensitive_markers = (
+                "token", "secret", "password", "passwd", "credential", "authorization",
+                "api_key", "apikey", "access_key", "private_key", "cookie", "auth",
+            )
+            for key, value in sorted((args or {}).items(), key=lambda item: str(item[0])):
+                key_text = str(key)[:64]
+                lowered = key_text.casefold()
+                if any(marker in lowered for marker in sensitive_markers):
+                    facts[key_text] = "<redacted>"
+                elif isinstance(value, str):
+                    try:
+                        value.encode("utf-8")
+                    except UnicodeEncodeError:
+                        facts[key_text] = "<invalid utf-8>"
+                    else:
+                        if len(value) > 128:
+                            facts[key_text] = f"<{len(value)} chars>"
+                        else:
+                            facts[key_text] = value
+                elif isinstance(value, (list, dict)):
+                    facts[key_text] = f"<{type(value).__name__} {len(value)} items>"
+                else:
+                    facts[key_text] = value
+            try:
+                rendered = json.dumps(facts, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            except (TypeError, ValueError):
+                rendered = "<unrenderable>"
+            rendered = rendered[:900]
+            return f"alias={alias}, tool={raw_tool}, arguments={rendered}"
         if tool_name == "write_process":
             input_text = args.get("input") if isinstance(args, dict) else ""
             try:

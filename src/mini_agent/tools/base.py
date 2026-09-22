@@ -43,6 +43,7 @@ class Tool:
     internal: bool = False
     argument_validator: Callable[[dict[str, Any]], None] | None = None
     delegation_capability: DelegationCapability = "unavailable"
+    permission_context: dict[str, str] | None = None
 
     def to_llm_schema(self):
         return {"type": "function", "function": {
@@ -90,6 +91,8 @@ class ExecutionResult:
             return format_tool_result(self.output, max_chars=8000)
         if self.tool == "delegate_task":
             return format_tool_result(self.output, max_chars=12 * 1024)
+        if self.tool.startswith("mcp_"):
+            return format_tool_result(self.output, max_chars=64 * 1024)
         if self.tool in {
             "list_memories", "read_memory", "remember", "revise_memory", "forget_memory",
             "search_memories",
@@ -104,6 +107,16 @@ class ExecutionResult:
             # it for ordinary tool history instead of generic truncation.
             return format_tool_result(self.output, max_chars=64 * 1024)
         return format_tool_result(self.output)
+
+
+@dataclass(frozen=True)
+class ControlledToolResult:
+    """A handler result with an explicit executor outcome and safe excerpt."""
+
+    output: Any
+    outcome: Literal["succeeded", "failed", "timeout", "invalid"] = "succeeded"
+    error_kind: str | None = None
+    output_excerpt: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,6 +204,7 @@ class FilteredToolRegistryView:
                 internal=tool.internal,
                 argument_validator=tool.argument_validator,
                 delegation_capability=tool.delegation_capability,
+                permission_context=deepcopy(tool.permission_context),
             )
             frozen[name] = cloned
         self._tools = frozen
@@ -209,6 +223,7 @@ class FilteredToolRegistryView:
             internal=tool.internal,
             argument_validator=tool.argument_validator,
             delegation_capability=tool.delegation_capability,
+            permission_context=deepcopy(tool.permission_context),
         )
 
     def get(self, name: str) -> Tool:
@@ -316,6 +331,18 @@ def _brief(value: Any) -> str:
         return str(value)[:RESULT_BRIEF_MAX_LENGTH]
     except Exception:
         return RESULT_BRIEF_FALLBACK
+
+
+def _mcp_metadata_excerpt(tool: Tool, category: str) -> str:
+    context = getattr(tool, "permission_context", None) or {}
+    return json.dumps({
+        "source": "mcp",
+        "alias": str(context.get("alias", "<unknown>"))[:64],
+        "tool": str(context.get("tool", "<unknown>"))[:64],
+        "category": category[:64],
+        "text_bytes": 0,
+        "content_items": 0,
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def _memory_excerpt(value: Any) -> str:
@@ -429,7 +456,14 @@ class ToolExecutor:
 
     def authorize(self, name: str, arguments: dict[str, Any]) -> str | None:
         """Run the same session permission gate used by normal execution."""
-        return self.gate.guard(name, arguments)
+        tool = self.registry.get(name)
+        return self._guard(tool, name, arguments)
+
+    def _guard(self, tool: Tool, name: str, arguments: dict[str, Any]) -> str | None:
+        context = getattr(tool, "permission_context", None)
+        if context is None:
+            return self.gate.guard(name, arguments)
+        return self.gate.guard(name, arguments, display_context=context)
 
     @staticmethod
     def _record_recovery_rejection(state: Any, arguments: dict[str, Any], detail: str) -> str | None:
@@ -557,6 +591,11 @@ class ToolExecutor:
                 error_kind = "edit_multiple_matches"
             else:
                 error_kind = "handler_exception"
+            safe_excerpt = _brief(text)
+            if name.startswith("mcp_") and tool.permission_context is not None:
+                text = "工具调用失败: MCP handler error"
+                error_kind = "mcp_handler_error"
+                safe_excerpt = _mcp_metadata_excerpt(tool, error_kind)
             if checkpoint is not None:
                 text += "\n" + _checkpoint_notice(checkpoint)
             if name == "recover":
@@ -567,8 +606,19 @@ class ToolExecutor:
             result = ExecutionResult(
                 name, normalized, "allowed", True, "failed",
                 int((monotonic() - started) * 1000), effect_class,
-                text, _brief(text), error_kind=error_kind,
+                text, safe_excerpt, error_kind=error_kind,
                 reservation=reservation, checkpoint_id=checkpoint_id,
+            )
+            if notify:
+                self._notify_result(result)
+            return result
+        if isinstance(output, ControlledToolResult):
+            result = ExecutionResult(
+                name, normalized, "allowed", True, output.outcome,
+                int((monotonic() - started) * 1000), effect_class,
+                output.output, output.output_excerpt or _brief(output.output),
+                error_kind=output.error_kind, reservation=reservation,
+                checkpoint_id=checkpoint_id,
             )
             if notify:
                 self._notify_result(result)
@@ -705,6 +755,9 @@ class ToolExecutor:
             if is_plan_tool:
                 return plan_rejected(error)
             text = f"工具调用失败: {type(error).__name__}: {error}"
+            invalid_excerpt = _brief(text)
+            if str(name).startswith("mcp_") and tool.permission_context is not None:
+                invalid_excerpt = _mcp_metadata_excerpt(tool, "invalid_arguments")
             planning_phase = getattr(getattr(state, "planning_state", None), "phase", None)
             if str(name) == "recover" and state is not None and planning_phase not in (
                     "exploring", "awaiting_approval"):
@@ -718,7 +771,7 @@ class ToolExecutor:
             return ExecutionResult(name, deepcopy(arguments) if isinstance(arguments, dict) else {},
                                    "not_checked", False, "invalid", 0,
                                    tool.effect_for(arguments if isinstance(arguments, dict) else {}),
-                                   text, text[:RESULT_BRIEF_MAX_LENGTH], error_kind="invalid_arguments")
+                                   text, invalid_excerpt, error_kind="invalid_arguments")
         effect_class = tool.effect_for(normalized)
         if state is not None and hasattr(state, "delegation_gate"):
             delegation_error = state.delegation_gate(name, normalized, effect_class)
@@ -788,7 +841,7 @@ class ToolExecutor:
                     effect_class, phase_error, _brief(phase_error),
                     error_kind="repair_phase_gate",
                 )
-        denied = None if permission_already_checked else self.gate.guard(name, normalized)
+        denied = None if permission_already_checked else self._guard(tool, name, normalized)
         if denied:
             if name == "recover":
                 rejection = self._record_recovery_rejection(state, normalized, denied)

@@ -27,9 +27,10 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.43`（独立 stdio MCP Client）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.44`（父 Agent Runtime MCP Tool 接入）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
-v0.43 MCP 硬约束：MCP 只由独立的 `python -m mini_agent.mcp` 命令按本地 `MCP_SERVERS` alias 启动，不进入 Agent Runtime、Tool Registry、PermissionGate、State、session 或 Subagent；配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。
+v0.44 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的本地 stdio Server 才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP 不进入 Subagent；v0.44 不接入 Skills、远程 HTTP、Resources 或 Prompts。
+配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。父 Runtime 在新任务和恢复任务中从当前配置重新连接与发现目录，退出、`/new`、`/reset` 和恢复失败都必须有界关闭连接。
 
 冻结后的工具目录不得再次从 Server 刷新；普通通知只保留最近 64 条。CLI 确认前必须展示完整参数，无法完整展示时拒绝调用；关闭直接子进程未完成必须报告失败。JSON-RPC 错误码必须是整数，终端输出中的控制字符必须转义。
 

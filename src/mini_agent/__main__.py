@@ -190,6 +190,9 @@ def main():
     except (ValueError, TypeError) as error:
         print(f"provider 配置错误：{_single_line_notice(error, 500)}")
         return
+    if argv and argv[0] == "--plan" and (len(argv) != 2 or not argv[1].strip()):
+        print('用法: python -m mini_agent --plan "<任务>"')
+        return
     if argv and argv[0] == "--resume":
         if len(argv) != 2 or not argv[1].strip():
             print("用法: python -m mini_agent --resume <session_id>")
@@ -207,7 +210,7 @@ def main():
                 f"{_single_line_notice(error, 500)}；请检查磁盘文件和独占锁。"
             )
             return
-        except (SessionError, ResumeError, ValueError) as error:
+        except (SessionError, ResumeError, ValueError, RuntimeError) as error:
             print(f"会话恢复失败：{_single_line_notice(error, 500)}")
             return
         state = runtime.state
@@ -226,10 +229,14 @@ def main():
     else:
         state = AgentState()
         process_manager = ProcessManager()
-        run_registry = create_registry(
-            state, workspace_root=os.getcwd(), process_manager=process_manager,
-            provider_catalog=provider_catalog,
-        )
+        try:
+            run_registry = create_registry(
+                state, workspace_root=os.getcwd(), process_manager=process_manager,
+                provider_catalog=provider_catalog,
+            )
+        except (ValueError, RuntimeError) as error:
+            print(f"MCP Runtime 装配失败：{_single_line_notice(error, 500)}")
+            return
         registry = run_registry
         instructions = InstructionLoader(os.getcwd()).load()
         history = []
@@ -268,9 +275,6 @@ def main():
         context.model_binding = parent_binding
     tool_executor.model_binding = parent_binding
     if not resumed and argv and argv[0] == "--plan":
-        if len(argv) != 2 or not argv[1].strip():
-            print('用法: python -m mini_agent --plan "<任务>"')
-            return
         first_task = argv[1]
         first_mode = "plan_only"
     elif not resumed:
@@ -321,6 +325,37 @@ def main():
             )
             return False
         return True
+
+    def cleanup_mcp_boundary() -> bool:
+        """Close Runtime-owned MCP clients before a task boundary or exit."""
+        manager = getattr(run_registry, "_mcp_manager", None)
+        if manager is None:
+            return True
+        report = manager.close()
+        if report.get("closed", False):
+            return True
+        failures = report.get("failures") or report.get("servers") or []
+        for item in failures[:16]:
+            cli_notice(
+                "MCP Server 清理未完成："
+                f"alias={item.get('alias', '<unknown>')} "
+                f"reason={_single_line_notice(item.get('reason', 'unknown cleanup failure'), 300)}"
+            )
+        return False
+
+    def rebuild_task_runtime() -> None:
+        """Bind fresh handlers after /new or /reset task boundaries."""
+        global registry
+        nonlocal run_registry, tool_executor
+        run_registry = create_registry(
+            state, workspace_root=os.getcwd(), process_manager=process_manager,
+            provider_catalog=provider_catalog,
+        )
+        registry = run_registry
+        context.memory_retriever = MemoryRetriever(run_registry._memory_store)
+        context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
+        tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
+        tool_executor.model_binding = parent_binding
 
     def save_session(handoff_status="active", manual=False):
         """Save only a complete safe point; failed saves leave State untouched."""
@@ -396,7 +431,7 @@ def main():
             cli_notice("持久化已停止；当前任务不能安全切换或清空。")
             return False
         if not getattr(state, "task_id", ""):
-            return True
+            return cleanup_mcp_boundary()
         if not cleanup_delegation_boundary():
             return False
         sync_processes()
@@ -405,6 +440,8 @@ def main():
             state.record_process_cleanup(report)
         if not report.complete:
             cli_notice(report.render())
+            return False
+        if not cleanup_mcp_boundary():
             return False
         if session_id is not None and not save_session("clean"):
             return False
@@ -658,6 +695,7 @@ def main():
                     state.task = ""
                     state.status = "idle"
                 session_id = None
+                rebuild_task_runtime()
                 cli_notice("当前任务已清空。输入任务开始，或使用 /new <任务>。")
                 continue
             if user_input == "/new" or user_input.startswith("/new "):
@@ -674,6 +712,7 @@ def main():
                     state.task = task
                     state.status = "running"
                 session_id = None
+                rebuild_task_runtime()
                 cli_notice("已开始新任务。")
                 run_task(task)
                 continue
@@ -688,7 +727,10 @@ def main():
                 state.record_process_cleanup(report)
             if not report.complete:
                 cli_notice(report.render())
-            elif delegation_clean and clean_shutdown and session_id is not None and not persistence_halted:
+        mcp_clean = cleanup_mcp_boundary()
+        if getattr(state, "task_id", ""):
+            if (report.complete and delegation_clean and mcp_clean and clean_shutdown
+                    and session_id is not None and not persistence_halted):
                 save_session("clean")
 
 

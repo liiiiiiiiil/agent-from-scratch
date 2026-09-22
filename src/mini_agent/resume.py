@@ -302,6 +302,28 @@ class ResumeCandidate:
     _runtime: ResumeRuntime | None
     recovery_mode: str = "safe_point"
 
+    def close(self) -> dict[str, Any]:
+        """Release a prepared Runtime when its session will not be claimed."""
+        runtime = self._runtime
+        self._runtime = None
+        if runtime is None:
+            return {"closed": True, "servers": []}
+        manager = getattr(runtime.registry, "_mcp_manager", None)
+        return manager.close() if manager is not None else {"closed": True, "servers": []}
+
+    def __enter__(self) -> "ResumeCandidate":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Callers should close explicitly; this also covers abandoned candidates.
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def claim(self) -> ResumeRuntime:
         """Make the disk commit active and return the already-built runtime."""
         runtime = self._runtime
@@ -416,7 +438,7 @@ class ResumeCandidate:
                     context_export=runtime.context.export_session(),
                 )
         except BaseException:
-            self._runtime = None
+            self.close()
             raise
         self._runtime = None
         runtime.envelope = claimed
@@ -584,22 +606,28 @@ def prepare_resume(store: SessionStore, session_id: str,
     )
     # Do not restore candidates from the session.  Bind a fresh parent-side
     # retriever to the current workspace store for the next LLM request.
-    context.memory_retriever = MemoryRetriever(registry._memory_store)
-    context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
-    permission_gate = PermissionGate()
-    tool_executor = ToolExecutor(
-        registry, gate=permission_gate, on_result=state.record_tool,
-    )
-    runtime = ResumeRuntime(
-        session_id=session_id, envelope=deepcopy(envelope), state=state,
-        context=context, registry=registry, process_manager=process_manager,
-        permission_gate=permission_gate, tool_executor=tool_executor,
-        protected_messages=protected_messages,
-        recovery_mode="crash_recovery" if crash_mode else "safe_point",
-        source_session_id=envelope["session_id"] if crash_mode else None,
-        workspace_report=issues if crash_mode else None,
-        workspace_observation=workspace_observation if crash_mode else None,
-    )
+    try:
+        context.memory_retriever = MemoryRetriever(registry._memory_store)
+        context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
+        permission_gate = PermissionGate()
+        tool_executor = ToolExecutor(
+            registry, gate=permission_gate, on_result=state.record_tool,
+        )
+        runtime = ResumeRuntime(
+            session_id=session_id, envelope=deepcopy(envelope), state=state,
+            context=context, registry=registry, process_manager=process_manager,
+            permission_gate=permission_gate, tool_executor=tool_executor,
+            protected_messages=protected_messages,
+            recovery_mode="crash_recovery" if crash_mode else "safe_point",
+            source_session_id=envelope["session_id"] if crash_mode else None,
+            workspace_report=issues if crash_mode else None,
+            workspace_observation=workspace_observation if crash_mode else None,
+        )
+    except BaseException:
+        manager = getattr(registry, "_mcp_manager", None)
+        if manager is not None:
+            manager.close()
+        raise
     return ResumeCandidate(
         store, envelope, runtime, "crash_recovery" if crash_mode else "safe_point",
     )

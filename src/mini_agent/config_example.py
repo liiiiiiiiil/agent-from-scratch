@@ -18,13 +18,18 @@ MEMORY_RETRIEVAL_ENABLED = True
 # ]
 REFERENCES = []
 
-# Local MCP stdio servers used only by ``python -m mini_agent.mcp``.  Keep
-# real commands, paths, and environment values in the untracked config_local.py.
+# Local MCP stdio servers.  They remain available to ``python -m mini_agent.mcp``;
+# set ``agent_enabled=True`` to also expose their frozen tools to the parent Agent.
+# Keep real commands, paths, and environment values in the untracked config_local.py.
 MCP_SERVERS = [{
     "alias": "demo",
     "command": ["python", "path/to/mcp_server.py"],
     "cwd": ".",
     "environment": {},
+    "agent_enabled": True,
+    # Exact raw names from this Server's tools/list response.  These tools are
+    # locally classified as effect_class="none" but still ask PermissionGate.
+    "readonly_tools": ["echo"],
 }]
 
 # 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。

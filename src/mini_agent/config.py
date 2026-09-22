@@ -37,6 +37,7 @@ MAX_NO_PROGRESS_REPLANS = 2
 MAX_STAGNANT_ROUNDS = 3
 
 MCP_ALIAS_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+MCP_TOOL_NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 MAX_MCP_SERVERS = 32
 MAX_MCP_COMMAND_ARGS = 64
 MAX_MCP_STRING_CHARS = 4096
@@ -111,7 +112,9 @@ def validate_mcp_servers(servers: Any, *, config_base_dir: str | None = None) ->
     for index, item in enumerate(servers):
         if not isinstance(item, dict):
             raise ValueError(f"MCP_SERVERS[{index}] 必须是对象")
-        if set(item) - {"alias", "command", "cwd", "environment"}:
+        if set(item) - {
+            "alias", "command", "cwd", "environment", "agent_enabled", "readonly_tools",
+        }:
             raise ValueError(f"MCP_SERVERS[{index}] 包含未知字段")
         alias = item.get("alias")
         if (
@@ -162,6 +165,27 @@ def validate_mcp_servers(servers: Any, *, config_base_dir: str | None = None) ->
                 raise ValueError(
                     f"MCP_SERVERS[{index}].environment 必须是字符串映射"
                 )
+        agent_enabled = item.get("agent_enabled", False)
+        if not isinstance(agent_enabled, bool):
+            raise ValueError(f"MCP_SERVERS[{index}].agent_enabled 必须是 bool")
+        readonly_tools = item.get("readonly_tools", [])
+        if not isinstance(readonly_tools, list):
+            raise ValueError(f"MCP_SERVERS[{index}].readonly_tools 必须是数组")
+        readonly_seen: set[str] = set()
+        for tool_index, tool_name in enumerate(readonly_tools):
+            if (
+                not isinstance(tool_name, str)
+                or MCP_TOOL_NAME_PATTERN.fullmatch(tool_name) is None
+            ):
+                raise ValueError(
+                    f"MCP_SERVERS[{index}].readonly_tools[{tool_index}] "
+                    "必须是 1 至 64 个 ASCII 字母、数字、_ 或 -"
+                )
+            if tool_name in readonly_seen:
+                raise ValueError(
+                    f"MCP_SERVERS[{index}].readonly_tools 重复工具名: {tool_name}"
+                )
+            readonly_seen.add(tool_name)
 
 
 def resolved_mcp_servers() -> list[dict[str, Any]]:
@@ -175,6 +199,8 @@ def resolved_mcp_servers() -> list[dict[str, Any]]:
             "command": list(item["command"]),
             "cwd": item.get("cwd"),
             "environment": dict(item.get("environment", {})),
+            "agent_enabled": item.get("agent_enabled", False),
+            "readonly_tools": list(item.get("readonly_tools", [])),
         }
         if copied["cwd"] is not None and not os.path.isabs(copied["cwd"]):
             copied["cwd"] = os.path.abspath(os.path.join(base, copied["cwd"]))

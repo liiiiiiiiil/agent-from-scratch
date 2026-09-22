@@ -1,6 +1,6 @@
 # 阶段十二：MCP 与 Skills 实施计划
 
-> 状态：`v0.43` 已实现；`v0.44`–`v0.46` 仍在规划中
+> 状态：`v0.44` 已实现；`v0.45`–`v0.46` 仍在规划中
 > 建议版本范围：`v0.43`–`v0.46`
 > 能力前置：统一 Tool / PermissionGate / AgentRuntime、阶段九的持久工具边界与崩溃恢复、阶段十的父子能力隔离、阶段十一的 Context 与不可信资料边界
 > 关联计划：`reliable-execution-plan.md`、`session-persistence-resume-plan.md`、`subagent-delegation-plan.md`、`memory-retrieval-references-plan.md`
@@ -29,14 +29,15 @@ Skill 目录 → name + description 发现提示 → skill(name) → SKILL.md �
 
 **MCP 给 Agent 新能力；Skill 教 Agent 怎样组合已获准的能力。** Skill 正文不是新的执行权限，也不升级为 system instruction。
 
-四个版本分别讲一个问题：`v0.43` 已认识 MCP 协议和 stdio 生命周期；`v0.44` 计划把外部 Tool 安全接入现有 Runtime；`v0.45` 计划认识 Skill 与 Tool 的区别；`v0.46` 计划在严格限定范围内补远程传输、Resource 和 Prompt。
+四个版本分别讲一个问题：`v0.43` 认识 MCP 协议和 stdio 生命周期；`v0.44` 已把外部 Tool 安全接入父 Runtime；`v0.45` 计划认识 Skill 与 Tool 的区别；`v0.46` 计划在严格限定范围内补远程传输、Resource 和 Prompt。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
-已实现的 `v0.43` 只包含独立的 stdio Client 和演示 CLI。下列 Runtime、权限和
-Skills 集成属于后续版本的计划，不由当前代码宣称支持。
+`v0.43` 只包含独立的 stdio Client 和演示 CLI；`v0.44` 在此基础上把显式启用的
+本地 MCP Tool 接入父 Runtime。Skills、远程 HTTP、Resources 和 Prompts 仍属于后续
+版本，不由当前代码宣称支持。
 
 - 固定 MCP `2025-11-25` 握手式协议，先实现本地 stdio Server 的 `initialize → notifications/initialized → tools/list → tools/call`，拒绝不受支持的协商版本。
 - 仅由本地配置启用 MCP Server；父 Runtime 创建时冻结工具目录，外部 Tool 通过既有 Registry、Executor、PermissionGate、Plan gate、Failure、Trace 和持久工具边界执行。
@@ -125,16 +126,18 @@ MCP 工具目录、描述、Skill 目录提示、普通工具结果和显式 Res
 
 验收已完成：本地 stdio Server 可以完成握手、列出所有分页工具、调用一次文本工具并可靠退出；不受支持版本与异常消息明确失败，且能力没有进入模型工具目录。
 
-### 4.2 `v0.44`：MCP Tool 接入 Agent Runtime
+### 4.2 `v0.44`：MCP Tool 接入 Agent Runtime（已实现）
 
-目标是让外部 Tool 对 Agent 来说仍是普通 Tool，同时复用所有现有执行边界。
+目标是让外部 Tool 对 Agent 来说仍是普通 Tool，同时复用所有现有执行边界。实现已
+完成，核心落点是 `mcp/adapter.py`、`mcp/schema.py`、`tools/base.py`、
+`tools/__init__.py`、`permission.py` 与 CLI/恢复生命周期。
 
 1. 在父 Registry 装配阶段接入已冻结的 MCP 目录；建立命名、原始身份映射、schema 子集校验和冲突拒绝。不给模型暴露未经验证的工具定义。
 2. 将 `tools/call` handler 经过 ToolExecutor、PermissionGate、Plan gate 和 Runtime；默认 `possible` / `ask`，精确本地配置才允许只读降级。区分协议错误、服务端 `isError`、超时和断连，并保持完整的 `role=tool` 回灌。
 3. 接入 CLI 生命周期与 schema 3 持久工具边界；连接与 PID 不写 session，恢复时重新装配，已准入调用不自动重放。外部结果的 State/Trace excerpt 默认只留有界、脱敏摘要，不复制大段远端正文。
-4. 覆盖权限拒绝、`exploring` gate、并列工具调用顺序、handler 前提交失败、远端已执行但结果提交失败、恢复交接、子代理不可见和进程清理。
+4. 覆盖权限拒绝、`exploring` gate、并列工具调用顺序、handler 前提交失败、远端已执行但结果提交失败、恢复交接、子代理不可见和进程清理；离线验收见 `tests/test_mcp_v044.py`。
 
-验收：父模型可像使用 `read_file` 一样调用一个获准的 `mcp_<server>_<tool>`；拒绝或提交失败时远端没有收到调用；已发出而结果不确定的调用在崩溃恢复后不重放。
+验收已完成：父模型可像使用 `read_file` 一样调用一个获准的 `mcp_<server>_<tool>`；拒绝或提交失败时远端没有收到调用；已发出而结果不确定的调用在崩溃恢复后不重放。
 
 ### 4.3 `v0.45`：本地 Skills 的发现与按需加载
 

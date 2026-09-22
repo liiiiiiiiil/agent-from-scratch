@@ -108,6 +108,11 @@ def main() -> int:
             else:
                 _send({"jsonrpc": "2.0", "id": request.get("id"), "result": result})
         elif method == "tools/call":
+            if args.mode == "call-silent":
+                time.sleep(60)
+                continue
+            if args.mode == "call-disconnect":
+                return 9
             if args.mode == "remote-error":
                 _send({"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32001, "message": "fixture failure"}})
                 continue
@@ -116,6 +121,10 @@ def main() -> int:
             arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
             if args.mode == "is-error":
                 result = {"isError": True, "content": [{"type": "text", "text": "tool rejected input"}]}
+            elif args.mode == "image-result":
+                result = {"isError": False, "content": [{"type": "image", "data": "AA==", "mimeType": "image/png"}]}
+            elif args.mode == "structured-result":
+                result = {"isError": False, "structuredContent": {"value": 1}, "content": []}
             elif name == "sum":
                 result = {"isError": False, "content": [{"type": "text", "text": str(arguments.get("a", 0) + arguments.get("b", 0))}]}
             else:

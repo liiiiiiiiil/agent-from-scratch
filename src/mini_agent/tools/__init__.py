@@ -38,7 +38,8 @@ def create_registry(state: AgentState | None = None,
                     include_delegation: bool | None = None,
                     provider_catalog: ProviderCatalog | None = None,
                     memory_store: MemoryStore | None = None,
-                    reference_catalog: ReferenceCatalog | None = None) -> ToolRegistry:
+                    reference_catalog: ReferenceCatalog | None = None,
+                    include_mcp: bool | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -118,10 +119,27 @@ def create_registry(state: AgentState | None = None,
         result._reference_catalog = reference_catalog
         for tool in make_reference_tools(reference_catalog):
             result.register(tool)
+    if include_mcp is None:
+        include_mcp = state is not None
+    if include_mcp:
+        # Assemble local tools first: an invalid parent configuration must not
+        # leave an already-started MCP server without a Runtime owner.
+        from mini_agent.mcp.adapter import assemble_mcp_tools
+        servers = runtime_config.resolved_mcp_servers()
+        mcp_tools, mcp_manager = assemble_mcp_tools(
+            servers, occupied_names={tool.name for tool in result.list_tools()},
+        )
+        try:
+            for tool in mcp_tools:
+                result.register(tool)
+        except BaseException:
+            mcp_manager.close()
+            raise
+        result._mcp_manager = mcp_manager
     return result
 
 # Keep the historical module-level smoke-test registry stable.  CLI and all
 # task-bound registries use create_registry()'s normal parent view above.
-registry = create_registry(include_delegation=False)
+registry = create_registry(include_delegation=False, include_mcp=False)
 
 executor = ToolExecutor(registry)

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.44.0] - MCP Tools in the parent Agent Runtime
+
+- Added explicit `agent_enabled` and exact `readonly_tools` MCP server configuration. Existing servers remain standalone-only unless explicitly enabled.
+- Adapted frozen local MCP tools into the parent Tool Registry with strict bounded schemas, normalized names, collision rejection, default `possible` effects, and per-tool PermissionGate prompts that hide credential-like and long values.
+- Reused ToolExecutor, Plan gates, schema 3 durable tool boundaries, crash recovery, ordered `role=tool` results, and Runtime lifecycle cleanup without changing the session schema; MCP connections are rebuilt from current local configuration on new and resumed tasks and are never exposed to Subagents.
+- Classified MCP JSON-RPC errors, `isError=true`, timeouts, disconnects, protocol errors, and unsupported result content as bounded ExecutionResult failures. Added lesson 44, offline parent-runtime coverage, and synchronized the runbook, plan, README files, and version metadata.
+
 ## [v0.43.0] - Minimal stdio MCP client
 
 - Added an independent `mini_agent.mcp` stdio client for the fixed MCP `2025-11-25` lifecycle, paginated tool listing, and one manually confirmed `tools/call`.

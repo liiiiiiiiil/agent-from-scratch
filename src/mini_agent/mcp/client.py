@@ -101,6 +101,11 @@ class McpClient:
     def notifications(self) -> tuple[str, ...]:
         return tuple(self._notifications)
 
+    @property
+    def close_report(self) -> dict[str, Any]:
+        """Return the bounded cleanup report for Runtime lifecycle owners."""
+        return self.transport.close_report
+
     def __enter__(self) -> "McpClient":
         if not self.connected:
             raise McpTransportError(f"MCP client for alias {self.alias} is not connected")
