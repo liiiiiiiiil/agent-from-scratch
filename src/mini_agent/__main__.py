@@ -274,6 +274,9 @@ def main():
     else:
         context.model_binding = parent_binding
     tool_executor.model_binding = parent_binding
+    context.skill_catalog = getattr(run_registry, "_skill_catalog", None)
+    gate = getattr(tool_executor, "gate", None)
+    context.skill_permission_policy = getattr(gate, "policy", None)
     if not resumed and argv and argv[0] == "--plan":
         first_task = argv[1]
         first_mode = "plan_only"
@@ -356,6 +359,8 @@ def main():
         context.memory_retrieval_enabled = MEMORY_RETRIEVAL_ENABLED
         tool_executor = ToolExecutor(run_registry, on_result=state.record_tool)
         tool_executor.model_binding = parent_binding
+        context.skill_catalog = getattr(run_registry, "_skill_catalog", None)
+        context.skill_permission_policy = tool_executor.gate.policy
 
     def save_session(handoff_status="active", manual=False):
         """Save only a complete safe point; failed saves leave State untouched."""

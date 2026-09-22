@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码和教程已完成 `v0.44`（第 44 课：MCP Tool 接入父 Agent Runtime），阶段十二已完成本地 stdio MCP Client 与父侧 Tool 接入；v0.45–v0.46 仍在规划。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码和教程已完成 `v0.45`（第 45 课：本地 Skills 发现与按需加载），阶段十二已完成本地 stdio MCP Client、父侧 MCP Tool 与本地 Skills；v0.46 仍在规划。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -83,6 +83,7 @@
     <tr><th colspan="3"><a id="stage-12"></a>阶段十二 · 外部协议与可复用工作流</th></tr>
     <tr><td><strong>v0.43</strong></td><td><a href="./docs/tutorials/43-stdio-mcp-client.md">最小 stdio MCP 客户端</a></td><td>用独立命令连接本地 MCP Server，完成固定生命周期、分页列工具和逐次确认的手动调用；MCP Tool 仍不进入 Agent。</td></tr>
     <tr><td><strong>v0.44</strong></td><td><a href="./docs/tutorials/44-mcp-tools-runtime.md">MCP Tool 接入父 Agent Runtime</a></td><td>让显式启用的本地 MCP Tool 经过统一 Registry、权限、计划、持久工具边界和恢复流程；严格校验参数、区分失败结果，并保持 Subagent 隔离。</td></tr>
+    <tr><td><strong>v0.45</strong></td><td><a href="./docs/tutorials/45-local-skills.md">本地 Skills 发现与按需加载</a></td><td>只展示固定目录中的 Skill 元数据，获准后按需读取正文；Skill 只指导现有工具的工作流，不授予权限、不自动执行命令，并保持正文与 State/Trace 隔离。</td></tr>
   </tbody>
 </table>
 
@@ -107,6 +108,7 @@ python -m mini_agent "帮我算一下 123 * 456"
 
 ```text
 src/mini_agent/   核心运行时、配置、状态、权限、上下文和工具
+skills/           项目级本地 Skill 工作流说明
 tests/             测试与 smoke test
 docs/tutorials/    分阶段、按版本的教程
 docs/operation/    最新版运行手册

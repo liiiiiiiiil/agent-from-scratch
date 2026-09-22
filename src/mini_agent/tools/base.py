@@ -91,6 +91,10 @@ class ExecutionResult:
             return format_tool_result(self.output, max_chars=8000)
         if self.tool == "delegate_task":
             return format_tool_result(self.output, max_chars=12 * 1024)
+        if self.tool == "skill":
+            # SKILL.md is bounded at 32 KiB. Preserve the complete JSON tool
+            # result instead of applying the generic 4 KiB limit.
+            return format_tool_result(self.output, max_chars=256 * 1024)
         if self.tool.startswith("mcp_"):
             return format_tool_result(self.output, max_chars=64 * 1024)
         if self.tool in {
@@ -431,6 +435,32 @@ def _reference_excerpt(value: Any) -> str:
         return _brief(value)
 
 
+def _skill_excerpt(value: Any) -> str:
+    """Keep Skill正文 out of State/Trace while retaining load metadata."""
+    if not isinstance(value, str):
+        return _brief(value)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _brief(value)
+    if not isinstance(parsed, dict):
+        return _brief(value)
+    if parsed.get("status") == "ok":
+        safe = {
+            key: parsed[key]
+            for key in ("skill_id", "source", "bytes")
+            if key in parsed
+        }
+    else:
+        safe = {
+            "error_kind": parsed["error_kind"]
+        } if "error_kind" in parsed else {}
+    try:
+        return _brief(json.dumps(safe, ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return _brief(value)
+
+
 def _checkpoint_notice(checkpoint: Any) -> str:
     """Return metadata-only checkpoint information for a file-tool result."""
     fields = (
@@ -461,6 +491,16 @@ class ToolExecutor:
 
     def _guard(self, tool: Tool, name: str, arguments: dict[str, Any]) -> str | None:
         context = getattr(tool, "permission_context", None)
+        if name == "skill":
+            catalog = getattr(self.registry, "_skill_catalog", None)
+            if catalog is not None:
+                try:
+                    definition = catalog.get(arguments.get("name"))
+                    context = {"skill_id": definition.name, "source": definition.source}
+                except Exception:
+                    # Unknown IDs still go through the same gate, but their
+                    # prompt contains no path or guessed source.
+                    context = None
         if context is None:
             return self.gate.guard(name, arguments)
         return self.gate.guard(name, arguments, display_context=context)
@@ -596,6 +636,15 @@ class ToolExecutor:
                 text = "工具调用失败: MCP handler error"
                 error_kind = "mcp_handler_error"
                 safe_excerpt = _mcp_metadata_excerpt(tool, error_kind)
+            if name == "skill":
+                # Skill paths and body text are never part of a user-visible
+                # failure or State/Trace excerpt.
+                error_kind = getattr(error, "error_kind", None) or "skill_access_error"
+                text = json.dumps({
+                    "status": "error", "error_kind": error_kind,
+                    "message": "Skill access failed",
+                }, ensure_ascii=False, separators=(",", ":"))
+                safe_excerpt = _skill_excerpt(text)
             if checkpoint is not None:
                 text += "\n" + _checkpoint_notice(checkpoint)
             if name == "recover":
@@ -640,7 +689,9 @@ class ToolExecutor:
             output = json.dumps(public, ensure_ascii=False)
         if checkpoint is not None:
             output = f"{output}\n{_checkpoint_notice(checkpoint)}"
-        if name in {
+        if name == "skill":
+            excerpt = _skill_excerpt(output)
+        elif name in {
             "list_memories", "read_memory", "remember", "revise_memory", "forget_memory",
             "search_memories",
         }:

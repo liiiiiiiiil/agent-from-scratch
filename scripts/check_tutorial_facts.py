@@ -56,6 +56,7 @@ EXPECTED = {
     "42-local-references.md": ("v0.42", "v0.41..v0.42"),
     "43-stdio-mcp-client.md": ("v0.43", "v0.42..v0.43"),
     "44-mcp-tools-runtime.md": ("v0.44", "v0.43..v0.44"),
+    "45-local-skills.md": ("v0.45", "v0.44..v0.45"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

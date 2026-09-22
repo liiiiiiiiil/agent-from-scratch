@@ -23,6 +23,7 @@ Message = dict[str, object]
 STRUCTURED_STATE_MAX_CHARS = 6000
 _REDACTED_WRITE_INPUT = "<redacted:write_process.input>"
 MEMORY_CONTEXT_PREFIX = "[Relevant Memory — Untrusted Reference]"
+SKILL_CONTEXT_PREFIX = "[Available Local Skills — Untrusted Metadata]"
 MEMORY_RETRIEVAL_MAX_LIMIT = 4
 
 
@@ -174,10 +175,18 @@ def _is_tool_call_message(message: Message) -> bool:
     return message.get("role") == "assistant" and bool(message.get("tool_calls"))
 
 
+def _is_skill_catalog_message(message: Message) -> bool:
+    return (message.get("role") == "user"
+            and message.get("name") == "skill_catalog"
+            and isinstance(message.get("content"), str)
+            and message["content"].startswith(SKILL_CONTEXT_PREFIX))
+
+
 def _split_rounds(messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
     """Split messages into protected prefix and atomic history rounds."""
     first_user_index = next(
-        (index for index, message in enumerate(messages) if message.get("role") == "user"),
+        (index for index, message in enumerate(messages)
+         if message.get("role") == "user" and not _is_skill_catalog_message(message)),
         None,
     )
     if first_user_index is None:
@@ -308,6 +317,8 @@ class ContextManager:
         memory_retrieval_enabled: bool = True,
         memory_retrieval_limit: int = 4,
         memory_retrieval_max_chars: int = 2400,
+        skill_catalog: object | None = None,
+        permission_policy: object | None = None,
     ) -> None:
         self.state = state
         self.history = history
@@ -356,6 +367,11 @@ class ContextManager:
         self._memory_candidates: list[dict[str, object]] = []
         self._memory_query = ""
         self._memory_retrieval_failed: str | None = None
+        # These are Runtime-owned bindings.  They are intentionally excluded
+        # from Context/session exports and are replaced on every new/resumed
+        # task from the current local catalog and executor policy.
+        self.skill_catalog = skill_catalog
+        self.skill_permission_policy = permission_policy
 
     def export_session(self, *, allow_partial: bool = False) -> dict[str, object]:
         """Export task history and compaction state, excluding protected prompts.
@@ -554,6 +570,8 @@ class ContextManager:
         memory_retrieval_enabled: bool = True,
         memory_retrieval_limit: int = 4,
         memory_retrieval_max_chars: int = 2400,
+        skill_catalog: object | None = None,
+        permission_policy: object | None = None,
     ) -> "ContextManager":
         """Rebuild history and compaction state without restoring prompts."""
         cls.validate_session_export(payload)
@@ -571,6 +589,7 @@ class ContextManager:
             memory_retrieval_enabled=memory_retrieval_enabled,
             memory_retrieval_limit=memory_retrieval_limit,
             memory_retrieval_max_chars=memory_retrieval_max_chars,
+            skill_catalog=skill_catalog, permission_policy=permission_policy,
         )
         context._summary = payload["summary"]
         context._compacted = payload["compacted"]
@@ -619,7 +638,8 @@ class ContextManager:
 
     def _stats(self, messages: list[Message]) -> ContextStats:
         first_user = next(
-            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            (index for index, message in enumerate(messages)
+             if message.get("role") == "user" and not _is_skill_catalog_message(message)),
             None,
         )
         buckets = {
@@ -1210,6 +1230,18 @@ class ContextManager:
             result.insert(state_index + 1, dict(memory_message))
         return result
 
+    @staticmethod
+    def _insert_skill_message(messages: list[Message], skill_message: Message) -> list[Message]:
+        """Place untrusted metadata before the real user task, outside system."""
+        result = [dict(message) for message in messages]
+        first_user = next(
+            (index for index, message in enumerate(result)
+             if message.get("role") == "user" and not _is_skill_catalog_message(message)),
+            len(result),
+        )
+        result.insert(first_user, dict(skill_message))
+        return result
+
     def _retrieve_memory_candidates(self) -> MemorySearchResult | None:
         """Read one current Memory snapshot for this prepared view."""
         self._memory_candidates = []
@@ -1291,12 +1323,51 @@ class ContextManager:
         })
         return message
 
-    def _build_messages(self, memory_message: Message | None = None) -> list[Message]:
+    def _fit_skill_message(self, base_messages: list[Message]) -> Message | None:
+        """Build a fresh, policy-filtered Skill directory within input budget."""
+        catalog = self.skill_catalog
+        if catalog is None or not hasattr(catalog, "directory_prompt"):
+            return None
+        prefix, _ = _split_rounds(base_messages)
+        remaining = self.budget.input_limit - count_tokens(prefix)
+        if self._runtime_notice:
+            remaining -= count_tokens("[Runtime Notice]\n" + self._runtime_notice)
+        if remaining <= 0:
+            return None
+        maximum_bytes = min(8 * 1024, max(1, remaining * 3))
+        try:
+            prompt = catalog.directory_prompt(
+                self.skill_permission_policy, maximum_bytes=maximum_bytes,
+            )
+        except Exception:
+            return None
+        # The estimator is intentionally conservative.  Reduce the catalog
+        # deterministically if a very small test/emergency budget still does
+        # not fit the UTF-8 prompt.
+        while prompt and count_tokens(prompt) > remaining and maximum_bytes > 3:
+            maximum_bytes -= 3
+            try:
+                prompt = catalog.directory_prompt(
+                    self.skill_permission_policy, maximum_bytes=maximum_bytes,
+                )
+            except Exception:
+                return None
+        if not prompt or count_tokens(prompt) > remaining:
+            return None
+        return {"role": "user", "name": "skill_catalog", "content": prompt}
+
+    def _build_messages(
+        self,
+        memory_message: Message | None = None,
+        skill_message: Message | None = None,
+    ) -> list[Message]:
         source = ([dict(message) for message in self.protected_messages] if self.protected_messages is not None else [])
         source.extend(dict(message) for message in self.history)
         if not self._compacted:
             first_user = next((i for i, m in enumerate(source) if m.get("role") == "user"), len(source))
             messages = source[:first_user] + [self._render_state()] + source[first_user:]
+            if skill_message is not None:
+                messages = self._insert_skill_message(messages, skill_message)
             return (self._insert_memory_message(messages, memory_message)
                     if memory_message is not None else messages)
         prefix, rounds = _split_rounds(source)
@@ -1312,6 +1383,8 @@ class ContextManager:
             messages.append({"role": "system", "content": "[Historical Summary]\n" + self._summary})
         messages.extend(task_prefix)
         messages.extend(message for round_messages in recent for message in round_messages)
+        if skill_message is not None:
+            messages = self._insert_skill_message(messages, skill_message)
         return (self._insert_memory_message(messages, memory_message)
                 if memory_message is not None else messages)
 
@@ -1376,6 +1449,10 @@ class ContextManager:
 
         base_messages = self._build_messages()
         base_with_notice = with_notice(base_messages)
+        skill_message = self._fit_skill_message(base_with_notice)
+        if skill_message is not None:
+            base_messages = self._build_messages(skill_message=skill_message)
+            base_with_notice = with_notice(base_messages)
         prefix, _ = _split_rounds(base_with_notice)
         target = self.budget.message_limit(count_tokens(prefix))
         compacted = False
@@ -1388,14 +1465,14 @@ class ContextManager:
         )
         if base_over_budget and self.compact():
             compacted = True
-            base_messages = self._build_messages()
+            base_messages = self._build_messages(skill_message=skill_message)
 
         memory_result = self._retrieve_memory_candidates()
         memory_message = self._fit_memory_message(memory_result, base_messages)
         if memory_message is None and not compacted:
             trimmed = initial_trimmed
         else:
-            messages = with_notice(self._build_messages(memory_message))
+            messages = with_notice(self._build_messages(memory_message, skill_message))
             trimmed = self.trim_policy.trim(messages, self.budget, observer=trim_observer)
         self.last_stats = self._stats(trimmed)
         self._emit("prepared", {}, self.last_stats)

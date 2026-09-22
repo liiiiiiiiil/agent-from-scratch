@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.44` are complete (lesson 44: MCP Tools in the parent Agent Runtime); Stage 12 now includes the standalone local stdio client and the parent Tool integration, while v0.45–v0.46 remain planned. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.45` are complete (lesson 45: local Skills discovery and on-demand loading); Stage 12 now includes the standalone local stdio client, parent MCP Tools, and local Skills, while v0.46 remains planned. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -83,6 +83,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><th colspan="3"><a id="stage-12"></a>Stage 12 · External protocols and reusable workflows</th></tr>
     <tr><td><strong>v0.43</strong></td><td><a href="./docs/tutorials/43-stdio-mcp-client.md">Minimal stdio MCP client</a></td><td>Connect to a configured local MCP Server from an independent command, complete the fixed lifecycle, paginate tools, and confirm one manual call; MCP Tools remain outside the Agent.</td></tr>
     <tr><td><strong>v0.44</strong></td><td><a href="./docs/tutorials/44-mcp-tools-runtime.md">MCP Tools in the parent Agent Runtime</a></td><td>Expose only explicitly enabled local MCP Tools through the shared Registry, permission, planning, durable boundary, and recovery flow with strict schemas, classified failures, and Subagent isolation.</td></tr>
+    <tr><td><strong>v0.45</strong></td><td><a href="./docs/tutorials/45-local-skills.md">Local Skills discovery and on-demand loading</a></td><td>Show bounded Skill metadata, load a body only after permission, and keep workflow guidance separate from Tool authorization, State/Trace summaries, verification evidence, and Subagent capabilities.</td></tr>
   </tbody>
 </table>
 
@@ -107,6 +108,7 @@ Optional multiline input: `python -m pip install -e '.[interactive]'`. A command
 
 ```text
 src/mini_agent/   runtime, config, state, permissions, context, and tools
+skills/           project-local Skill workflow instructions
 tests/             tests and smoke tests
 docs/tutorials/    stage navigation and version-sliced lessons
 docs/operation/    latest-version runbook

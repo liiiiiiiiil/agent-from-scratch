@@ -47,6 +47,7 @@ PERMISSION_RULES = {
     "remember": ASK,
     "revise_memory": ASK,
     "forget_memory": ASK,
+    "skill": ASK,
     "write_file": ASK,  # 有副作用，每次问一下
     "edit_file": ASK,  # 有副作用，同 write_file
     "rollback_checkpoint": ASK,  # 仅 RecoveryRuntime 可调用的受限文件恢复
@@ -149,7 +150,7 @@ class PermissionPolicy:
             # '*' or '[' in that target must not widen an ``always`` decision
             # into a glob rule.  Other tools retain the established pattern
             # approval behavior.
-            "literal_pattern": tool_name in {"search_reference", "read_reference"},
+            "literal_pattern": tool_name in {"search_reference", "read_reference", "skill"},
         })
 
 
@@ -204,6 +205,10 @@ class PermissionGate:
         tool_name: str, args: dict, *, display_context: dict | None = None,
     ) -> str:
         """Render only non-sensitive authorization facts for stdin writes."""
+        if tool_name == "skill":
+            skill_id = str((args or {}).get("name", "<missing>"))[:64]
+            source = str((display_context or {}).get("source", "<unknown>"))[:16]
+            return f"skill_id={skill_id}, source={source}"
         if display_context is not None:
             alias = str(display_context.get("alias", "<unknown>"))[:64]
             raw_tool = str(display_context.get("tool", "<unknown>"))[:64]
@@ -290,4 +295,6 @@ class PermissionGate:
             alias = args.get("alias", "*")
             path = args.get("path", ".")
             return f"{alias}:{path}"
+        if tool_name == "skill":
+            return args.get("name", "*")
         return "*"

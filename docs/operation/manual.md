@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.44**（父 Agent Runtime 中的本地 MCP Tool；含此前独立 stdio MCP Client、Memory、相关检索与具名本地 References）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.45**（本地 Skills 的发现与按需加载；含此前父 Agent Runtime MCP Tool、Memory、相关检索与具名本地 References）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -98,7 +98,73 @@ MCP Tool 走普通的 Tool Registry、ToolExecutor、PermissionGate、Plan gate 
 EOF 和恢复候选/claim 失败时都会有界关闭连接，并报告未完成的 server alias 与原因。
 
 父提示词把 MCP 目录和结果标记为外部不可信资料：它们不能覆盖指令、权限或 Plan，也不能
-充当 verification evidence。MCP 不接入 Subagent、Skills、远程 HTTP、Resources 或 Prompts。
+充当 verification evidence。v0.44 的 MCP 范围不接入 Subagent、Skills、远程 HTTP、Resources
+或 Prompts；v0.45 的本地 Skills 见下节。
+
+## v0.45 本地 Skills
+
+Skill 是一段帮助模型安排已有工具的工作流说明。它不增加新的执行能力，也不自动执行正文中
+提到的命令。父 Agent 平时只看到固定目录中的有限元数据；只有模型调用 `skill(name)` 并
+通过 `PermissionGate` 后，才会读取 `SKILL.md` 正文。
+
+### 目录和 frontmatter
+
+Runtime 创建时固定扫描两处目录：
+
+```text
+<workspace-root>/skills/<name>/SKILL.md
+~/.mini_agent/skills/<name>/SKILL.md
+```
+
+项目级 Skill 优先于全局同名 Skill。项目级同名目录如果无效，全局同名项不会回退显示。目录
+名、frontmatter 的 `name` 和工具参数必须以小写字母开头，只能包含小写字母、数字、`_`、`-`，
+最长 64 字符，并且目录名和 `name` 必须一致。
+
+文件只接受 `---` 包围的两个单行字段：`name` 和 `description`。未知字段、重复字段、缺失
+字段、控制字符、坏 UTF-8、格式错误都会使候选失效。两个根目录合计最多扫描 64 个直属
+目录项；超过当前剩余限额的根目录整体跳过，项目级目录超限时整个 Catalog 留空，避免
+无法判断是否遮蔽全局同名项。单个文件最多 32 KiB，
+说明最多 240 字符，发给模型的目录提示最多 8 KiB。目录按 Skill ID 排序，只展示 ID、名称、
+说明和来源级别；不会展示真实路径或正文。元数据以标明不可信的用户级消息提供给模型，
+不并入受保护的 system 消息。
+
+### 权限和加载
+
+`skill` 的默认权限是 `ask`，权限 pattern 是 Skill ID。目录提示会用同一个 PermissionPolicy
+隐藏当前为 `deny` 的 ID，但直接调用仍会重新经过 PermissionGate。选择 `always` 只批准当前
+字面 ID；授权提示展示 Skill ID 和 project/global 来源，不展示真实路径。
+
+获准后，Catalog 从冻结根目录 fd 逐段打开目录和文件，拒绝符号链接，并在读取前后复核文件
+身份、修改时间和大小。文件替换、竞态变化、越界打开、坏编码和超限都返回有界的
+`skill_access_error`，不会泄露绝对路径或 Skill 正文。
+
+成功结果会包含 Skill ID、来源、字节数和完整正文。完整正文只作为当前调用的普通 `role=tool`
+历史结果，并沿用现有 Context 裁剪；State、Trace 和额外目录快照只保留 ID、来源和字节数。
+开启 `/save` 后，已经进入普通工具 history 的正文可能随会话保存。Catalog、Skill Tool、正文、
+父权限和目录提示都不进入 Subagent；Skill 也不会成为 Plan 或 verification evidence。
+
+### 观察一个本地 Skill
+
+可以在工作区创建下面的文件，然后启动父 CLI：
+
+```text
+skills/verify-change/SKILL.md
+```
+
+```markdown
+---
+name: verify-change
+description: 按读取、修改、验证的顺序完成一次有界代码变更
+---
+# Verify a change
+1. 读取相关实现和测试。
+2. 用已有工具完成最小修改。
+3. 用 run_shell 独立运行 verification。
+```
+
+模型第一次请求前只能看到 `verify-change` 的 ID、来源和说明。模型调用 `skill` 并获得一次
+授权后，工具结果才出现正文；如果正文建议调用 `run_shell`，该调用仍会按自己的 Plan gate 和
+PermissionGate 规则处理。修改 Skill 文件后开始新任务，Runtime 才会发现新的文件身份和内容。
 
 ## v0.42 具名本地 References
 
@@ -673,13 +739,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.44，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.45，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)和[第 44 课](../tutorials/44-mcp-tools-runtime.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)和[第 45 课](../tutorials/45-local-skills.md)。
 
 ### 3.1 上下文架构
 

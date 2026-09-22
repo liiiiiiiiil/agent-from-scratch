@@ -613,6 +613,8 @@ def prepare_resume(store: SessionStore, session_id: str,
         tool_executor = ToolExecutor(
             registry, gate=permission_gate, on_result=state.record_tool,
         )
+        context.skill_catalog = getattr(registry, "_skill_catalog", None)
+        context.skill_permission_policy = permission_gate.policy
         runtime = ResumeRuntime(
             session_id=session_id, envelope=deepcopy(envelope), state=state,
             context=context, registry=registry, process_manager=process_manager,

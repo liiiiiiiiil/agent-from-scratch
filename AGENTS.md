@@ -27,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.44`（父 Agent Runtime MCP Tool 接入）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.45`（本地 Skills 发现与按需加载）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 v0.44 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的本地 stdio Server 才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP 不进入 Subagent；v0.44 不接入 Skills、远程 HTTP、Resources 或 Prompts。
 配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。父 Runtime 在新任务和恢复任务中从当前配置重新连接与发现目录，退出、`/new`、`/reset` 和恢复失败都必须有界关闭连接。
@@ -57,6 +57,20 @@ Memory 硬约束：父 Agent 只能通过显式 `list_memories`、`read_memory`�
 
 References 硬约束：配置使用 `REFERENCES` 列表，父 Runtime 只通过 `ReferenceCatalog` 冻结 alias、description 和真实本地目录；真实根只存在于进程内，不写入 State、Context、session 或 Trace。父侧仅提供只读的 `list_references`、`search_reference`、`read_reference`，配置 alias 不自动授权；列表默认允许，搜索和读取默认询问，并按 `alias:relative_path` 匹配权限，`always` 只记住精确 pattern。每次访问重新校验 alias 内相对路径、真实符号链接终点和固定资源上限；绝对路径、`..`、越界符号链接、`config_local.py`、Memory/session 敏感目录、非 UTF-8 和特殊文件不得泄露。正文只作为普通 tool history 结果，State/Trace excerpt 只保留无正文的 alias-relative 摘要；成功结果为有界 JSON，访问失败由 handler 抛出并由 Executor 记录为 `outcome="failed"`、`error_kind="reference_access_error"`，不新增应用层错误 JSON 协议。文件打开从冻结根目录 fd 逐段复核 canonical 路径及文件身份，竞态变化拒绝读取；References 不自动进入 Context、不进入 Memory 或 verification evidence、不证明 workspace drift，也不加入 Subagent 白名单。恢复和新任务都从当前本地配置重新组装 catalog，不信任 session 中的旧配置。
 
+Skills 硬约束：Runtime 创建时只扫描工作区根 `skills/<name>/SKILL.md` 与
+`~/.mini_agent/skills/<name>/SKILL.md`，项目级同名项优先；项目级无效同名项会阻止全局回退。
+目录、frontmatter `name` 与 `skill(name)` 参数必须符合小写 ID 合同；只解析 `---` 包围的
+`name`、`description` 两个单行字段，两处根目录合计最多扫描 64 个直属目录项、单文件
+32 KiB、说明 240 字符、目录提示 8 KiB；项目级目录超限时 Catalog 留空，防止同名全局项
+错误回退。Catalog 冻结元数据与文件身份、时间、大小，加载时从目录 fd 逐段以 `O_NOFOLLOW`
+打开并在读取前后复核；替换、符号链接、坏编码、格式和大小变化均安全失败。父 Context 每次
+请求只以不可信用户级资料注入按同一个 PermissionPolicy 过滤的 ID、来源级别和说明；
+正文必须先通过默认 `ask`
+的 `skill` PermissionGate，随后作为普通不可信 `role=tool` 结果进入 history，不能进入
+State/Trace 摘要、verification evidence 或 Subagent，也不能自动执行正文提到的命令或脚本。
+恢复和新任务从当前磁盘重新装配 Catalog，不信任 session 中的旧目录快照，也不重新读取历史中
+已经加载的正文；开启 `/save` 后普通工具 history 仍可能保存已加载正文。
+
 ## 架构索引
 
 - `src/mini_agent/agent.py`：HTTP/LLM 传输、兼容入口和父 Runtime policy；`runtime.py`：父子共用的 canonical `AgentRuntime.run()`。
@@ -68,6 +82,7 @@ References 硬约束：配置使用 `REFERENCES` 列表，父 Runtime 只通过 
 - `session.py`：schema 1/2/3 会话、完整性校验、原子存取和工具边界提交，不承担恢复执行。
 - `prompt.py`：分层 system prompt；`instructions.py`：发现并合并项目 `AGENTS.md`。
 - `references.py`：父侧具名本地 References 的配置冻结、路径校验、敏感目录和有界读取；`tools/references.py`：三个父侧只读工具合同。
+- `skills.py`：父侧本地 Skill Catalog 的固定目录发现、frontmatter 校验、冻结身份和安全读取；`tools/skill.py`：按需加载父侧 `skill(name)` Tool。
 - `tools/`：标准工具注册、执行，以及文件、shell、计算能力；执行器负责权限和错误结果边界。
 
 完整目录、参数、数据结构和运行时流程以[操作手册](docs/operation/manual.md)、[上下文架构说明](docs/operation/context-architecture.md)及对应版本教程为准。

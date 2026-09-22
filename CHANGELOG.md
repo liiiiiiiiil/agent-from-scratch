@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.45.0] - Local Skills discovery and on-demand loading
+
+- Added a standard-library `SkillCatalog` for fixed project and global `skills/<name>/SKILL.md` directories, strict two-field frontmatter, deterministic project precedence, bounded metadata, frozen file identities, and descriptor-based race/symlink checks.
+- Added the parent-only `skill(name)` Tool with default `ask` permission, exact-ID `always` approvals, safe failure categories, complete bounded tool results, and metadata-only State/Trace excerpts.
+- Added per-request untrusted Skill directory metadata to parent Context with permission filtering and budget fitting; Skill bodies remain ordinary tool history and never enter Subagents, Plan state, or verification evidence.
+- Added lesson 45, local Skill fixtures and regression coverage for malformed files, overrides, permissions, replacement races, Context/session boundaries, and the distinction between workflow guidance and later tool authorization.
+
 ## [v0.44.0] - MCP Tools in the parent Agent Runtime
 
 - Added explicit `agent_enabled` and exact `readonly_tools` MCP server configuration. Existing servers remain standalone-only unless explicitly enabled.

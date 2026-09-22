@@ -30,6 +30,8 @@ import mini_agent.config as runtime_config
 from mini_agent.tools.memory import make_memory_tools
 from mini_agent.references import ReferenceCatalog
 from mini_agent.tools.references import make_reference_tools
+from mini_agent.skills import SkillCatalog
+from mini_agent.tools.skill import make_skill_tool
 
 def create_registry(state: AgentState | None = None,
                     workspace_root: str | None = None,
@@ -39,7 +41,8 @@ def create_registry(state: AgentState | None = None,
                     provider_catalog: ProviderCatalog | None = None,
                     memory_store: MemoryStore | None = None,
                     reference_catalog: ReferenceCatalog | None = None,
-                    include_mcp: bool | None = None) -> ToolRegistry:
+                    include_mcp: bool | None = None,
+                    skill_catalog: SkillCatalog | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -119,6 +122,11 @@ def create_registry(state: AgentState | None = None,
         result._reference_catalog = reference_catalog
         for tool in make_reference_tools(reference_catalog):
             result.register(tool)
+        # Skills are a parent-only, frozen local catalog.  The module-level
+        # compatibility registry below deliberately does not enter this path.
+        skill_catalog = skill_catalog or SkillCatalog(workspace_root or os.getcwd())
+        result._skill_catalog = skill_catalog
+        result.register(make_skill_tool(skill_catalog))
     if include_mcp is None:
         include_mcp = state is not None
     if include_mcp:
