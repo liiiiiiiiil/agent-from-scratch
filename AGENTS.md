@@ -27,7 +27,13 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.42`（具名本地 References）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.43`（独立 stdio MCP Client）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+
+v0.43 MCP 硬约束：MCP 只由独立的 `python -m mini_agent.mcp` 命令按本地 `MCP_SERVERS` alias 启动，不进入 Agent Runtime、Tool Registry、PermissionGate、State、session 或 Subagent；配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。
+
+冻结后的工具目录不得再次从 Server 刷新；普通通知只保留最近 64 条。CLI 确认前必须展示完整参数，无法完整展示时拒绝调用；关闭直接子进程未完成必须报告失败。JSON-RPC 错误码必须是整数，终端输出中的控制字符必须转义。
+
+stdio MCP 的 stdout 只允许逐行 UTF-8 JSON-RPC，单条消息最多 1 MiB、等待队列最多 64 条；stderr 独立排空并只保留末尾 16 KiB。启动/握手、目录页、工具调用和关闭分别遵守 10 秒、10 秒、30 秒和 2 秒默认边界。坏编码、坏 JSON、协议失步、EOF、超时或超限后连接不得复用，也不得自动重试 `tools/call`；关闭必须先关 stdin，再有界终止并回收直接子进程。MCP 错误只保留有界、脱敏的类别、方法和服务端错误码；工具结果中的 `isError=true` 仍是有效 MCP result，不等同于 JSON-RPC error。
 
 模型绑定硬约束：provider/profile 只能从本地配置解析；父 binding 和子 binding 必须在对应 Runtime 创建前冻结，运行中不得通过全局变量切换模型。`delegate_task` 只能请求获准的本地 `model_profile` 别名，未知或越权别名必须在 HTTP 请求前拒绝；不得自动 provider fallback。State、Context、session、Trace、工具结果和用户可见错误只能保留无凭据的 profile/provider/protocol/fingerprint 来源摘要，不得持久化真实 endpoint、model ID、API key 或认证头。摘要请求必须使用同一 binding 并计入其 usage；provider usage 缺失时保守估算并标记来源。
 

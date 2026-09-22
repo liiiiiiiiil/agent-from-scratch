@@ -3,6 +3,8 @@
 # catalog resolves relative paths against config_local.py when that file is
 # present and freezes the resulting directories at runtime construction.
 import os
+import re
+from typing import Any
 
 # 提交进 git 的模板。本地真实配置请写进 config_local.py（不进 git）。
 # 用法：复制 config_example.py 为 config_local.py，填入你的真实值。
@@ -12,6 +14,7 @@ MODEL = "model-PLACEHOLDER"
 MEMORY_DIR = "~/.mini_agent/memory"
 MEMORY_RETRIEVAL_ENABLED = True
 REFERENCES = []
+MCP_SERVERS = []
 # v0.36 provider/profile mappings.  Empty mappings intentionally select the
 # legacy BASE_URL/API_KEY/MODEL compatibility path above.
 PROVIDERS = {}
@@ -32,6 +35,11 @@ MAX_SESSION_FILE_BYTES = 16 * 1024 * 1024
 MAX_REPLAN_REVISIONS = 3
 MAX_NO_PROGRESS_REPLANS = 2
 MAX_STAGNANT_ROUNDS = 3
+
+MCP_ALIAS_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+MAX_MCP_SERVERS = 32
+MAX_MCP_COMMAND_ARGS = 64
+MAX_MCP_STRING_CHARS = 4096
 
 # v0.38 parent-task delegation budgets.
 MAX_SUBAGENTS = 3
@@ -74,6 +82,7 @@ def validate_runtime_config() -> None:
         for field in ("alias", "path", "description"):
             if not isinstance(item[field], str):
                 raise ValueError(f"REFERENCES[{index}].{field} 必须是字符串")
+    validate_mcp_servers(MCP_SERVERS)
     for name in (
         "MAX_ATTEMPT_FINGERPRINTS", "MAX_REPLAN_REVISIONS",
         "MAX_NO_PROGRESS_REPLANS", "MAX_STAGNANT_ROUNDS", "MAX_SUBAGENTS",
@@ -91,6 +100,86 @@ def validate_runtime_config() -> None:
         )
     if MAX_SUBAGENTS < MAX_CONCURRENCY:
         raise ValueError("MAX_SUBAGENTS 不能小于 MAX_CONCURRENCY")
+
+def validate_mcp_servers(servers: Any, *, config_base_dir: str | None = None) -> None:
+    """Validate local MCP server definitions without starting a process."""
+    if not isinstance(servers, list):
+        raise ValueError("MCP_SERVERS 必须是数组")
+    if len(servers) > MAX_MCP_SERVERS:
+        raise ValueError(f"MCP_SERVERS 不能超过 {MAX_MCP_SERVERS} 项")
+    aliases: set[str] = set()
+    for index, item in enumerate(servers):
+        if not isinstance(item, dict):
+            raise ValueError(f"MCP_SERVERS[{index}] 必须是对象")
+        if set(item) - {"alias", "command", "cwd", "environment"}:
+            raise ValueError(f"MCP_SERVERS[{index}] 包含未知字段")
+        alias = item.get("alias")
+        if (
+            not isinstance(alias, str)
+            or MCP_ALIAS_PATTERN.fullmatch(alias) is None
+        ):
+            raise ValueError(
+                f"MCP_SERVERS[{index}].alias 必须以小写字母开头，只能包含小写字母、数字、_、-"
+            )
+        folded = alias.casefold()
+        if folded in aliases:
+            raise ValueError(f"MCP server alias 重复: {alias}")
+        aliases.add(folded)
+        command = item.get("command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or len(command) > MAX_MCP_COMMAND_ARGS
+            or any(
+                not isinstance(part, str)
+                or not part
+                or len(part) > MAX_MCP_STRING_CHARS
+                or "\x00" in part
+                for part in command
+            )
+        ):
+            raise ValueError(
+                f"MCP_SERVERS[{index}].command 必须是非空字符串 argv 列表"
+            )
+        cwd = item.get("cwd")
+        if cwd is not None and (
+            not isinstance(cwd, str) or len(cwd) > MAX_MCP_STRING_CHARS or "\x00" in cwd
+        ):
+            raise ValueError(f"MCP_SERVERS[{index}].cwd 必须是字符串")
+        environment = item.get("environment", {})
+        if not isinstance(environment, dict):
+            raise ValueError(f"MCP_SERVERS[{index}].environment 必须是字符串映射")
+        for key, value in environment.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key) > MAX_MCP_STRING_CHARS
+                or "\x00" in key
+                or not isinstance(value, str)
+                or len(value) > MAX_MCP_STRING_CHARS
+                or "\x00" in value
+            ):
+                raise ValueError(
+                    f"MCP_SERVERS[{index}].environment 必须是字符串映射"
+                )
+
+
+def resolved_mcp_servers() -> list[dict[str, Any]]:
+    """Return a detached config snapshot with relative cwd resolved locally."""
+    validate_mcp_servers(MCP_SERVERS)
+    base = CONFIG_BASE_DIR
+    result: list[dict[str, Any]] = []
+    for item in MCP_SERVERS:
+        copied = {
+            "alias": item["alias"],
+            "command": list(item["command"]),
+            "cwd": item.get("cwd"),
+            "environment": dict(item.get("environment", {})),
+        }
+        if copied["cwd"] is not None and not os.path.isabs(copied["cwd"]):
+            copied["cwd"] = os.path.abspath(os.path.join(base, copied["cwd"]))
+        result.append(copied)
+    return result
 
 
 validate_runtime_config()

@@ -18,6 +18,15 @@ MEMORY_RETRIEVAL_ENABLED = True
 # ]
 REFERENCES = []
 
+# Local MCP stdio servers used only by ``python -m mini_agent.mcp``.  Keep
+# real commands, paths, and environment values in the untracked config_local.py.
+MCP_SERVERS = [{
+    "alias": "demo",
+    "command": ["python", "path/to/mcp_server.py"],
+    "cwd": ".",
+    "environment": {},
+}]
+
 # 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。
 # 下面的值全部是占位值；真实值只应写入不进 git 的 config_local.py。
 PROVIDERS = {

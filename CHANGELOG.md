@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.43.0] - Minimal stdio MCP client
+
+- Added an independent `mini_agent.mcp` stdio client for the fixed MCP `2025-11-25` lifecycle, paginated tool listing, and one manually confirmed `tools/call`.
+- Added bounded JSON-RPC validation, stdout/stderr separation, timeout handling, safe error categories, and direct child-process cleanup.
+- Added local `MCP_SERVERS` configuration, an offline fixture, protocol/CLI lifecycle tests, and lesson 43.
+- MCP tools remain outside the Agent Runtime, Tool Registry, PermissionGate, State, and session; v0.44–v0.46 remain planned.
+- Hardened the review boundaries: frozen tool catalog, bounded notification history, complete call preview, visible cleanup failure, and strict JSON-RPC error codes.
+
 ## [v0.42.0] - Named local references
 
 - Added parent-only, standard-library `ReferenceCatalog` with frozen named local directories, bounded UTF-8 reads, literal case-insensitive search, SHA-256 provenance, and deterministic alias-relative results.

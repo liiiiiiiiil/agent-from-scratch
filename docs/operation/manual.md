@@ -1,6 +1,60 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.42**（具名本地 References；含此前 Memory、相关检索与可靠执行能力）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.43**（独立 stdio MCP Client；含此前 Memory、相关检索与具名本地 References）。
+
+## v0.43 独立 stdio MCP Client
+
+v0.43 提供一个不接入 Agent Runtime 的 MCP 演示命令。它按固定的
+`2025-11-25` 生命周期连接一个本地 stdio Server：
+`initialize → notifications/initialized → tools/list → tools/call`。Server 的 stdout
+只承载逐行 UTF-8 JSON-RPC，stderr 单独排空并只保留有界尾部。
+
+### 配置
+
+真实命令、路径和环境值写在未跟踪的 `src/mini_agent/config_local.py`；导入配置不会启动进程：
+
+```python
+MCP_SERVERS = [{
+    "alias": "demo",
+    "command": ["python", "../../tests/fixtures/mcp_stdio_server.py"],
+    "cwd": ".",
+    "environment": {},
+}]
+```
+
+`alias` 必须是以小写字母开头的受限名称且唯一；`command` 是非空字符串 argv
+列表；`cwd` 为可选字符串，相对路径以 `config_local.py` 所在目录为基准；
+`environment` 是字符串映射。命令不经过 shell。只有显式选择 alias 的演示命令会启动
+Server。
+
+### 独立命令
+
+```bash
+PYTHONPATH=src python -m mini_agent.mcp demo list
+PYTHONPATH=src python -m mini_agent.mcp demo call echo '{"text":"hello"}'
+```
+
+`list` 会读取完整分页并显示有界的工具目录；同一连接后续读取只返回冻结快照。
+`call` 会在发请求前完整显示 alias、原始工具名和参数，只有交互终端输入 `yes` 或
+`y` 才发送一次 `tools/call`。参数过长、无法完整展示、EOF、拒绝和非交互输入都不会
+发送调用。退出路径会关闭 stdin、等待子进程，并在必要时终止和回收直接子进程；
+清理未完成会报告错误并返回非零状态。
+
+### 错误排查
+
+启动/握手默认超时 10 秒，目录每页 10 秒，工具调用 30 秒，关闭宽限 2 秒。单条
+stdout 消息最多 1 MiB，stdout 等待队列最多 64 条，普通通知只保留最近 64 条，stderr 只保留末尾 16 KiB，目录
+最多 16 页和 256 个工具。坏编码、坏 JSON、错 ID、同时含 `result`/`error`、EOF、
+超限和协议失步都会让连接失效；不自动重试 `tools/call`。JSON-RPC `error` 与工具
+结果中的 `isError=true` 分开处理。
+
+异常只显示有限的类别和服务端错误码，不显示完整 command、环境变量、原始参数或
+服务端错误正文。遇到 Server 没有响应时检查其 stdout 是否按“每行一个 JSON 对象”
+输出；不要把日志写到 stdout，应写到 stderr。
+
+本版的手动确认只是演示命令的交互保护，不是 Agent 的 PermissionGate。MCP Tool
+不会进入模型、Tool Registry、State 或 session；连接和 PID 只存在于当前演示进程。
+v0.44 才计划研究外部 Tool 的 Runtime、权限和恢复接入。
 
 ## v0.42 具名本地 References
 
@@ -575,13 +629,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.42，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.43，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)。
 
 ### 3.1 上下文架构
 

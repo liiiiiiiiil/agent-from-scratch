@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.42` are complete (lesson 42: named local references), completing Stage 11. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.43` are complete (lesson 43: minimal stdio MCP client); Stage 12 has its standalone local MCP client slice, while v0.44–v0.46 remain planned. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -80,6 +80,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">Lightweight persistent memory</a></td><td>Let the parent Agent explicitly view, save, revise, and forget workspace memory with pagination, workspace-external storage, uncertain-commit inspection, permission, revision, atomic storage, and recovery boundaries.</td></tr>
     <tr><td><strong>v0.41</strong></td><td><a href="./docs/tutorials/41-memory-retrieval.md">Relevant memory retrieval</a></td><td>Use standard-library lexical retrieval to recover a few relevant candidates and inject untrusted summaries into the parent Context within budget; explicit and automatic retrieval leave Memory, State, and sessions unchanged.</td></tr>
     <tr><td><strong>v0.42</strong></td><td><a href="./docs/tutorials/42-local-references.md">Named local references</a></td><td>Discover, search, and read workspace-external local material through stable aliases with per-call permission, symlink, and sensitive-path checks; References stay out of automatic Context and Subagents.</td></tr>
+    <tr><th colspan="3"><a id="stage-12"></a>Stage 12 · External protocols and reusable workflows</th></tr>
+    <tr><td><strong>v0.43</strong></td><td><a href="./docs/tutorials/43-stdio-mcp-client.md">Minimal stdio MCP client</a></td><td>Connect to a configured local MCP Server from an independent command, complete the fixed lifecycle, paginate tools, and confirm one manual call; MCP Tools remain outside the Agent.</td></tr>
   </tbody>
 </table>
 
