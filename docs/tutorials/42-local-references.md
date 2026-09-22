@@ -1,87 +1,120 @@
-# 第 42 课：具名本地资料
+# 第 42 课：用稳定名称读取本地参考资料
 
-代码快照：`v0.42` · 相邻差异：`v0.41..v0.42`
+上一课：[相关记忆检索与有界上下文](41-memory-retrieval.md) · [教程总览](README.md)
 
-本课示例命令使用 Bash/zsh。课程正文描述的是 v0.42 快照；v0.42 Git tag 由维护者在交付后固定，阅读者切换前请确认本地已有该 tag。
+> 代码快照：`v0.42` · 相邻差异：`v0.41..v0.42` · 命令环境：Bash/zsh
 
 ## 本课目标
 
-第 41 课解决了“怎样从工作区 Memory 找回少量相关资料”。但有一类资料不适合放进 Memory：它们可能是工作区外的本地设计文档、离线规范或团队资料。上一版 Agent 不能安全地发现这些目录，也不能把一次读取和稳定来源对应起来。
+第 40、41 课处理的是工作区自己的 Memory：它适合保存少量、明确记录的项目知识。现在
+再想一个场景：团队有一个工作区外的离线设计文档目录，你希望 Agent 在需要时查阅它，
+却不希望把整个目录复制到项目里，也不希望把真实的本机路径暴露给模型。
 
-本课增加具名本地 References：用户在本地配置中登记目录，Agent 只看到稳定 alias 和说明；需要内容时在一个 alias 内搜索或按行读取。完成本课后，读者应能解释四件事：真实根路径为什么不能进入持久状态、为什么 alias 不等于读取授权、为什么每次读取都重新检查路径，以及为什么 Reference 内容仍只是模型判断用的不可信资料。
+本课增加本地 References（参考资料）。用户在本地配置中给目录一个稳定的别名，Agent
+先看到别名和说明，再按需搜索或读取目录内的文件。它是只读资料入口，不是远程仓库，
+也不是自动注入上下文的第二套 Memory。
+
+读完本课，你应能回答：
+
+- 为什么模型看到的是 alias（别名），而不是本机真实路径；
+- 为什么“能发现”不等于“已经获准读取”；
+- 为什么每次搜索和读取都要重新检查相对路径与符号链接；
+- 为什么读到的 Reference 仍只是供模型判断的资料，不能代替当前任务的验证。
 
 ## 前置条件
 
-先阅读[第 41 课：相关记忆检索与有界上下文](41-memory-retrieval.md)，理解 Memory 与普通 tool history 的区别。代码仓库需要 Python 3.10+；本课的离线观察命令不需要真实模型服务。
+先阅读[第 41 课：让 Agent 找回相关记忆，而不是翻遍所有记录](41-memory-retrieval.md)，
+理解 Memory、Context 和普通 tool history 的区别。需要 Python 3.10+；本课命令使用
+Bash/zsh，不需要真实模型服务。
 
-为了查看本版本相对上一版本的真实变化，可以执行：
+先切到本课快照并查看相邻版本的变化：
 
 ```bash
 git checkout v0.42
 git diff --stat v0.41..v0.42
 ```
 
-第一条命令切换到课程快照，第二条命令显示变化集中在配置、ReferenceCatalog、父侧工具和安全边界。阅读结束后回到自己的分支：
+阅读结束后可以回到原来的分支：
 
 ```bash
 git checkout -
 ```
 
-## 新增与改动文件
+## 上一版的问题：记忆和本地参考资料不是一回事
 
-本课把“目录如何解析和读取”与“模型能调用什么”分开。前者由 `ReferenceCatalog` 负责，后者由工具定义和父 registry 负责；这样工具不会直接处理真实根路径，也不会把 References 带进子代理视图。
+Memory 适合保存“这个项目的测试命令”这类短小、经过明确记录的知识；它不适合替代
+一个可能有很多文件的离线资料目录。v0.41 的自动检索也只读工作区 Memory，不会
+访问工作区外的本地路径。
+
+直接把本机绝对路径交给模型有两个问题：路径可能包含用户名、项目结构等不必要的
+敏感信息；如果模型再把路径拼接到文件工具中，`..` 或符号链接还可能越出用户原本
+想开放的目录。v0.42 因此把“可被模型发现的名称”和“进程内部使用的真实目录”分开。
+
+## 本版新增什么
+
+本版把一次资料访问拆成四步：
+
+```text
+config_local.py 的 References 配置
+              ↓ 启动时解析并冻结
+       ReferenceCatalog（进程内目录簿）
+              ↓
+list_references → alias + description       （发现）
+search/read     → 权限 → 路径检查 → 有界文件内容（使用）
+```
+
+`ReferenceCatalog` 是进程内的目录簿：它保存别名、说明和真实目录，但真实目录不写入
+State、Context、session 或 Trace。`alias` 只是“查找时使用的名字”，本身不等于读取
+授权；搜索和读取仍要经过 PermissionGate。
+
+主要代码变化如下：
+
+## 新增与改动文件
 
 | 文件 | 作用 |
 |---|---|
-| `src/mini_agent/references.py` | 冻结 alias、解析配置路径、检查符号链接和敏感目录，执行有界搜索与按行读取 |
-| `src/mini_agent/tools/references.py` | 定义三个严格 JSON schema、默认参数、结果上限和父侧 handler |
-| `src/mini_agent/config.py`、`config_example.py` | 提供默认空配置，并说明真实 References 只写入未跟踪的 `config_local.py` |
-| `src/mini_agent/tools/__init__.py` | 只给绑定父 `AgentState` 的 registry 注入 catalog 和三个工具 |
-| `src/mini_agent/permission.py` | 列表默认允许，搜索/读取按 `alias:relative_path` 默认询问 |
-| `src/mini_agent/tools/base.py` | 保留完整 JSON tool result，同时清洗 State/Trace 的 metadata excerpt |
-| `src/mini_agent/state.py`、`prompt.py` | 允许只读恢复调查，保持 workspace drift、verification、Plan 和子代理边界 |
+| [`references.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/references.py) | 冻结别名和真实目录，校验路径、符号链接、敏感位置，并执行有界访问。 |
+| [`tools/references.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/tools/references.py) | 定义三个父侧只读工具的输入和结果合同。 |
+| `config.py`、`config_example.py` | 提供默认空配置，并说明真实配置只放在未跟踪的 `config_local.py`。 |
+| [`tools/__init__.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/tools/__init__.py) | 只在父 registry 中绑定 ReferenceCatalog。 |
+| [`permission.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/permission.py) | 以 `alias:relative_path` 形式审阅搜索和读取权限。 |
 
 ## 版本变更定位
 
-v0.41 的入口是父 Context 对 Memory 的临时检索；它不读取工作区外目录。下面的图只画上一版已经存在的真实调用链，帮助读者先看清新增能力插在哪里。
+图中的 `[旧]` 是 v0.41 已有能力，`[+]` 是本课新增，`[~]` 是本课修改，`[C]`
+表示主要使用者，`[B]` 表示本课边界。
+
+上一版的父 Runtime 只有工作区 Memory 的临时检索和普通工具：
 
 ```text
-[旧] AgentState.task + 最近 user 文本
-                 │
-                 ▼
-[旧] ContextManager.prepare_messages()
-                 │
-                 ├── [旧] MemoryRetriever → 临时、不可信 Memory 资料区
-                 └── [旧] ToolExecutor → parent ToolRegistry → role=tool history
+[旧][C] 父 Agent Runtime
+      ├─→ [旧] ContextManager → MemoryRetriever → 临时 Memory 资料区
+      └─→ [旧] ToolExecutor → 父 ToolRegistry → role=tool history
+          [B] 没有工作区外本地资料的稳定入口
 ```
 
-v0.42 不改 Context 的自动检索流程，也不增加 session 字段。它在父 registry 的普通工具入口旁插入一个进程内 catalog；工具结果仍走原有 Executor、PermissionGate 和 history 边界。
+本版在父 registry 的工具入口增加进程内 catalog，但不改自动 Memory 检索和 session schema：
 
 ```text
-[旧] 父 Agent Runtime
-          │
-          ├── [~] create_registry(state=parent)
-          │       ├── [旧] MemoryStore / Memory tools
-          │       └── [+] ReferenceCatalog(冻结真实根，进程内)
-          │                 │
-          │                 └── [+] list_references  [C]  alias + description
-          │                     [+] search_reference [C]  PermissionGate → 路径检查 → 搜索
-          │                     [+] read_reference   [C]  PermissionGate → 路径检查 → 读取
-          │
-          ├── [旧] ToolExecutor → 完整 JSON tool history
-          └── [旧] State/Trace → [+] alias-relative metadata excerpt
+[C] 父 Agent Runtime
+      └─→ [~] create_registry(state=parent)
+            ├─→ [旧] MemoryStore / Memory tools
+            └─→ [+] ReferenceCatalog（真实根只留在进程内）
+                  ├─→ [+] list_references → alias + description
+                  ├─→ [+] search_reference → 权限 → 路径检查 → 搜索
+                  └─→ [+] read_reference → 权限 → 路径检查 → 按行读取
 
-[B] 子代理 FilteredToolRegistryView、自动 Context、Memory、verification evidence、session schema
-    不接收 ReferenceCatalog 或三个工具。
+[旧] ToolExecutor → 完整 JSON tool history
+[+] State / Trace metadata → alias、相对路径、行号、摘要和 hash
+[B] 子代理、自动 Context、Memory、Plan、verification evidence 不接收 References。
 ```
-
-图中的 `[旧]` 表示 v0.41 已有节点，`[+]` 表示本课新增，`[~]` 表示修改，`[C]` 表示主要消费者，`[B]` 表示本版边界。正常路径是“配置冻结 → 父工具调用 → 权限 → 每次路径检查 → 有界 JSON”。权限拒绝在 handler 前结束；路径、文件类型、编码和资源错误由 handler 抛出，再由 Executor 记录为统一的工具失败。
 
 ## 关键流程
 
-### 1. 配置只登记名字、路径和说明
+### 1. 配置一个名字，而不是把路径写进提示词
 
-真实模型配置仍只放在未跟踪的 `config_local.py`。References 使用同一个本地文件登记资料目录：
+真实的 `BASE_URL`、`API_KEY` 和 `MODEL` 仍只能放在未跟踪的 `config_local.py`。本地
+资料可以在同一个文件中登记：
 
 ```python
 REFERENCES = [
@@ -93,29 +126,36 @@ REFERENCES = [
 ]
 ```
 
-相对 `path` 以 `src/mini_agent/config_local.py` 所在目录为基准。启动时，catalog 把路径展开、绝对化并解析为真实目录；随后即使配置对象被修改，已经运行的父 Runtime 仍使用原来的冻结定义。alias 必须以小写字母开头，只能包含小写字母、数字、`_`、`-`，最长 64 个字符。
+相对 `path` 以 `config_local.py` 所在目录为基准。启动父 Runtime 时，系统会把它展开、
+绝对化并解析成真实目录，然后冻结这份定义；运行中修改配置对象不会悄悄改变正在运行
+的 catalog。alias 必须以小写字母开头，只能使用小写字母、数字、`_` 和 `-`，最长
+64 个字符。
 
-### 2. 发现不等于授权
+### 2. 发现资料和读取资料是两件事
 
-模型先可以调用：
+模型可以先调用：
 
 ```text
 list_references()
 ```
 
-结果只包含 alias 和 description，例如 `python-docs` 与“本地 Python 设计资料”，不会返回真实根路径。配置中的目录不会因此自动获得读取许可：
+它只返回 `python-docs` 和“本地 Python 设计资料”，不返回真实根路径，也不扫描目录。
+如果模型接着调用：
 
 ```text
 search_reference(alias="python-docs", query="dataclass", include="*.py")
 ```
 
-默认权限会询问一次，提示只显示 alias、相对路径、搜索词和限制，不显示真实根。权限 pattern 是 `python-docs:.` 或 `python-docs:subdir`；用户选择 `always` 时只记住精确的 `alias:path` pattern，不自动授权该目录的子树；配置目录本身不等于授权规则。
+PermissionGate 默认会询问用户。提示只显示 alias、alias 内相对路径、搜索词和限制，
+不显示真实本机路径。权限 pattern 是 `python-docs:.` 或 `python-docs:subdir`；用户
+选择 `always` 时只记住这个精确的 `alias:path`，不会自动放开另一个 alias 或整棵子树。
 
-### 3. 搜索和按行读取返回可核查来源
+### 3. 搜索和读取都提供可核查的位置
 
-搜索是大小写不敏感的字面量匹配，不执行正则表达式：
+`search_reference` 做大小写不敏感的字面量匹配，不执行正则表达式。结果使用 alias
+内的相对路径、行号、匹配文本和 SHA-256，例如：
 
-```text
+```json
 {
   "alias": "python-docs",
   "matches": [
@@ -127,63 +167,89 @@ search_reference(alias="python-docs", query="dataclass", include="*.py")
 }
 ```
 
-`path` 始终是 alias 内相对路径。读取时使用 `offset=0`、`limit=200` 的有界行片段：
+需要更大范围时，模型可以调用：
 
 ```text
 read_reference(alias="python-docs", path="guide/dataclasses.py", offset=12, limit=6)
 ```
 
-结果带有行号、实际 `returned_lines`、自洽的起止行、`omitted_lines`、总行数、文件 SHA-256 和 `truncated`。`limit` 是请求上限，不是承诺的实际返回数量；最终 JSON 因字节上限裁掉行时，数量、起止行和省略数量会一起更新。搜索还返回 `returned_matches`；`scan_truncated` 表示搜索资料没有完整扫描，和展示结果裁剪的 `truncated` 不同。摘要是本次实际读取内容的摘要；如果文件在搜索和读取之间发生变化，后一次读取返回新内容和新 SHA-256，不把旧搜索结果当成快照。
+返回值带有行号、实际返回数量、起止行、总行数、文件 SHA-256 和截断状态。`limit` 是
+请求上限，不保证一定能返回这么多行；如果最终 JSON 的字节上限又裁掉了内容，起止行
+和 `omitted_lines` 会同步更新。搜索结果中的 `scan_truncated` 表示资料没有完整扫描，
+与展示集合被裁剪的 `truncated` 不是一回事。
 
-### 4. 每次访问都重新检查边界
+### 4. 每一次访问都重新验证路径
 
-ReferenceCatalog 不把一次路径检查缓存成永久许可。它拒绝绝对路径、空路径、`..`、NUL、目录读取、设备文件、非 UTF-8 文件和超过 1 MiB 的文件。文件符号链接只有在终点仍位于冻结根内时才可读；目录符号链接不会被搜索遍历。打开时会从冻结根的目录 fd 逐段打开 canonical 路径，并复核根目录、路径组件和文件身份；不支持这组 fd 能力的平台采用打开前后复核，竞态变化直接失败。
+catalog 冻结的是允许的根目录，不是某个文件的永久通行证。每次搜索或读取都会检查：
 
-启动时位于 MemoryStore 根或默认 `~/.mini_agent/sessions` 内的 Reference 根会直接拒绝。较宽的 Reference 根如果包含这些敏感子目录，递归搜索跳过它们；显式读取会报错。名为 `config_local.py` 的目标同样直接拒绝。错误只返回明确的错误种类和不含真实根的说明。
+- 路径必须是 alias 内的相对路径，不能是绝对路径、空路径、包含 `..` 或 NUL 的路径；
+- 目标必须是允许的 UTF-8 普通文件，不能是目录、设备文件或超过 1 MiB 的文件；
+- 文件符号链接解析后的终点仍要位于冻结根内，目录符号链接不会被搜索遍历；
+- `config_local.py`、Memory 根目录和默认 `~/.mini_agent/sessions` 等敏感位置不能被读取。
+
+打开文件时还会复核路径组件和文件身份；如果文件在检查与打开之间发生竞态变化，
+访问会失败，而不是冒险读取不确定的目标。错误只返回明确的错误类型和不含真实根
+路径的说明。
 
 ## 实现拆解
 
-### 1. ReferenceCatalog 只在父 registry 中创建
+`create_registry(state=...)` 只在父 Agent 有自己的 `AgentState` 时创建 catalog。没有
+状态的模块级 smoke registry 不注册 References；子代理的固定白名单也不会因为父侧
+新增三个工具而扩大。
 
-`create_registry(state=...)` 先得到当前 MemoryStore，再把它的根和默认 session 根交给 `ReferenceCatalog` 作为敏感路径集合。没有 `AgentState` 的模块级 smoke registry 不注册 References；子代理的固定白名单也不会因为父 registry 新增工具而扩大。
+三个工具都使用严格的 JSON schema，拒绝未声明参数。它们的 `effect_class` 都是
+`none`，所以不会预留 generation、创建 verification evidence 或修改 Memory/State；
+但搜索和读取的权限询问仍然发生在 handler 之前。
 
-### 2. 工具 schema 先限制模型输入
-
-三个工具都使用 `additionalProperties=False`。`search_reference` 的 `path`、`include`、`limit` 有默认值，`read_reference` 的 `offset` 和 `limit` 有默认值；alias、query、相对路径和数字范围在进入 catalog 前就会被统一验证。三个工具的 `effect_class` 都是 `none`，因此不预留 generation、不创建 verification evidence，也不修改 Memory 或 State。
-
-### 3. 完整结果与摘要分开
-
-普通 tool history 需要正文，模型才能理解搜索命中或读取内容；State/Trace 的 `output_excerpt` 只需要知道“读了哪个 alias 的哪个相对路径、命中了几条、文件摘要是什么”。因此 Executor 对 References 单独清洗 `text` 和行正文，保留 alias、相对路径、行号、数量、SHA-256 和截断状态。成功结果始终是有界 JSON；路径或文件错误直接抛给 Executor，记录为 `outcome="failed"` 和 `error_kind="reference_access_error"`。输出超限时只移除末尾集合项，并同步更新 `returned_lines`/`returned_matches` 与起止范围，不会截出残缺 JSON。
+完整正文必须留在普通 tool history，模型需要它来判断搜索结果；State 和 Trace 只保留
+alias、相对路径、行号、数量、SHA-256 和截断状态等摘要。这样用户可以核查“读了哪个
+别名下的哪一份资料”，又不会把真实根路径复制到状态摘要中。访问失败由 Executor
+记录为 `outcome="failed"` 和 `error_kind="reference_access_error"`。
 
 ## 为什么这样设计
 
-具名 alias 把“模型可发现的稳定名称”和“进程内必须保护的真实路径”分开。路径冻结避免运行中悄悄改变配置；每次重新解析又能应对文件变化和符号链接变化。按行来源和 SHA-256 让模型或用户可以在之后核查“哪一个文件、哪一行、哪一份内容”。
+alias 把稳定的模型接口和易变、可能敏感的本机路径分开；启动时冻结定义，避免运行中
+悄悄换资料根；每次重新检查，避免把旧的路径判断当成永久安全保证。相对路径、行号和
+SHA-256 让一次读取更容易复查，也能看出文件在两次访问之间是否改变。
 
-搜索和读取仍默认询问，是因为本地资料可能包含不适合交给模型的内容；列表默认允许只提供用户登记过的名称和说明。把权限 pattern 设为 alias 加相对路径，并让 `always` 只记住精确 pattern，既能记住一次明确选择，也不会把另一个 alias 的同名路径一并放行。
+列表默认允许，是因为它只展示用户主动登记的名称和说明；搜索与读取默认询问，是因为
+目录中可能有用户不想交给模型的文件。只读设计和父侧限定，避免 References 变成隐式
+文件写入或子代理越权入口。
 
-本课刻意不做写入、远程仓库、正则搜索、二进制读取、缓存、自动 Context 注入、Memory 来源迁移和子代理访问。Reference 内容也不能覆盖项目指令、Plan 或 PermissionGate，更不能当作 verification evidence。Memory schema 1 的自由文本 `source` 仍统一是 `source_status="unverified"`，v0.42 没有把它改成文件来源系统。
+代价也很明确：v0.42 不支持写入、远程仓库、正则搜索、二进制读取、缓存和自动 Context
+注入；Reference 不会自动成为 Memory 的来源；它也不能覆盖项目指令、Plan 或
+PermissionGate，更不能单独证明当前工作区已经通过验证。
 
 ## 设计边界
 
-- 真实根只留在进程内 catalog；alias、相对路径和正文仍可能作为普通 tool history 随既有 session 行为保存。
-- References 不是当前工作区状态的证据；崩溃恢复时它们可作为普通只读调查，但不能结算 workspace drift。
-- `list_references` 不读取目录内容；搜索和读取必须先通过 PermissionGate，再进入 handler。
-- 搜索最多访问 2,000 个文件、10,000 个目录项并读取 64 MiB 正文，保留 100 条命中；单文件最多 1 MiB，单行和最终 JSON 也有固定上限。`scan_truncated` 表示资料扫描提前停止，`truncated` 表示展示集合被裁剪。
-- 子代理仍严格只有 `calculate`、`read_file`、`list_dir`、`grep`；父 Agent 必须自己判断 Reference 材料，不能把子代理报告升级为验证事实。
+搜索最多访问 2,000 个文件、10,000 个目录项并读取 64 MiB 正文，最多保留 100 条命中；
+单个文件最多 1 MiB，单行和最终 JSON 也有固定上限。`scan_truncated` 表示扫描提前
+停止，`truncated` 表示展示结果被裁剪。
+
+真实根只存在于当前进程的 catalog；alias、相对路径和正文仍可能像普通工具结果一样
+进入 Context 或 session。References 不进入自动 Memory 检索，不加入子代理的
+`calculate`、`read_file`、`list_dir`、`grep` 之外的白名单。父 Agent 必须自己判断
+Reference 内容，不能把它交给子代理后再把子代理的报告升级成 verification evidence。
 
 ## 运行与观察
 
-本课的观察重点是“alias 能发现和定位资料，但不能绕过权限或路径边界”。在 Bash/zsh 中运行：
+本课的观察重点是“alias 能帮助定位资料，但不能绕过权限和路径边界”。运行：
 
 ```bash
 PYTHONPATH=src python -m pytest -q tests/test_references_v042.py
 ```
 
-你应观察到合法目录可以返回稳定的相对路径、行号和 SHA-256；重复调用在同一文件内容下顺序相同。修改文件后再次读取，摘要应变化。将 `search_reference` 或 `read_reference` 的权限决定设为 `reject` 时，结果应在 handler 前结束；把路径改为绝对路径、`..` 或逃逸符号链接时，handler 会失败但错误不应出现真实根路径。`list_references` 可以发现 alias，但不会列出根目录。
+你应观察到：合法目录能返回稳定的相对路径、行号和 SHA-256；同一内容的重复访问顺序
+一致；修改文件后再次读取会得到新的摘要。拒绝 `search_reference` 或 `read_reference`
+权限时，handler 不会执行；使用绝对路径、`..` 或逃逸符号链接时会失败，错误中不出现
+真实根路径；`list_references` 可以发现 alias，却不会列出根目录内容。
 
 ## 本版特性、下一课与代码索引
 
-v0.42 完成了父 Agent 的具名本地 References：它们可发现、可搜索、可按行读取，并带有逐次权限和路径检查。References 仍是不可信资料，不会进入自动 Context、Memory、Plan、verification evidence 或 Subagent。下一课应在新的计划中定义，而不是把本课的本地读取边界默认为远程资料能力。
+v0.42 完成了父 Agent 的具名本地 References：它们可发现、可搜索、可按行读取，并带有
+逐次权限和路径检查。它们仍是不可信资料，不会进入自动 Context、Memory、Plan、
+verification evidence 或 Subagent。后续能力应在新的计划中定义，不能把本课的本地
+读取边界默认扩展成远程资料能力。
 
 - [`references.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/references.py)：冻结配置、敏感路径、符号链接和有界文件访问。
 - [`tools/references.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.42/src/mini_agent/tools/references.py)：三个父侧工具的 JSON schema 和结果合同。
