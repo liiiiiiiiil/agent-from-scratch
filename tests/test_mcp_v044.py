@@ -197,6 +197,42 @@ def test_normalized_name_collision_closes_all_started_clients(monkeypatch):
     assert all(client.closed for client in clients)
 
 
+def test_interrupted_multi_server_assembly_closes_prior_clients(monkeypatch):
+    class FakeClient:
+        alias = "one"
+
+        def __init__(self):
+            self.closed = False
+
+        def supports(self, _name):
+            return False
+
+        def close(self):
+            self.closed = True
+
+        @property
+        def close_report(self):
+            return {"alias": self.alias, "closed": self.closed}
+
+    first = FakeClient()
+    calls = iter((first, KeyboardInterrupt()))
+
+    def connect(_server):
+        result = next(calls)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(adapter.McpClient, "connect", connect)
+    servers = [
+        {"alias": "one", "command": ["x"], "agent_enabled": True},
+        {"alias": "two", "command": ["x"], "agent_enabled": True},
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        assemble_mcp_tools(servers)
+    assert first.closed is True
+
+
 def _durable_mcp(tmp_path, record, *, readonly=False):
     server = _server()
     server["readonly_tools"] = ["echo", "sum"] if readonly else []

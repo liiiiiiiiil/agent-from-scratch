@@ -220,15 +220,17 @@ class SkillCatalog:
             return None
         return info
 
-    def _candidate_names(self, root: str, source: SkillSource, maximum: int) -> list[str]:
+    def _candidate_names(
+        self, root: str, source: SkillSource, maximum: int,
+    ) -> tuple[list[str], int]:
         info = self._root_info(root)
         if info is None:
             if os.path.lexists(root):
                 self._scan_diagnostics.append(self._diagnostic(source, "<root>", "invalid_root"))
-            return []
+            return [], 0
         if maximum <= 0:
             self._scan_diagnostics.append(self._diagnostic(source, "<root>", "candidate_limit"))
-            return []
+            return [], 0
         try:
             with os.scandir(root) as iterator:
                 entries = []
@@ -238,11 +240,11 @@ class SkillCatalog:
                         self._scan_diagnostics.append(
                             self._diagnostic(source, "<root>", "candidate_limit")
                         )
-                        return []
+                        return [], maximum
                 entries.sort(key=lambda entry: entry.name)
         except (OSError, ValueError):
             self._scan_diagnostics.append(self._diagnostic(source, "<root>", "unreadable_root"))
-            return []
+            return [], 0
         directories: list[str] = []
         for entry in entries:
             try:
@@ -252,7 +254,9 @@ class SkillCatalog:
                 continue
             if stat.S_ISDIR(entry_info.st_mode) or stat.S_ISLNK(entry_info.st_mode):
                 directories.append(entry.name)
-        return directories
+        # Every direct entry consumes the shared project/global scan budget,
+        # including ordinary files that cannot become Skill candidates.
+        return directories, len(entries)
 
     def _read_candidate(self, root: str, source: SkillSource, name: str) -> SkillDefinition | None:
         if SKILL_NAME_PATTERN.fullmatch(name) is None:
@@ -320,7 +324,7 @@ class SkillCatalog:
         blocked_project: set[str] = set()
         remaining = MAX_SKILLS
         for source, root in (("project", self.project_root), ("global", self.global_root)):
-            names = self._candidate_names(root, source, remaining)
+            names, scanned = self._candidate_names(root, source, remaining)
             if source == "project" and any(
                 item["source"] == "project" and item["kind"] == "candidate_limit"
                 for item in self._scan_diagnostics
@@ -329,7 +333,7 @@ class SkillCatalog:
                 # Do not expose that global name when project precedence is
                 # impossible to establish safely within the scan budget.
                 return (), tuple(self._scan_diagnostics)
-            remaining -= len(names)
+            remaining -= scanned
             for name in names:
                 try:
                     definition = self._read_candidate(root, source, name)

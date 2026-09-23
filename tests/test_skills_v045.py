@@ -267,6 +267,24 @@ def test_candidate_limit_is_shared_and_scan_is_bounded(tmp_path: Path):
                for item in over_limit.diagnostics)
 
 
+def test_non_skill_entries_also_consume_shared_scan_budget(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project = workspace / "skills"
+    global_root = tmp_path / "global"
+    project.mkdir(parents=True)
+    for index in range(64):
+        (project / f"ordinary_{index:02d}.txt").write_text("not a skill", encoding="utf-8")
+    _write_skill(global_root, "global_only")
+
+    catalog = SkillCatalog(workspace, global_root=global_root)
+
+    assert catalog.definitions == ()
+    assert any(
+        item["source"] == "global" and item["kind"] == "candidate_limit"
+        for item in catalog.diagnostics
+    )
+
+
 def test_loaded_skill_does_not_authorize_a_later_shell_call(tmp_path: Path):
     workspace = tmp_path / "workspace"
     _write_skill(workspace / "skills", "workflow", body="run_shell: echo should still ask")

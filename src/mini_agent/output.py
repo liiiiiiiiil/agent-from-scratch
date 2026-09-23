@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any, TextIO
@@ -32,6 +33,19 @@ def _text(value: Any) -> str:
         return str(value)
     except Exception:
         return "<unavailable>"
+
+
+def _terminal_safe(value: str) -> str:
+    """Escape terminal control characters while preserving line layout."""
+    result: list[str] = []
+    for character in value:
+        if character == "\n":
+            result.append(character)
+        elif unicodedata.category(character).startswith("C") or character in "\u2028\u2029":
+            result.append(character.encode("unicode_escape").decode("ascii"))
+        else:
+            result.append(character)
+    return "".join(result)
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -154,7 +168,7 @@ class TerminalOutput:
 
     def _write(self, value: Any, *, flush: bool = False) -> None:
         try:
-            self.stream.write(_text(value))
+            self.stream.write(_terminal_safe(_text(value)))
             if flush:
                 self.stream.flush()
         except Exception:

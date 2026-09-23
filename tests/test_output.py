@@ -142,6 +142,20 @@ def test_debug_keeps_arguments_and_bounded_full_result():
     assert "result\n    line" in text
 
 
+def test_terminal_control_characters_are_escaped_but_newlines_are_preserved():
+    text = rendered(
+        lambda output: output.tool_result(
+            "mcp_demo_echo", {}, "first\nsecond\x1b[31m\tred\x7f",
+            {"outcome": "succeeded"},
+        ),
+        mode="debug",
+    )
+    assert "first\n    second" in text
+    assert "\x1b" not in text
+    assert "\\x1b[31m" in text
+    assert "\\tred\\x7f" in text
+
+
 def test_quiet_suppresses_progress_but_cli_notice_is_explicit():
     stream = io.StringIO()
     output = TerminalOutput("quiet", stream)

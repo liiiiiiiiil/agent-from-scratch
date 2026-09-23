@@ -130,7 +130,10 @@ def assemble_mcp_tools(
                 names.add(tool.name)
                 tools.append(tool)
         return tools, manager
-    except Exception:
+    except BaseException:
+        # This function owns every client added to the manager until it
+        # returns successfully.  Ctrl-C during a later server handshake must
+        # not strand clients that were already started.
         manager.close()
         raise
 

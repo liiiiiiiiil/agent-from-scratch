@@ -158,6 +158,56 @@ def test_timeouts_stdout_queue_and_stderr_tail_are_bounded():
         client.close()
 
 
+def test_request_timeout_is_one_deadline_shared_by_send_and_receive(monkeypatch):
+    class FakeTransport:
+        def __init__(self):
+            self.send_timeout = None
+            self.receive_timeout = None
+            self.closed = False
+
+        def send(self, _message, *, timeout):
+            self.send_timeout = timeout
+
+        def receive(self, *, timeout):
+            self.receive_timeout = timeout
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+        def close(self):
+            self.closed = True
+
+    client = McpClient(_server())
+    transport = FakeTransport()
+    client.transport = transport
+    clock = iter((100.0, 103.0, 106.0))
+    monkeypatch.setattr("mini_agent.mcp.client.time.monotonic", lambda: next(clock))
+
+    assert client._request("tools/list", {}, timeout=10.0) == {}
+    assert transport.send_timeout == pytest.approx(7.0)
+    assert transport.receive_timeout == pytest.approx(4.0)
+
+
+def test_interrupted_connect_closes_started_transport():
+    class InterruptedTransport:
+        closed = False
+
+        def start(self):
+            return self
+
+        def send(self, _message, *, timeout):
+            raise KeyboardInterrupt
+
+        def close(self):
+            self.closed = True
+
+    client = McpClient(_server())
+    transport = InterruptedTransport()
+    client.transport = transport
+
+    with pytest.raises(KeyboardInterrupt):
+        client.connect()
+    assert transport.closed is True
+
+
 def test_protocol_helpers_build_and_reject_unpaired_messages():
     assert make_request(1, "initialize", {})["id"] == 1
     assert "id" not in make_notification("notifications/initialized")

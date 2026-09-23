@@ -98,7 +98,10 @@ class McpClient:
             client = McpClient(self_or_server, **kwargs)
         try:
             client._connect()
-        except Exception:
+        except BaseException:
+            # Runtime construction owns a started transport even when the
+            # handshake is interrupted by Ctrl-C or another non-Exception
+            # exit.  Always release it before propagating the interruption.
             client.close()
             raise
         return client
@@ -332,9 +335,14 @@ class McpClient:
                 raise McpTransportError(f"MCP client for alias {self.alias} is closed")
             request_id = self._request_id
             self._request_id += 1
+            deadline = time.monotonic() + timeout
             try:
-                self.transport.send(make_request(request_id, method, params), timeout=timeout)
-                deadline = time.monotonic() + timeout
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise McpTimeoutError(f"MCP request timed out for alias {self.alias}")
+                self.transport.send(
+                    make_request(request_id, method, params), timeout=remaining,
+                )
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
