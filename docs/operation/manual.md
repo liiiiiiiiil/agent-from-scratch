@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.45**（本地 Skills 的发现与按需加载；含此前父 Agent Runtime MCP Tool、Memory、相关检索与具名本地 References）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.46**（受限 HTTP MCP、文本 Resource 与 Prompt；含此前父 Agent Runtime MCP Tool、Memory、相关检索、具名本地 References 与本地 Skills）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -165,6 +165,68 @@ description: 按读取、修改、验证的顺序完成一次有界代码变更
 模型第一次请求前只能看到 `verify-change` 的 ID、来源和说明。模型调用 `skill` 并获得一次
 授权后，工具结果才出现正文；如果正文建议调用 `run_shell`，该调用仍会按自己的 Plan gate 和
 PermissionGate 规则处理。修改 Skill 文件后开始新任务，Runtime 才会发现新的文件身份和内容。
+
+## v0.46 受限 HTTP MCP、文本 Resource 与 Prompt
+
+v0.46 在父 Runtime 中增加了一个受限的 MCP HTTP 子集。配置明确写出
+`transport="http"` 后，客户端使用标准库 `http.client` 逐请求发送 JSON-RPC；默认只接受
+HTTPS。为了离线测试，回环 HTTP 只有在同时配置 `allow_loopback_http=True` 时才允许。客户端
+发送协议要求的 `Accept: application/json, text/event-stream`，但本教学子集只接受
+`application/json` 响应；SSE、重定向、OAuth、服务端
+主动请求和自动重试都不在本版范围内。这是教学子集，不是完整 Streamable HTTP 客户端。
+
+### HTTP 配置
+
+真实 URL 和认证 Header 只写在未跟踪的 `src/mini_agent/config_local.py`。配置导入不会连接
+Server；只有 `agent_enabled=True` 的项才由父 Runtime 创建连接和冻结目录。HTTP 项不能同时
+包含 stdio 的 `command`、`cwd` 或 `environment`：
+
+```python
+MCP_SERVERS = [{
+    "alias": "remote-demo",
+    "transport": "http",
+    "url": "https://mcp.example.invalid/mcp",
+    "headers": {"Authorization": "Bearer local-token"},
+    "allow_loopback_http": False,
+    "agent_enabled": True,
+    "readonly_tools": [],
+}]
+```
+
+`url` 拒绝用户信息和片段；明文 HTTP 只允许回环地址并要求显式开关，HTTPS 可使用受控的
+远程地址。客户端管理的
+`Accept`、`Content-Type`、`Accept-Encoding`、`MCP-Protocol-Version` 和 `MCP-Session-Id`
+不能由配置覆盖。认证 Header 只留在当前进程，不进入 State、Trace、session、授权提示或
+错误文本。初始化响应中的 `MCP-Session-Id` 只在内存中携带；退出时会有界地尝试发送会话
+`DELETE`。
+
+### Resource 和 Prompt 命令
+
+Resource 与 Prompt 不注册为模型 Tool。它们由当前任务的主交互 CLI 显式选择：
+
+```text
+/mcp-resources <alias>
+/mcp-resource <alias> <uri>
+/mcp-prompts <alias>
+/mcp-prompt <alias> <name> <JSON参数对象>
+```
+
+列表操作默认允许；读取 Resource 和获取 Prompt 默认询问。`always` 只记住当前
+`alias:uri` 或 `alias:name`，授权提示只显示别名、目标和有界参数摘要。读取和获取前会先
+从已冻结的分页目录核对 URI 或名称，因此目录外目标不会发出读取请求。
+
+Resource 只接受有界 UTF-8 文本。成功正文作为带来源的低信任普通 history 消息加入当前任务，
+不会立即请求 LLM；下一次用户输入时它才参与 Context，并可能随 `/save` 保存。它不会进入
+State、Trace 摘要、verification evidence 或自动 Memory 查询。正文会按 Context 预算裁剪。
+
+Prompt 只接受 `user` 和 `assistant` 两种原始角色的文本消息。CLI 会完整展示展开内容，
+使用 `[message ... original_role=...]` 标签保留来源角色；服务端的 `assistant` 文本仍然位于
+一次 `role=user` 输入内部，不会伪造会话中的 `role=assistant`。用户取消预览时不会进入
+history，也不会请求 LLM；确认后沿用现有 `run_task` 路径运行父 Agent。
+
+列表和读取都处理完整分页，检测重复游标；Resource 返回 URI 必须与请求一致，并拒绝 blob、
+图片、音频和嵌入内容。Prompt 参数必须命中冻结定义，展开结果拒绝 system/tool 角色和非文本
+内容。目录、正文、HTTP 认证和 session ID 都不会开放给 Subagent。
 
 ## v0.42 具名本地 References
 
@@ -739,13 +801,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.45，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.46，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 另外提供父侧具名本地 References，详情见[第 42 课](../tutorials/42-local-references.md)和[上下文架构说明](context-architecture.md)。v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，详情见[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)和[第 45 课](../tutorials/45-local-skills.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)和[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)。
 
 ### 3.1 上下文架构
 

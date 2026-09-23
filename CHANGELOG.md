@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.46.0] - Restricted HTTP MCP, text Resources, and Prompts
+
+- Added explicit stdio/JSON-only HTTP MCP transport configuration with HTTPS-by-default URL validation, opt-in loopback HTTP, local headers, bounded responses, session headers, 202 notifications, bounded session DELETE, and no SSE/redirect/OAuth/retry fallback.
+- Extended the fixed MCP client with paginated frozen Resource and Prompt directories, text-only reads, prompt argument validation, user/assistant text validation, and capability-only Server support.
+- Added parent CLI `/mcp-resources`, `/mcp-resource`, `/mcp-prompts`, and `/mcp-prompt` commands with exact target permissions, complete Prompt previews, explicit confirmation, ordinary untrusted history, Context budgeting, Memory-query exclusion for Resource messages, and Subagent isolation.
+- Added an offline HTTP fixture, v0.46 protocol and content-boundary coverage, lesson 46, and synchronized the manual, plans, README files, and version metadata.
+
 ## [v0.45.0] - Local Skills discovery and on-demand loading
 
 - Added a standard-library `SkillCatalog` for fixed project and global `skills/<name>/SKILL.md` directories, strict two-field frontmatter, deterministic project precedence, bounded metadata, frozen file identities, and descriptor-based race/symlink checks.

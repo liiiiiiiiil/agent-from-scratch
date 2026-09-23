@@ -182,6 +182,10 @@ def _is_skill_catalog_message(message: Message) -> bool:
             and message["content"].startswith(SKILL_CONTEXT_PREFIX))
 
 
+def _is_mcp_resource_message(message: Message) -> bool:
+    return message.get("role") == "user" and message.get("name") == "mcp_resource"
+
+
 def _split_rounds(messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
     """Split messages into protected prefix and atomic history rounds."""
     first_user_index = next(
@@ -1158,6 +1162,9 @@ class ContextManager:
         task = task.strip()
         recent_user = ""
         for message in reversed(history):
+            if (_is_mcp_resource_message(message)
+                    or message.get("name") == "skill_catalog"):
+                continue
             if message.get("role") == "user" and isinstance(message.get("content"), str):
                 recent_user = message["content"].strip()
                 break

@@ -1,7 +1,7 @@
-"""Small, bounded JSON-RPC helpers for the v0.43 MCP client.
+"""Small, bounded JSON-RPC helpers for the MCP client.
 
-The module deliberately knows nothing about subprocesses or the Agent runtime.
-It only validates the parts of JSON-RPC that are needed by the stdio client.
+The module deliberately knows nothing about subprocesses, HTTP, or the Agent
+runtime.  Transports share these message and response checks.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class McpProtocolError(McpError):
 
 
 class McpTransportError(McpError):
-    """The stdio connection could not send or receive a message."""
+    """A configured MCP transport could not send or receive a message."""
 
 
 class McpTimeoutError(McpTransportError):

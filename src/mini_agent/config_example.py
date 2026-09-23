@@ -18,11 +18,13 @@ MEMORY_RETRIEVAL_ENABLED = True
 # ]
 REFERENCES = []
 
-# Local MCP stdio servers.  They remain available to ``python -m mini_agent.mcp``;
-# set ``agent_enabled=True`` to also expose their frozen tools to the parent Agent.
+# Local and loopback HTTP MCP servers.  They remain available to
+# ``python -m mini_agent.mcp``; set ``agent_enabled=True`` to also connect them
+# from the parent Agent.  HTTP uses only JSON responses in this version.
 # Keep real commands, paths, and environment values in the untracked config_local.py.
 MCP_SERVERS = [{
     "alias": "demo",
+    "transport": "stdio",  # omit for the legacy stdio default
     "command": ["python", "path/to/mcp_server.py"],
     "cwd": ".",
     "environment": {},
@@ -31,6 +33,16 @@ MCP_SERVERS = [{
     # locally classified as effect_class="none" but still ask PermissionGate.
     "readonly_tools": ["echo"],
 }]
+# Example HTTP entry (keep the real URL and credentials in config_local.py):
+# MCP_SERVERS = [{
+#     "alias": "remote-demo",
+#     "transport": "http",
+#     "url": "https://mcp.example.invalid/mcp",
+#     "headers": {"Authorization": "Bearer PLACEHOLDER"},
+#     "allow_loopback_http": False,
+#     "agent_enabled": True,
+#     "readonly_tools": [],
+# }]
 
 # 推荐的新配置：provider 是服务身份，profile 是本地可请求的模型别名。
 # 下面的值全部是占位值；真实值只应写入不进 git 的 config_local.py。

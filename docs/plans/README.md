@@ -17,7 +17,7 @@
 - [`memory-retrieval-references-plan.md`](memory-retrieval-references-plan.md) — 阶段十一轻量记忆、相关检索与资料引用实施计划；v0.40–v0.42 工作区持久 Memory、相关检索与具名本地 References 已实现。
 
 阶段十一已完成 v0.40–v0.42：工作区 Memory 支持显式 CRUD 与相关检索，父 Context 可按预算临时注入不可信候选，父 Agent 可按稳定 alias 查阅受权限保护的本地资料。
-- [`mcp-skills-plan.md`](mcp-skills-plan.md) — 阶段十二 MCP 与 Skills 实施计划；v0.43 最小 stdio MCP Client、v0.44 父侧 MCP Tool 与 v0.45 本地按需 Skills 已实现，v0.46 仍规划受限远程 HTTP / 文本 Resource / 文本 Prompt。
+- [`mcp-skills-plan.md`](mcp-skills-plan.md) — 阶段十二 MCP 与 Skills 实施计划；v0.43–v0.46 已实现 stdio/受限 HTTP MCP、父侧 MCP Tool、文本 Resource、文本 Prompt 与本地按需 Skills。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

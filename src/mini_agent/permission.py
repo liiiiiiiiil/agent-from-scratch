@@ -44,6 +44,14 @@ PERMISSION_RULES = {
     "list_references": ALLOW,
     "search_reference": ASK,
     "read_reference": ASK,
+    "mcp_resource": {
+        "list": ALLOW,
+        "*": ASK,
+    },
+    "mcp_prompt": {
+        "list": ALLOW,
+        "*": ASK,
+    },
     "remember": ASK,
     "revise_memory": ASK,
     "forget_memory": ASK,
@@ -150,7 +158,9 @@ class PermissionPolicy:
             # '*' or '[' in that target must not widen an ``always`` decision
             # into a glob rule.  Other tools retain the established pattern
             # approval behavior.
-            "literal_pattern": tool_name in {"search_reference", "read_reference", "skill"},
+            "literal_pattern": tool_name in {
+                "search_reference", "read_reference", "skill", "mcp_resource", "mcp_prompt",
+            },
         })
 
 
@@ -209,6 +219,37 @@ class PermissionGate:
             skill_id = str((args or {}).get("name", "<missing>"))[:64]
             source = str((display_context or {}).get("source", "<unknown>"))[:16]
             return f"skill_id={skill_id}, source={source}"
+        if tool_name == "mcp_resource":
+            action = str((args or {}).get("action", "read"))[:16]
+            alias = str((args or {}).get("alias", "<missing>"))[:64]
+            uri = str((args or {}).get("uri", "<missing>"))[:256]
+            return f"action={action}, alias={alias}, uri={uri}"
+        if tool_name == "mcp_prompt":
+            action = str((args or {}).get("action", "get"))[:16]
+            alias = str((args or {}).get("alias", "<missing>"))[:64]
+            name = str((args or {}).get("name", "<missing>"))[:128]
+            arguments = (args or {}).get("arguments", {})
+            sensitive_markers = (
+                "token", "secret", "password", "passwd", "credential", "authorization",
+                "api_key", "apikey", "access_key", "private_key", "cookie", "auth",
+            )
+            safe_arguments = {}
+            if isinstance(arguments, dict):
+                for key, value in sorted(arguments.items(), key=lambda item: str(item[0])):
+                    key_text = str(key)[:64]
+                    if any(marker in key_text.casefold() for marker in sensitive_markers):
+                        safe_arguments[key_text] = "<redacted>"
+                    elif isinstance(value, str) and len(value) > 128:
+                        safe_arguments[key_text] = f"<{len(value)} chars>"
+                    elif isinstance(value, (dict, list)):
+                        safe_arguments[key_text] = f"<{type(value).__name__} {len(value)} items>"
+                    else:
+                        safe_arguments[key_text] = value
+            try:
+                rendered = json.dumps(safe_arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            except (TypeError, ValueError):
+                rendered = "<unrenderable>"
+            return f"action={action}, alias={alias}, name={name}, arguments={rendered[:700]}"
         if display_context is not None:
             alias = str(display_context.get("alias", "<unknown>"))[:64]
             raw_tool = str(display_context.get("tool", "<unknown>"))[:64]
@@ -297,4 +338,12 @@ class PermissionGate:
             return f"{alias}:{path}"
         if tool_name == "skill":
             return args.get("name", "*")
+        if tool_name == "mcp_resource":
+            if args.get("action") == "list":
+                return "list"
+            return f"{args.get('alias', '*')}:{args.get('uri', '*')}"
+        if tool_name == "mcp_prompt":
+            if args.get("action") == "list":
+                return "list"
+            return f"{args.get('alias', '*')}:{args.get('name', '*')}"
         return "*"

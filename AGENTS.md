@@ -27,10 +27,12 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.45`（本地 Skills 发现与按需加载）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.46`（受限 HTTP MCP、文本 Resource 与 Prompt）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
-v0.44 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的本地 stdio Server 才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP 不进入 Subagent；v0.44 不接入 Skills、远程 HTTP、Resources 或 Prompts。
+v0.46 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的配置项才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP、Resource 和 Prompt 不进入 Subagent。
 配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。父 Runtime 在新任务和恢复任务中从当前配置重新连接与发现目录，退出、`/new`、`/reset` 和恢复失败都必须有界关闭连接。
+
+HTTP 传输只接受逐请求 `application/json` 响应，使用标准库 `http.client`；默认要求 HTTPS，明文 HTTP 只有显式允许的回环地址可用。客户端拒绝 SSE、重定向、OAuth、服务端主动请求和自动重试，初始化后的 session ID 只在内存中携带，并尽力有界发送会话 DELETE。`resources/list`、`resources/read`、`prompts/list` 和 `prompts/get` 完整处理分页并冻结目录；Resource 只允许有界 UTF-8 文本，Prompt 只允许带原始 `user`/`assistant` 标签的有界文本。四个 Resource/Prompt 命令只由父 CLI 显式触发，读取/获取按精确 `alias:uri` 或 `alias:name` 授权；Resource 进入带来源和低信任标记的普通 history，Prompt 必须完整预览并确认后作为用户侧输入，服务端内容不得进入受保护 system、State、Trace 摘要或 verification evidence。
 
 冻结后的工具目录不得再次从 Server 刷新；普通通知只保留最近 64 条。CLI 确认前必须展示完整参数，无法完整展示时拒绝调用；关闭直接子进程未完成必须报告失败。JSON-RPC 错误码必须是整数，终端输出中的控制字符必须转义。
 

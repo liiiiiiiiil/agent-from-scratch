@@ -1,4 +1,4 @@
-"""Interactive demonstration CLI for the standalone v0.43 MCP client."""
+"""Interactive demonstration CLI for the standalone MCP client."""
 from __future__ import annotations
 
 import argparse
@@ -164,7 +164,7 @@ def _safe_error(error: Exception) -> str:
     if isinstance(error, McpProtocolError):
         return "MCP protocol error"
     if isinstance(error, McpTransportError):
-        return "MCP stdio transport error"
+        return "MCP transport error"
     return "MCP client error"
 
 

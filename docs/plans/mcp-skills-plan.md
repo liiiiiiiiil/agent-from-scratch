@@ -1,6 +1,6 @@
 # 阶段十二：MCP 与 Skills 实施计划
 
-> 状态：`v0.45` 已实现；`v0.46` 仍在规划中
+> 状态：`v0.46` 已实现
 > 建议版本范围：`v0.43`–`v0.46`
 > 能力前置：统一 Tool / PermissionGate / AgentRuntime、阶段九的持久工具边界与崩溃恢复、阶段十的父子能力隔离、阶段十一的 Context 与不可信资料边界
 > 关联计划：`reliable-execution-plan.md`、`session-persistence-resume-plan.md`、`subagent-delegation-plan.md`、`memory-retrieval-references-plan.md`
@@ -11,7 +11,7 @@
 
 阶段十一后，`mini_agent` 已能按需读取工作区 Memory 和具名本地 References，但外部标准能力仍不能通过统一 Tool 边界接入；重复的多步工作流也只能依赖普通项目指令或用户临时提示。
 
-阶段十二要回答的问题是：**怎样接入标准外部能力、按需加载可复用工作流，同时不绕过已有的权限、执行、恢复和 Context 边界？**
+阶段十二要回答的问题是：**怎样接入标准外部能力、按需加载可复用工作流，同时不绕过已有的权限、执行、恢复和 Context 边界？** v0.46 完成了本计划限定的 JSON-only HTTP、文本 Resource 和文本 Prompt 子集。
 
 一句话目标：**让父 Agent 通过 MCP 接入受控外部能力，通过 Skills 按需加载本地工作流说明，并继续复用已有 Tool、PermissionGate、Context 和 AgentRuntime。**
 
@@ -29,15 +29,15 @@ Skill 目录 → name + description 发现提示 → skill(name) → SKILL.md �
 
 **MCP 给 Agent 新能力；Skill 教 Agent 怎样组合已获准的能力。** Skill 正文不是新的执行权限，也不升级为 system instruction。
 
-四个版本分别讲一个问题：`v0.43` 认识 MCP 协议和 stdio 生命周期；`v0.44` 已把外部 Tool 安全接入父 Runtime；`v0.45` 已实现 Skill 与 Tool 的区别及按需加载；`v0.46` 计划在严格限定范围内补远程传输、Resource 和 Prompt。
+四个版本分别讲一个问题：`v0.43` 认识 MCP 协议和 stdio 生命周期；`v0.44` 已把外部 Tool 安全接入父 Runtime；`v0.45` 已实现 Skill 与 Tool 的区别及按需加载；`v0.46` 在严格限定范围内补上远程传输、Resource 和 Prompt。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
 `v0.43` 只包含独立的 stdio Client 和演示 CLI；`v0.44` 在此基础上把显式启用的
-本地 MCP Tool 接入父 Runtime；`v0.45` 增加本地 Skills 的固定目录发现和按需加载。远程
-HTTP、Resources 和 Prompts 仍属于后续版本，不由当前代码宣称支持。
+本地 MCP Tool 接入父 Runtime；`v0.45` 增加本地 Skills 的固定目录发现和按需加载；`v0.46`
+增加下文限定的 JSON-only HTTP、Resource 和 Prompt 子集。
 
 - 固定 MCP `2025-11-25` 握手式协议，先实现本地 stdio Server 的 `initialize → notifications/initialized → tools/list → tools/call`，拒绝不受支持的协商版本。
 - 仅由本地配置启用 MCP Server；父 Runtime 创建时冻结工具目录，外部 Tool 通过既有 Registry、Executor、PermissionGate、Plan gate、Failure、Trace 和持久工具边界执行。
@@ -150,7 +150,7 @@ MCP 工具目录、描述、Skill 目录提示、普通工具结果和显式 Res
 
 验收：模型在未加载时只见元数据；调用 `skill(name)` 后才见完整正文；Skill 中即使写有执行命令，后续副作用 Tool 仍独立请求权限，且 Skill 正文不能进入受保护 system 指令。
 
-### 4.4 `v0.46`：MCP 能力扩展与阶段收口（规划中）
+### 4.4 `v0.46`：MCP 能力扩展与阶段收口（已实现）
 
 目标是展示同一 MCP Client 在远程传输、资料和模板上的扩展，而不追求生产级远程 MCP 平台。
 
@@ -165,11 +165,11 @@ MCP 工具目录、描述、Skill 目录提示、普通工具结果和显式 Res
 
 | 位置 | 预计变化 | 责任 |
 |---|---|---|
-| `src/mini_agent/mcp/` | `v0.43`–`v0.46` 新增 | `v0.43` 的 JSON-RPC、stdio transport、协议 client、目录快照与有界错误；后续版本再扩展 |
-| `src/mini_agent/tools/` | `v0.44`–`v0.45` 增量 | MCP Tool adapter 与 `skill(name)`；继续使用统一 Executor |
+| `src/mini_agent/mcp/` | `v0.43`–`v0.46` 新增 | JSON-RPC、stdio/受限 HTTP transport、协议 client、分页目录快照与有界错误 |
+| `src/mini_agent/tools/` | `v0.44`–`v0.46` 增量 | MCP Tool adapter 与 `skill(name)`；Resource/Prompt 保持 CLI 入口并继续使用父 Runtime 边界 |
 | `src/mini_agent/skills.py` | `v0.45` 新增 | 本地发现、受限 frontmatter、优先级与安全读取 |
 | `src/mini_agent/permission.py` | 增量修改 | MCP server/tool 与 Skill ID 权限 pattern、脱敏提示 |
-| `src/mini_agent/context.py`、`prompt.py` | 增量修改 | 有界目录提示、低优先级 Skill/Resource 材料、预算与信任说明 |
+| `src/mini_agent/context.py`、`prompt.py` | 增量修改 | 有界目录提示、低优先级 Skill/Resource/Prompt 材料、预算与信任说明 |
 | `src/mini_agent/__main__.py`、`config.py` | 增量修改 | 父 Runtime 装配、显式本地配置、CLI 内容入口与连接清理 |
 | `src/mini_agent/state.py`、`session.py`、`runtime.py` | 尽量不改协议 | 复用既有工具边界、完成判定与恢复；如必须改 schema，先证明旧会话兼容 |
 | `tests/`、`docs/tutorials/`、操作手册、`README.md`、`CHANGELOG.md` | 每版同步 | 协议 fixture、失效/安全验收、一版一个教学主线 |
@@ -183,4 +183,4 @@ MCP 工具目录、描述、Skill 目录提示、普通工具结果和显式 Res
 - `v0.43`–`v0.46` 每版有独立教程、变更记录、操作手册说明和可复现验收场景；完成相应版本时同步 README、教程索引和版本信息。Git tag 仅由用户本人手动操作。
 - 修改实现后至少运行相关测试；交付前运行 `PYTHONPATH=src python -m pytest -q`、`PYTHONPATH=src python scripts/check_tutorials.py`、`PYTHONPATH=src python scripts/check_readme.py`，或说明无法运行的原因。
 
-v0.45 完成后，父 Agent 能使用经本地授权的 MCP Tool，并按需加载本地 Skill 指导工作流；v0.46 仍负责在明确限定范围内增加远程文本 Resource 和用户选择的 Prompt。MCP 与 Skills 都不改变谁有权执行、何时必须授权、什么事实可用于恢复和验证。
+v0.46 完成后，父 Agent 能使用经本地授权的 MCP Tool，并由主 CLI 按需选择远程文本 Resource 或经确认的 Prompt；MCP 与 Skills 都不改变谁有权执行、何时必须授权、什么事实可用于恢复和验证。

@@ -39,6 +39,24 @@ class McpConnectionManager:
     def clients(self) -> tuple[McpClient, ...]:
         return tuple(self._clients)
 
+    def get(self, alias: str) -> McpClient:
+        for client in self._clients:
+            if client.alias == alias:
+                return client
+        raise KeyError(alias)
+
+    def list_resources(self, alias: str) -> list[dict[str, Any]]:
+        return self.get(alias).list_resources()
+
+    def read_resource(self, alias: str, uri: str) -> dict[str, Any]:
+        return self.get(alias).read_resource(uri)
+
+    def list_prompts(self, alias: str) -> list[dict[str, Any]]:
+        return self.get(alias).list_prompts()
+
+    def get_prompt(self, alias: str, name: str, arguments: Mapping[str, str]) -> dict[str, Any]:
+        return self.get(alias).get_prompt(name, arguments)
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -93,12 +111,14 @@ def assemble_mcp_tools(
                 continue
             client = McpClient.connect(server)
             manager.add(client)
-            frozen_tools = client.list_tools()
-            directory_records.append({"alias": client.alias, "tools": frozen_tools})
-            if _directory_size(directory_records) > MAX_MCP_DIRECTORY_BYTES:
-                raise ValueError(
-                    f"MCP 工具目录超过 {MAX_MCP_DIRECTORY_BYTES} bytes 上限"
-                )
+            has_tools = getattr(client, "supports", lambda _name: True)("tools")
+            frozen_tools = client.list_tools() if has_tools else []
+            if has_tools:
+                directory_records.append({"alias": client.alias, "tools": frozen_tools})
+                if _directory_size(directory_records) > MAX_MCP_DIRECTORY_BYTES:
+                    raise ValueError(
+                        f"MCP 工具目录超过 {MAX_MCP_DIRECTORY_BYTES} bytes 上限"
+                    )
             for raw_tool in frozen_tools:
                 if len(tools) >= MAX_MCP_AGENT_TOOLS:
                     raise ValueError(
