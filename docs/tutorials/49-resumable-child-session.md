@@ -1,87 +1,94 @@
-# 第 49 课：可续接子会话
+# 第 49 课：恢复并继续子会话
 
-上一课：[进程内后台子代理](48-background-subagents.md) · [教程总览](README.md) · 下一阶段：评估与回归
+上一课：[让子代理在后台调查](48-background-subagents.md) · [教程总览](README.md) · 下一阶段：评估与回归
 
 代码快照：`v0.49` · 相邻差异：`v0.48..v0.49`
 
-本课命令使用 Bash/zsh。源码链接和示例对应 v0.49 快照。
+本课命令使用 Bash/zsh；源码链接和示例都对应 `v0.49` 快照。
 
 ## 本课目标
 
-上一课的 `child_session_id` 像一张查找编号：它能让父 Agent 找到当前进程里的后台任务，却不包含子代理已经读过什么、得出什么结论。进程退出后，编号还可能保存在父会话里，但负责保存子对话的内存已经消失。因此，只有保存 ID 不足以继续同一场调查。
+第 48 课给每个后台调查一个 `child_session_id`。这个编号能让父 Agent 在当前程序里找到子任务，但它本身不包含子代理已经读过的对话。程序退出后，线程和内存中的对话都会消失；只保存编号仍无法继续调查。
 
-本课为已完成并由父 Agent 领取的调查增加 `followup_subagent`。它为原来的子会话追加一份完整新合同，保留子代理自己的历史；父任务保存安全点时，也会把有界的空闲子会话快照一起写入。恢复后，父 Agent 可以用原 ID 继续调查。
+本课允许父 Agent 在结果已完成并领取后保存子代理自己的对话快照。之后重启程序并恢复父会话，父 Agent 可以用原来的编号继续追问同一个子代理。
 
-## 前置条件
+先区分两个编号：
 
-建议先读第 47 课了解具名角色和 Skill 授权，再读第 48 课了解启动确认、结果领取与后台 worker。Tag `v0.49` 由用户手动创建；在 tag 建立前，可在当前工作区阅读实现。建立后，在本地切换到固定快照并查看相邻变化：
+- 父会话的 `session_id` 用来恢复用户的整个任务。
+- 子会话的 `child_session_id` 用来继续其中一项独立调查。
+
+读完后，你应能说明什么条件下子会话可以保存、恢复后哪些内容会沿用，以及为什么每轮追问都要重新说明调查范围。
+
+## 上一版的问题
+
+v0.48 只在当前命令行进程中保存活动的子代理对象和对话。父会话可以记录某次调查已领取，却没有足够资料让另一个进程恢复该调查。
+
+另一个难点是保持资料一致：父会话写入了“结果已领取”，但子对话仍留在内存里时，程序退出会让两边记录不匹配。本版把父会话和已完成子会话的快照一起保存，并且只允许保存空闲、已领取的子会话。
+
+## 前置条件与版本切换
+
+建议先读第 47 课，了解角色和 Skill 授权，再读第 48 课，了解后台启动、结果领取与父侧保存边界。Skill 是 Agent 可按需读取的本地操作说明。
+
+检查版本变化后切到本课快照：
 
 ```bash
-git checkout v0.49
+git checkout v0.48
 git diff --stat v0.48..v0.49
 git diff v0.48..v0.49 -- src/mini_agent/delegation.py src/mini_agent/session.py src/mini_agent/resume.py
+git checkout v0.49
 ```
 
-读完后运行 `git checkout -` 回到切换前的分支。
+读完后用 `git checkout -` 返回切换前的分支。
 
 ## 新增与改动文件
 
-续接会经过父工具、共享子 Runtime、State、安全点保存和恢复，因此要同时修改这些边界：
-
-| 文件 | 变化 | 作用 |
+| 文件 | 变化 | 读者可从这里看到什么 |
 |---|---|---|
-| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/tools/delegation.py)、`tools/__init__.py` | 新增/修改 | 注册 `followup_subagent`，复用后台工具组与父侧权限入口。 |
-| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/delegation.py) | 修改 | 校验 followup 合同、恢复子 Context、运行新一轮并生成有界快照。 |
-| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/state.py) | 修改 | 记录每轮独立的委派结果和每个子会话的累计预算、领取结果身份。 |
-| [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/agent.py)、[runtime.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/runtime.py) | 修改 | 将 spawn 与 followup 统一纳入纯后台启动回合，整轮提交后再启动 worker。 |
-| [session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/session.py) | 修改 | 用 schema 4 原子保存父状态与空闲子快照，并检查快照大小、历史和结果引用。 |
-| [resume.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/resume.py)、`__main__.py` | 修改 | 重新绑定本地角色、模型和 Skill Catalog；装入兼容快照并显示不能续接的原因。 |
+| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/tools/delegation.py) | 修改 | 新工具 `followup_subagent` 的参数合同。 |
+| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/delegation.py) | 修改 | 怎样恢复子对话、开始新一轮并生成快照。 |
+| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/state.py) | 修改 | 如何分别记录每轮报告、领取情况和累计用量。 |
+| [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/agent.py) 与 [runtime.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/runtime.py) | 修改 | 初次启动与继续调查怎样遵守同一整轮提交规则。 |
+| [session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/session.py) | 修改 | schema 4 怎样把父会话与空闲子快照一起保存和检查。 |
+| [resume.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/resume.py) | 修改 | 重启时怎样重建本地配置并判断哪些子会话还能继续。 |
 
-执行上面的 `git diff --stat` 后，重点观察变化不只在新增工具：schema、父侧生命周期和恢复装配也同时扩展。
+这里的 `schema 4` 是 v0.49 使用的会话文件格式版本。与 v0.48 相比，变化不仅是增加一个追问工具，还包括保存格式和恢复过程。
 
-## 关键流程
+## 版本变更定位
 
-先回看 v0.48 的真实基线。后台 Manager 在当前进程中持有子 Runtime 和 Context；父 Agent 领取的是结果，父安全点没有可恢复的子历史。
-
-```text
-[旧] 父 AgentRuntime
-  → spawn_subagent → [C] PermissionGate / 阶段闸门
-  → 整轮 durable commit → [C] Manager 启动子 Runtime
-  → 完成队列 → 父 State 更新 → get_subagent_result 领取
-  → [B] 进程结束：结果和 child ID 可记账，子 Context 不随之恢复
-```
-
-v0.49 在“结果已领取”之后加入新一轮，但仍保留父线程控制启动时机。下面的图把上一版节点保留下来，并标出续接、保存、恢复及失败路径。
+v0.48 的父 Agent 能在一个进程内启动子代理、收到结果并领取报告；父安全保存点不会带上子代理的完整对话。State 是父任务当前事实与进度的结构化记录；Context 是一次模型请求会看到的对话和资料：
 
 ```text
-[旧] 父 AgentRuntime
-  → [~] spawn_subagent / [+] followup_subagent（只允许纯启动调用回合）
-  → [C] ToolExecutor / PermissionGate / 阶段与合同校验
-  → [~] 按模型顺序提交启动确认及 role=tool
-  → [B] schema 4 整轮提交失败：不启动本轮 worker
-  → 整轮 committed → [C] Manager 启动子 Runtime
-                         ↓
-       [旧] 首轮 Context 或 [+] 已领取快照 Context
-          → [~] 追加完整新合同 → AgentRuntime.run()
-          → 本轮结果 + 候选快照 → [C] 父线程收集和预算结算
-          → get_subagent_result 领取 → [~] 快照变为 idle 可保存
-                         ↓
- [C] SessionStore 原子保存父 State / Context / tool_boundary / idle child_sessions
-                         ↓
- [C] /resume 重建当前 Catalog 并核验指纹 → [B] 不兼容项只报告，不回退模型
+[旧] 父 Agent
+  → spawn_subagent → 保存启动回执 → 启动子代理
+  → 父线程收到完成结果 → get_subagent_result 领取
+  → [B] 进程结束后：子对话和运行线程不恢复
 ```
 
-图例：`[旧]` v0.48 已有；`[+]` v0.49 新增；`[~]` v0.49 修改；`[C]` 主要消费者；`[B]` 本版边界。箭头代表调用、控制或数据流。工具结果在父历史中仍按模型顺序配对；子 worker 只产出结果候选，快照要等父线程确认领取后才可作为 idle 快照保存。
+v0.49 允许已领取的子会话继续一轮，并把空闲子会话快照与父会话原子保存。这里的子 Context 就是子代理自己的对话视图。
 
-## 实现拆解
+```text
+[旧] 父 Agent 与后台子代理
+  → [~] spawn_subagent / [+] followup_subagent
+  → 父线程按顺序提交启动回执
+  → 整轮保存成功 → 后台任务管理器启动子任务
+  → 子 Context 继续调查 → 本轮结果
+  → 领取结果 → 子快照变为空闲，可保存
+  → [C] 一次保存父 State / Context 与空闲子快照
+  → [C] 恢复时重建当前角色、模型、Skill 配置
+  → [B] 配置身份不匹配：报告该子会话不能续接
+```
 
-### 1. 每一轮都要重新提交完整调查合同
+图例：`[旧]` 为 v0.48 已有，`[+]` 为 v0.49 新增，`[~]` 为修改，`[C]` 为主要校验或使用方，`[B]` 为本版边界。箭头表示调用、控制或数据流。只要一轮还没完成并领取，子快照就不能作为空闲状态保存。
 
-`followup_subagent` 接受原 `child_session_id` 和与 `spawn_subagent` 相同的调查字段。下面的片段展示合同的形状；作用域和工具仍需同时通过现有只读白名单、角色工具集和 ScopeGate。
+## 核心概念与数据结构
+
+### 1. 每次追问都提交一份新调查合同
+
+`followup_subagent` 中的 followup 意为“继续上一轮调查”。它使用原来的 `child_session_id`，并要求调用者重新写明这轮要做什么、可查看哪些文件、应交付什么发现，以及申请哪些只读工具。委派合同就是这组目标、范围、限制和工具申请。例如：
 
 ```json
 {
-  "child_session_id": "<上一轮的 UUID>",
+  "child_session_id": "<上一轮的子会话编号>",
   "goal": "检查配置加载是否也需要恢复适配",
   "scope": ["src/mini_agent"],
   "constraints": ["只读调查，不修改文件"],
@@ -99,62 +106,124 @@ v0.49 在“结果已领取”之后加入新一轮，但仍保留父线程控�
 }
 ```
 
-合同必须重新明确目标、范围、限制、预期发现和要请求的工具。调用方不能传新的角色或模型；Manager 按已冻结的子会话身份重建本轮任务。角色配置列出的 Skill 若要在新一轮读取，父侧仍要按该 Skill ID 再次获得授权。
+示例里的尖括号文字是说明占位符，实际调用时要换成上一轮返回的子会话编号。`selected_parent_facts` 用来明确告诉子代理哪些父任务背景与本轮有关。子代理不是自动接收父 Agent 的全部新对话，所以新合同要把本轮真正需要的背景说清楚。角色和模型沿用原设置，调用者不能趁追问时换成权限更大的角色或模型。每次需要读取角色配置中的 Skill 时，父侧都要重新检查该 Skill 的授权。
 
-工具先检查该子会话是否属于当前父任务、工作区和已冻结角色/模型，上一轮是否 `completed` 且已领取，以及工具和累计预算是否仍足够。同一进程内还会重新检查冻结的 Skill 文件身份。状态不是 idle、结果未领取、合同越权或身份变化时，拒绝在子 LLM 请求前返回。成功确认会带 `round_index`；完成后仍通过 `get_subagent_result(child_session_id)` 领取本轮结果。
+在发出子模型请求前，运行时会确认：这是当前父任务和工作区的子会话；上一轮已完成且已领取；角色、模型和 Skill 身份仍匹配；本轮合同没有越权；累计预算还有余量。未收束、未领取或身份不匹配的子会话不能继续。
 
-### 2. 子历史恢复与本轮预算分开
+### 2. 对话快照保存历史，预算仍然累计
 
-保存的 `ChildSessionSnapshot` 是父 session 内一个私有、有界的子 Context 检查点。它记录父 task 和 workspace 身份、角色与模型来源摘要、Skill 文件身份、当前轮次、累计 usage、最近领取结果的 ID/hash、子 Context 导出及允许延续的只读观察事实。它不保存线程句柄或运行中的 worker。
+Child Session Snapshot（子会话快照）是父会话文件里一份有界的子代理检查点。它包含子代理对话、角色和模型来源摘要、Skill 文件身份、最近领取结果的编号与摘要、轮次和累计用量等信息。它不包含 Python 工作线程，也不是一个能继续运行的后台进程。
 
-续接时，`SubagentRunner` 从该 Context 继续，并把新合同追加为新的用户侧输入，然后交给共享的 `AgentRuntime.run()`。每次 followup 会新建本轮运行状态和 SubagentBudget 计数；累计预算则从快照累加。父 history、其他子会话、父 Plan、权限批准、generation 和 verification 不会复制给子代理。
+下面摘出快照中几个关键字段；完整结构还会记录工作区、模型和 Skill 的身份摘要：
 
-一轮新结果有自己的 `delegation_id`、`result_id` 和 usage。领取旧轮结果仍返回旧身份，不会被新结果覆盖；重复领取同一轮也不会重复结算。子会话硬上限如下：
+```python
+@dataclass(frozen=True)
+class ChildSessionSnapshot:
+    child_session_id: str
+    agent_profile: str
+    round_index: int
+    last_claimed_result_id: str
+    cumulative_usage: UsageRecord
+    context: dict[str, Any]
+```
 
-| 累计上限 | 说明 |
+这些字段说明快照保存的是“哪个子会话、做到第几轮、上一份报告是什么、对话和用量到哪里”，而不是正在运行的线程。
+
+恢复时，子代理可以基于原来的对话继续；但每次追问会重新建立本轮预算。累计上限仍包含之前各轮，不能通过保存和重启清零：
+
+| 整个子会话的累计上限 | 含义 |
 |---|---|
-| 4 轮 | 包含初始调查轮 |
-| 16 次 LLM 调用 | 各轮 SubagentBudget 之和不得超限 |
-| 48 次工具调用 | 只统计获准的子只读工具 |
-| 64,000 tokens | 按本地 usage 口径累计 |
-| 240 秒 | 将各轮已用时间与本轮预留一起检查 |
+| 4 轮 | 包含最初的调查 |
+| 16 次模型调用 | 所有轮次合计 |
+| 48 次工具调用 | 只计算允许使用的子代理只读工具 |
+| 64,000 tokens（模型处理文本的计量单位） | 所有轮次合计 |
+| 240 秒 | 所有轮次已用时间与本轮预留一起检查 |
 
-父任务原有聚合预算和并发槽位仍生效；续接不会消耗新的 `created_subagents` 名额。达到任一累计上限后，已经交付的结果仍可读取，但不会再启动后续一轮。
+每轮有独立的委派结果和报告编号，所以领取新报告不会覆盖旧报告；重复领取同一轮也不会重复结算。父任务自己的总预算与并发限制仍然生效。继续旧子会话不会占用一个新的子代理名额。
 
-### 3. 把可续接快照放进同一个安全点
+### 3. 父会话与空闲子快照一起保存
 
-只在每一轮完成结果被领取后，Manager 才把该轮候选快照提升为 idle 快照。`/save` 将父 State、Context、当前工具边界和所有 idle 子快照一起交给 `SessionStore`，再作为一个 schema 4 JSON 文件原子替换。快照数量最多 3 个；单项最多 256 KiB，合计最多 720 KiB。单项快照生成失败时，已完成的报告仍可领取、实际用量仍会结算，但该子会话不能继续追问；全部快照合计超限时，保存会报出相关子 ID。历史或身份不会为凑大小而被截断。
+用户必须先通过 `/save` 开启持久化。只有子代理已经完成、父 Agent 也已经领取结果后，系统才会把该轮快照标记为空闲。活动中的线程和待领取报告都不能作为可恢复快照保存。
 
-恢复前，SessionStore 会检查快照与父 lifecycle、结果 ID/hash、轮次、累计用量和 Context 中 assistant/tool 消息配对是否一致。恢复后再从当前本地配置重建角色、provider binding 与 Skill Catalog，核对冻结指纹和 Skill 文件身份。若一个子会话身份已变化，它会被单独标为不可续接并说明原因；父任务和其他有效子快照仍可继续恢复。
+负责写会话文件的保存模块，会把父任务状态、对话、当前工具回合的提交记录和空闲子快照放进同一个 schema 4 会话文件，再通过一次原子替换提交。原子替换意味着恢复时看到的是完整旧文件或完整新文件，不会只更新父会话而漏掉子快照。
 
-执行时可以在父 Agent 中输入 `/save`，等没有活动或待领取子任务后再正常退出。CLI 提示的 session ID 可用于后续启动：
+保存模块先写完临时文件并确认写入，再调用标准库的文件替换操作：
+
+```python
+os.replace(temporary, target)
+```
+
+这一步让新文件整体替代旧文件；它不会先删掉旧会话，再逐段复制新内容。
+
+每个父会话最多保存 3 个子快照；每个快照最多 256 KiB，总计最多 720 KiB。快照过大或校验失败时不会为了凑大小而截断对话或身份。单个子快照不能生成时，调查报告仍可领取并结算，但该子会话无法继续追问；总体快照超限时，保存会指出相关子会话 ID。
+
+恢复时，程序会检查子快照是否与父记录中的领取结果、轮次和累计用量一致，然后从当前本地配置重新装配角色、模型和 Skill 目录。若角色、模型或 Skill 文件身份已经变化，该子会话会标为不能续接；系统不会偷偷切换到另一个模型。旧 schema 1/2/3 父会话仍可读取，但本来没有子快照，不能凭空恢复旧子对话。
+
+### 4. 用原子保存和恢复命令走完一次续接
+
+一条完整路径如下：
+
+```text
+1. 启动后台子代理
+2. 等待收束，并调用 get_subagent_result 领取报告
+3. 在命令行界面输入 /save，按提示记录父 session_id
+4. 退出程序
+5. 使用 --resume 恢复父会话
+6. 让父 Agent 用原 child_session_id 调用 followup_subagent
+```
+
+恢复父会话的命令使用 Bash/zsh：
 
 ```bash
 PYTHONPATH=src python -m mini_agent --resume <session_id>
 ```
 
-观察到父任务恢复后仍可看到原子会话里的 idle 子会话，并能让模型用原 `child_session_id` 发起 followup。若该轮在关闭进程前仍运行或结果还未领取，`/save` 不会把它伪装成可恢复快照；恢复也不会启动旧 worker。
+这里的 `<session_id>` 是 `/save` 后命令行界面提供的父会话编号，不是子代理编号。恢复后，父 Agent 可以选用原来的 `child_session_id` 继续调查。若程序退出前子代理仍在运行，或报告尚未领取，保存和恢复都不会把它当作可续接的子会话。
 
 ## 为什么这样设计
 
-仅保留 ID 无法还原对话；无界保存子 history 又会让一个父 session 的大小和恢复校验失去上限。因此，本版只保存已领取成功轮次的有界 Context，并把它与父安全点放进一次原子提交。这样恢复不会把父侧事实和子侧调查混在一起，也不会出现“父 session 已更新、子快照仍是旧文件”的半提交状态。
+只存编号无法还原子代理读过的对话；无限保存所有内容又会让会话文件和恢复校验没有上限。因此，本版只保存已成功完成、已领取的有限对话，并与父会话一起写入。
 
-每轮采用完整新合同，是为了让目标、范围、预期结果和工具申请在续接点重新可见、重新校验。角色和模型固定，Skill 权限重新取得，避免把历史授权当作永久授权。累计计量则让通过新轮次或重启不会清零资源消耗。
+每轮重新提交合同，让新的目标和文件范围都能在续接点重新检查。角色、模型保持不变，Skill 权限重新获得确认；累计预算则跨轮保留。这样恢复提供的是同一受限调查的继续，而不是一份不受约束的新任务。
 
 ## 设计边界
 
-只有成功且已领取的结果可以续接。失败、超时、取消、中断、运行中和待领取状态都不可续接；不支持跨父 task 或 workspace 转移，不支持更换角色/模型，也不恢复旧进程、旧 worker 或旧权限。
+只有成功完成并已领取的报告可以续接。失败、超时、取消、中断、运行中和待领取状态都不行。子会话也不能转移到另一父任务或工作区，不能更换角色、模型或继承旧权限。
 
-schema 1/2/3 仍可读取，但它们没有 v0.49 子快照。新安全点采用 schema 4；父 State 和 Trace 只保留身份、hash、轮次与用量摘要。子 Context 正文保存在私有 session 快照里，仍应按普通会话敏感数据管理。
+父 State 和 Trace（供只读回放使用的事件记录）只保存子会话身份、结果摘要、轮次与用量等结构化资料；子对话正文存放在会话快照中。开启持久化后，这些内容会保存在本地 session 文件里，应按普通会话资料保护。
+
+## 关键流程
+
+```text
+followup_subagent(child_session_id, 新合同)
+  → 确认子会话属于当前父任务
+  → 确认上一轮已完成并领取
+  → 检查角色、模型、Skill、工具范围与累计预算
+  → 顺序提交启动回执和工具结果
+  → 整轮保存成功后，恢复子 Context 并运行新一轮
+  → 父线程收集、结算；父 Agent 领取新报告
+  → 更新空闲子快照
+  → /save 将父会话与空闲快照原子写入
+
+不符合条件 → 在子模型请求前拒绝继续
+```
+
+## 运行与观察
+
+准备本地模型配置后，可在父任务中要求先做一次调查、领取报告，再要求保存并续接。关键观察点是：第一次与后续追问会用同一个 `child_session_id`；新一轮仍需明确目标和范围；没有领取报告时，命令行界面不会把子会话当作可保存的空闲快照。
+
+父会话恢复后，观察父 Agent 是否能根据原子文件中的子快照发起 `followup_subagent`。如果本地角色、模型或 Skill 身份与保存时不同，系统会说明对应子会话不能继续，而不会把它静默切换成其他身份。
+
+## 实现拆解
+
+`followup_subagent` 通过父侧工具、权限和阶段检查，再交给后台任务管理器准备合同。它复用同一套子 Agent 运行循环；差别是先从快照恢复该子代理自己的 Context，再把新合同作为这一轮的新任务输入。
+
+结果由父线程收集和结算。只有结果领取完成后，后台管理器才会提供可保存的空闲快照。`session.py` 将快照和父会话放进同一次提交；`resume.py` 恢复时重新读取当前本地配置并比对身份。线程句柄、运行中的任务和旧权限批准都不会从文件中复活。
 
 ## 本版特性、下一课与代码索引
 
-第 49 课完成阶段十三的后台子会话闭环。下一阶段转向 Evaluation & Regression：评估已有能力、成本和可靠性，不默认增加更复杂的多代理基础设施。
+v0.49 为已完成且已领取的后台调查增加可恢复的子对话快照，并增加 `followup_subagent`。父会话与空闲快照一起原子保存；累计预算、角色和模型边界跨轮保留。
 
-下面的源码链接固定在本课快照，便于将教学说明和具体实现对照：
+第 49 课完成了后台子会话的续接链路。下一阶段转向 Evaluation & Regression，即评估现有功能的效果、成本和可靠性。
 
-- [Followup 工具合同与参数校验](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/tools/delegation.py)
-- [子 Runtime、快照和后台 Manager](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/delegation.py)
-- [父侧 lifecycle 和累计预算](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/state.py)
-- [schema 4 安全点与快照验证](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/session.py)
-- [恢复时重新装配与兼容性检查](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/resume.py)
+固定在 v0.49 的代码索引：[追问工具合同](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/tools/delegation.py)、[子代理运行循环与快照管理](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/delegation.py)、[父任务生命周期和累计预算](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/state.py)、[schema 4 保存与校验](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/session.py)、[恢复时的身份检查](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.49/src/mini_agent/resume.py)。

@@ -1,22 +1,24 @@
-# 第 47 课：具名子代理角色
+# 第 47 课：给子代理设定角色
 
-上一课：[受限 HTTP MCP、文本 Resource 与 Prompt](46-mcp-http-resources-prompts.md) · [教程总览](README.md) · 下一课：阶段十三后续版本（规划中）
+上一课：[受限 HTTP MCP、文本 Resource 与 Prompt](46-mcp-http-resources-prompts.md) · [教程总览](README.md) · 下一课：[进程内后台子代理](48-background-subagents.md)
 
 代码快照：`v0.47` · 相邻差异：`v0.46..v0.47`
 
-本课命令使用 Bash/zsh。下面的代码链接和示例都对应 `v0.47`。
+本课命令使用 Bash/zsh；命令、代码链接和示例都对应 `v0.47`。
 
 ## 本课目标
 
-上一版已经可以把只读调查交给同步子代理，但每个子代理使用同一套通用提示和工具范围。父 Agent 很难清楚表达“请专门找缺陷”“请分析测试覆盖”这样的分工。
+Agent 是一种会向语言模型提问、按需调用工具来完成任务的程序。正在处理用户任务的 Agent 可以把一部分工作交给另一个独立的 Agent；前者叫“父 Agent”，受限执行调查的那个叫“子代理”。
 
-本课给 `delegate_task` 增加可选的 `agent_profile`，让父 Agent 可以从几个固定角色中选择，也可以从本地配置加载自定义角色。角色会限制提示、工具和模型；可申请的 Skill 仍要由父侧逐个授权。读完后，你应能区分“角色配置”和“模型别名”，并说明为什么未指定角色的旧调用仍能按原样工作。
+上一版的子代理都使用同一套通用指令和只读工具。父 Agent 虽然能在任务文字里说“请审查代码”，运行时却不能据此限制子代理的职责。本课给 `delegate_task` 增加 `agent_profile`：父 Agent 可以选择 `reviewer` 等内置角色，或从本地配置加载自定义角色。
 
-## 前置条件
+读完后，你应能用自己的话说明：角色决定子代理怎样工作、可以用什么工具；`model_profile` 则选择它使用哪个已配置模型。没有选择角色的旧调用仍按原有方式运行。
 
-只需要基础 Python、终端和 Git。建议先读第 34–39 课，了解子代理如何只读调查、怎样共享运行循环、受哪些预算限制，以及结果如何进入父会话。
+## 前置条件与版本切换
 
-查看相邻版本的变化并切换到本课代码：
+只需要基础 Python、终端和 Git。无需先理解 Agent 内部实现；先把“子代理”理解成一个权限更窄、专门做只读调查的独立助手即可。想看它最初怎样出现，可再读[第 34 课：最小委派](34-minimal-delegation.md)。
+
+先查看上一版到本版的文件变化，再切到固定代码快照：
 
 ```bash
 git checkout v0.46
@@ -24,82 +26,77 @@ git diff --stat v0.46..v0.47
 git checkout v0.47
 ```
 
-阅读完毕后，用 `git checkout -` 返回切换前所在的分支。
+读完后运行 `git checkout -` 回到切换前的分支。
 
 ## 上一版的问题
 
-在 v0.46 中，`delegate_task` 的子代理可以使用 `calculate`、`read_file`、`list_dir` 和 `grep`。这些工具都只读，但每个子代理拿到相同的系统提示和固定工具视图。父 Agent 只能在任务文字里描述分工，运行时无法把角色选择变成明确的能力边界。
+v0.46 的 `delegate_task` 是一次同步委派：父 Agent 发出调用后要等子代理完成，再收到结果。它把一份固定的只读工具清单交给每个子代理，因此无法通过一个明确的角色设置来区分“找实现入口”“审查缺陷”或“分析测试”。
 
-同时，本地 Skill 虽然能告诉父 Agent 怎样组合工具，但尚未有机制让特定只读子代理按需读取某个 Skill。直接把父 Skill Catalog 交给子代理会让它看到父侧全部条目和加载能力。因此 v0.47 要同时冻结角色能力，并在子任务启动前让父 PermissionGate 确认每个角色申请的 Skill ID。
+如果把一整套父 Agent 的工具和授权直接交给子代理，它就可能做父任务没有委派的事。v0.47 让父侧配置明确列出每个角色的职责和工具，并在创建子代理前检查这些限制。
 
 ## 新增与改动文件
 
-角色定义、委派生命周期和现有 Skill 加载边界需要一起调整：
-
-| 文件 | 变化 | 作用 |
+| 文件 | 变化 | 读者可从这里看到什么 |
 |---|---|---|
-| [agent_profiles.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/agent_profiles.py) | 新增 | 校验并冻结内置角色和本地自定义角色，生成不含提示正文的指纹。 |
-| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py) | 修改 | 把角色和工具交集纳入委派合同；构建独立子提示、模型绑定、工具视图和可选 Skill 视图。 |
-| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/delegation.py) | 修改 | 为 `delegate_task` 增加可选 `agent_profile` 字段。 |
-| [tools/base.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/base.py) 与 [tools/skill.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/skill.py) | 修改 | 只允许角色运行时使用受限 Skill 工具视图。 |
-| [skills.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/skills.py) | 修改 | 从已冻结 Skill Catalog 构造只含父侧已授权 ID 的子视图。 |
-| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/state.py)、[session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/session.py) 与 [trace.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/trace.py) | 修改 | 显式角色结果只保存角色 ID 和配置指纹，并校验它们与有序交付事实一致。 |
-| [config.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/config.py) 与 [config_example.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/config_example.py) | 修改 | 增加空的 `AGENT_PROFILES` 默认值和仅含占位内容的自定义角色例子。 |
+| [agent_profiles.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/agent_profiles.py) | 新增 | 内置角色和本地角色如何校验、冻结。 |
+| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py) | 修改 | 怎样把角色、工具范围、模型和授权结果交给子代理。 |
+| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/delegation.py) | 修改 | `delegate_task` 怎样接收可选角色。 |
+| [skills.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/skills.py) 与 [tools/skill.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/skill.py) | 修改 | 子代理如何只看到获准的 Skill。Skill 是一份供 Agent 按需读取的本地操作说明。 |
+| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/state.py)、[session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/session.py)、[trace.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/trace.py) | 修改 | State（任务事实与进度）、session（保存任务的会话文件）和 Trace（只读回放用的事件记录）如何核对角色身份。 |
+| [config_example.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/config_example.py) | 修改 | 本地角色配置应采用什么形状。 |
 
 ## 版本变更定位
 
-图中的角色配置没有取代 v0.46 的同步工具回合；它在同一入口增加了一个可选身份，并决定子 Runtime 会看到哪些只读能力。
+先看 v0.46 已有的同步调用路径。它说明本课是在原有委派入口上增加角色限制：
 
 ```text
-[旧] v0.46：同步委派
-父 AgentRuntime
-    → delegate_task 参数校验
-    → 父 PermissionGate 与 handler admission
-    → DelegationManager.build_delegated_task
-    → SubagentRunner（通用提示 + 固定只读工具）
-    → 子 AgentRuntime
-    → 结构化结果 → 父 Context 的 role=tool → 按序提交
+[旧] 父 Agent
+  → delegate_task 参数检查与授权
+  → 子代理使用通用提示和固定只读工具
+  → 等待调查完成
+  → 把结果交回父 Agent
 ```
+
+v0.47 在这条路径中加入角色选择、工具交集和 Skill 授权。图中的“工具交集”意思是：子代理最终可用的工具，必须同时出现在项目白名单、角色允许列表和这次请求的工具列表中。
 
 ```text
-[~] v0.47：同一同步入口增加角色边界
-父 AgentRuntime
-    → delegate_task 参数校验 [+] agent_profile / model_profile 一致性
-    → 父 PermissionGate 与 handler admission
-    → DelegationManager.prepare_batch
-       ├─ 冻结角色、模型和工具交集
-       ├─ [C] 父 PermissionGate 逐个预授权角色 Skill ID
-       └─ [B] 无效角色/模型或空工具交集 → 唯一有界失败结果
-    → [~] SubagentRunner（角色提示 + 工具交集 + 已授权 Skill 子视图）
-    → [旧] 独立子 AgentRuntime → 结构化结果
-    → [~] State / schema 3 / Trace 记录角色 ID 与配置指纹 → 父侧按序提交
+[旧] 父 Agent
+  → [~] delegate_task（可选 agent_profile）
+  → [+] agent_profile：选择内置或本地角色
+  → [C] 父侧校验角色、模型和工具范围
+  → [C] 父侧逐个检查角色申请的 Skill
+  → [~] 建立受限子代理 → 调用独立子 Agent → 返回报告
+  → [B] 角色/模型无效或没有共同工具 → 在子模型请求前拒绝
 ```
 
-图例：`[旧]` v0.46 已有；`[+]` v0.47 新增；`[~]` v0.47 修改；`[C]` 主要消费者；`[B]` 本版边界。模型只提出角色 ID；父 Runtime 负责解析本地定义和授权，子 Runtime 只拿到冻结后的能力视图。
+图例：`[旧]` 为 v0.46 已有，`[+]` 为 v0.47 新增，`[~]` 为修改，`[C]` 为主要校验或使用方，`[B]` 为本版边界。箭头表示调用或数据流。这里最重要的变化是角色在父侧先变成明确的限制，然后子代理才开始工作。
 
 ## 核心概念与数据结构
 
-### 1. `agent_profile` 是角色，`model_profile` 是模型别名
+### 1. 角色和模型回答不同的问题
 
-`agent_profile` 选择一组本地规则，例如 `reviewer`；`model_profile` 选择 `ProviderCatalog` 里的一个模型别名。角色可以指定默认子模型，也可以沿用现有子代理默认值。父请求同时带两个字段时，运行时要求它们解析为同一个子模型；未知或超出子代理模型白名单的别名会在子 LLM 请求之前被拒绝，不会静默换成其他模型。
+角色回答“这次调查要怎样做、能用哪些工具”；模型别名回答“由哪个本地配置的模型来执行”。例如，`reviewer` 是角色，`model_profile` 则从本地模型配置中选择一个别名。角色若指定模型就使用该模型；否则沿用原有子代理默认模型。调用者若另传模型别名，必须与这个最终选择一致，否则调用会在发出子模型请求前被拒绝。
 
-内置角色有 `explorer`、`reviewer`、`tester` 和 `general`。前三者的默认工具是 `read_file`、`list_dir`、`grep`；`general` 还包含没有副作用的 `calculate`。例如，父模型可以在旧委派参数末尾增加：
+内置角色有 `explorer`、`reviewer`、`tester` 和 `general`。它们都只能使用子代理只读白名单中的工具。下面是调用中的关键字段示意；真实调用还需要任务目标、范围和限制等信息：
 
 ```json
-"agent_profile": "reviewer"
+{
+  "agent_profile": "reviewer",
+  "requested_tools": ["read_file", "grep"]
+}
 ```
 
-运行时仍会检查角色工具、本次 `requested_tools` 和子代理总白名单的交集。交集中的文件工具还必须通过 ScopeGate，确保路径在委派范围里。
+`requested_tools` 是父 Agent 为这一次调查提出的工具申请。运行时还会检查路径是否在任务范围内；把工具写进请求本身不会绕过这项检查。
 
-### 2. 本地角色配置在 Runtime 创建时冻结
+### 2. 自定义角色在任务开始时冻结
 
-自定义定义放在未跟踪的 `config_local.py` 的 `AGENT_PROFILES`。每项必须提供 `description`、`prompt` 和 `tools`；`model_profile`、`permissions`、`skills` 可选。角色 ID 以小写字母开头，最多 64 字符。内置名称不能被自定义值覆盖。受跟踪的 [配置模板](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/config_example.py) 仅展示占位角色：
+自定义角色写在本机未跟踪的 `config_local.py` 中，不应把真实密钥或私人配置放进示例文件。每个角色至少需要职责说明、子代理指令和工具列表；模型、权限和 Skills 都是可选项：
 
 ```python
 AGENT_PROFILES = {
     "api_reader": {
         "description": "追踪 API 的只读实现路径",
-        "prompt": "指出入口、调用关系和能直接支持结论的文件证据。",
+        "prompt": "指出入口、调用关系和支持结论的文件证据。",
         "tools": ["read_file", "grep"],
         "permissions": {"grep": "allow"},
         "skills": [],
@@ -107,75 +104,90 @@ AGENT_PROFILES = {
 }
 ```
 
-这里的 `permissions` 只能对 `tools` 中的工具指定 `allow` 或 `deny`。`deny` 会从可用工具交集中移除该项；没有显式 `deny` 的角色工具仍可由本次 `requested_tools` 申请。子代理的 PermissionGate 是独立静态规则，不会向终端发起授权提问。
+`permissions` 只能为角色自己的工具设置 `allow` 或 `deny`。`deny` 会从本次可用工具中移除对应工具；角色不能借配置扩大子代理的总白名单。Agent Runtime（负责安排模型请求、工具和结果的运行循环）创建时会检查并冻结本地角色定义，因此运行期间修改配置不会悄悄改变正在进行的任务。
 
-Catalog 会在父 Runtime 组装时检查角色字段、Skill ID、工具和模型别名，并冻结不可变定义。角色提示正文只用在子 system prompt，不进入 State、Trace 或 session。合同只携带角色 ID 和由角色配置生成的 SHA-256 指纹；指纹可区分角色配置变化，但不保存或显示提示正文。
+只保存角色 ID 和配置指纹供 State、session 和 Trace 核对。指纹是用于识别配置是否改变的摘要；角色提示正文不会因此进入这些摘要。
 
-### 3. Skill 仍要由父侧逐个授权
+### 3. Skill 仍由父 Agent 逐项授权
 
-角色的 `skills` 列表只表示这些 Skill 可以被申请，并不自动等于授权。父侧在子 Runtime 启动前，用当前 PermissionGate 对每个精确 Skill ID 执行一次检查；用户拒绝或策略 deny 的 ID 不会进入子 Catalog、工具目录或 Context 元数据。若角色引用当前 Catalog 中不存在的 Skill，则直接拒绝此次委派，避免子代理在缺少预期资料时继续工作。
+角色列出某个 Skill，只表示子代理“可以申请读取它”，不代表已经获得许可。父 Agent 会在子代理启动前，按每个准确的 Skill ID 询问当前权限策略。拒绝或被策略禁止的 Skill 不会出现在子代理的目录和工具中；配置引用了不存在的 Skill 时，此次委派会失败。
 
-获准 Skill 只能通过 `skill(name)` 按需读取。子代理拿到的加载器只包含这次获准的 ID；即使模型猜出其他 Skill 名，也无法读取。正文仍是普通、不可信的 `role=tool` 结果，不授予 shell 或其他工具权限。它不会进入父 State、Trace 摘要或 verification evidence；若父会话开启 `/save`，子结果中也不会包含 Skill 正文。
+如果获准，子代理通过 `skill(name)` 按需读取正文。Skill 正文只是普通工具返回的资料，不能授予 shell 等新工具权限，也不能覆盖受保护的系统指令。Skill 正文不会进入 State 或 Trace 摘要，也不能证明父任务已经通过验证；开启 `/save` 后，已加载正文仍可能作为普通工具历史保存在 session 中，所以会话文件应按任务资料妥善保护。
 
-没有 `agent_profile` 的旧 `delegate_task` 不会得到 Skill 能力。这里的授权边界是“父策略先准许精确 ID，子 Catalog 再限制可见范围”，而不是把父 PermissionGate 或整个 Skill Catalog 传给子代理。
+没有传 `agent_profile` 的旧委派不会获得角色 Skill 能力。
 
-### 4. `tester` 只能给验证建议
+例如，下面这个字段表示该角色可以申请读取名为 `api-contracts` 的 Skill；它本身还没有批准这次读取：
 
-`tester` 角色没有 shell 或测试运行工具。它检查测试代码与被测实现，提出应该运行的命令或需要补的用例，但不能声称测试已经运行或通过。报告校验会拒绝常见的“tests passed / 测试通过”表述，并要求 `limitations` 明确说明本次没有执行测试。它的输出只是父 Agent 的调查资料；是否运行测试仍由父 Agent 走自己的计划和权限流程决定。
+```json
+{
+  "skills": ["api-contracts"]
+}
+```
+
+### 4. tester 只能分析测试，不能运行测试
+
+下面是选择 `tester` 时的关键字段示意；真实调用还要包括目标和文件范围：
+
+```json
+{
+  "agent_profile": "tester",
+  "requested_tools": ["read_file", "grep"]
+}
+```
+
+`tester` 可以阅读实现与测试代码，建议要运行哪些命令或补充哪些用例；它没有运行测试的工具，不能把建议写成“测试已经通过”。是否执行测试仍由父 Agent 根据自己的任务流程决定。子代理的报告只是调查材料，不能代替父 Agent 执行验证。
 
 ## 为什么这样设计
 
-角色被实现为受信任的本地配置，任务合同与选中的父侧事实仍作为普通用户侧输入交给子代理。这样角色提示可以规定工作方式，而文件内容和工具结果仍不能借着合同覆盖 system 规则。
+把角色放在本地配置中，父 Agent 就能用一个简短 ID 选择一套固定职责和工具边界。把模型别名单独保留，则避免把“做什么”和“由哪个模型做”混成同一个设置。
 
-工具权限由多个集合求交，不允许角色配置扩大四工具白名单，也不允许父请求越过角色上限。Skill 的授权则留在父侧，因为只有父侧持有当前任务的实际 PermissionGate 和交互授权结果。子 Runtime 收到的只是已获准 ID 的独立只读视图。
-
-身份指纹也只在明确选择角色时写入合同、结构化状态和持久结果。因此旧调用的合同哈希、结果 JSON 和 session 字段保持 v0.39 的形状；显式选择不同角色时，则可以在回放记录中辨认角色身份，而不保存角色提示正文。
+代价是配置更严格：错误的角色、模型或 Skill 不会自动猜测替代项；角色给出的工具清单也只能收窄既有权限。这样父侧授权仍是唯一入口，子代理不会继承父 Agent 的全部能力。
 
 ## 设计边界
 
-v0.47 仍然只支持同步、单层、只读委派。父 Agent 在子代理完成并提交本轮结果前不能进入下一次模型调用。角色不能运行 shell、启动进程、修改文件、操作 MCP、创建计划、恢复会话或决定父任务完成。
+v0.47 的子代理仍然是同步、单层和只读的。父 Agent 必须等待本轮子代理完成；子代理不能改文件、运行 shell、访问外部工具服务、创建计划、做验证或决定父任务已经完成。`tester` 只能建议测试，父 Agent 仍须自己运行并检查验证结果。
 
-`tester` 的硬工具限制保证它不能运行测试；报告检查补充了对常见“测试已通过”说法的拦截。自然语言无法穷尽所有误导表达，因此父 Agent 仍需把子结果视作调查材料，并自行运行计划内验证。
-
-角色 Skill 必须由当前父侧 Catalog 发现并逐个授权。配置里的未知 Skill ID 不会回退到其他来源，而是拒绝此次委派。`config_local.py` 和 session 敏感目录（包括实际使用的自定义 `SessionStore.root`）的路径检查会使用 realpath，覆盖直接路径和符号链接目标。
-
-本版没有后台子代理、异步结果领取或子会话续接。后续版本计划可能研究这些能力，但它们不是本课已实现的接口。
+本版还没有后台启动、稍后领取结果或跨进程继续同一子会话的能力。前者在下一课介绍，后者要到第 49 课。
 
 ## 关键流程
 
-下面展示一次角色委派从参数到回传结果的主要过程。只有角色列出的 Skill 会进入“父侧授权”步骤；不带角色的调用绕过该步骤并保留原有合同。
+读下面的步骤时，可以把它理解为一次“先检查权限，再开始委派”的过程：
 
 ```text
-父模型提交 delegate_task
-  → 冻结角色与模型别名
-  → 计算白名单 ∩ 角色工具 ∩ requested_tools
-  → 父 PermissionGate 逐个检查角色 Skill ID
-  → 构造只含有效工具和已授权 Skill 的子 Runtime
-  → 子模型调查并提交结构化报告
-  → 父 State / durable boundary 校验角色身份后按序交付
+父模型提出 delegate_task
+  → 父侧解析角色和模型
+  → 取项目白名单、角色工具和本次请求的交集
+  → 父侧逐个授权角色申请的 Skill
+  → 建立只有获准工具/Skill 的子代理
+  → 子代理调查并返回结构化报告
+  → 父侧记录角色摘要并接收报告
 
-角色未知、模型冲突、工具交集为空：在子 LLM 请求前形成失败结果
-Skill 被拒绝或文件被替换：Skill 不可用或返回有界加载错误
+角色、模型或工具范围无效：子模型请求前拒绝
+Skill 被拒绝：该 Skill 不会交给子代理
 ```
 
 ## 运行与观察
 
-使用已配置的 LLM 网关启动一次命令行首条任务，例如“只读审阅 `src/mini_agent` 中的 HTTP 重试边界”。父模型需要调用 `delegate_task` 并提供 `agent_profile: reviewer`。观察返回的结构化 JSON：当角色明确选择时会出现 `agent_profile` 和配置指纹；子代理仍同步返回，之后父 Agent 才继续处理。
+配置好本地模型后，用 Bash/zsh 启动一条只读审查任务：
 
-如果配置了角色级 `skills`，授权提示会逐项显示 Skill ID 与来源。拒绝某个 ID 后，子 Context 的 Skill 目录不应再展示它；这说明父授权结果已经变成子 Runtime 的可见能力边界。
+```bash
+PYTHONPATH=src python -m mini_agent "只读审阅 src/mini_agent 中的 HTTP 重试边界"
+```
+
+观察父模型是否调用 `delegate_task` 并选择 `reviewer`。如果调用成功，子代理仍会先完成调查，父 Agent 随后才继续；结构化结果中会出现角色 ID 和配置指纹。若使用了角色 Skill，授权提示会逐项显示 Skill ID；拒绝某个 ID 后，子代理就看不到它。这些现象分别说明角色身份已记录，Skill 访问仍由父侧控制。
 
 ## 实现拆解
 
-参数校验先从冻结的 `AgentProfileCatalog` 解析角色，并对显式模型别名做一致性比较；构建 `DelegatedTask` 时再将有效工具子集和角色指纹纳入合同哈希。[`validate_delegation_arguments` 与 `build_delegated_task`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py) 仍保留无角色分支的旧字段集。
+参数检查会从冻结的角色目录解析角色，并核对显式模型别名；委派合同（记录这次子任务的目标、范围和限制）再带上有效工具子集与角色指纹。没有角色的调用保留旧合同形状。
 
-在批量预算预留之前，`DelegationManager` 会用父 `PermissionGate` 检查角色 Skill 列表。`SubagentRunner` 随后构造只包含获准 Skill ID 的目录、工具和子策略，并通过原有 `AgentRuntime.run()` 运行；它没有第二套 agent loop。结果通过原持久委派边界返回父侧。
+在子任务启动前，委派管理器会通过父侧 PermissionGate（决定工具是否允许使用的权限检查）逐项检查 Skill。之后，子代理收到只含获准工具和 Skill 的独立视图，并运行项目共用的 Agent Runtime。子代理不会获得父 State、父权限或父验证证据。
 
-在子任务 scope 内，`ScopeGate` 还对解析后的真实路径拒绝 `config_local.py`、工作区 session 敏感目录、当前持久化会话目录以及指向这些位置的符号链接。角色工具集合不能放宽这条检查。
+需要对照实现时，查看 [角色配置校验](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/agent_profiles.py)、[委派运行流程](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py)和[角色工具注册](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/delegation.py)。
 
 ## 本版特性、下一课与代码索引
 
-本版新增了四种内置角色、本地自定义角色、角色工具/权限/模型绑定、父侧 Skill 预授权，以及可写入 State、schema 3 结果和 Trace 的可选角色身份摘要。未传角色的调用保持同步通用子代理行为。
+本版让父 Agent 能以固定内置角色或本地自定义角色开展同步只读调查，并由父侧逐项批准角色可申请的 Skill。未指定角色的旧调用继续使用原行为。
 
-阶段十三后续版本计划讨论当前进程内的后台子代理和子会话续接；在它们完成前，本文所有角色仍然同步返回，也没有 follow-up 工具。
+下一课会处理“父 Agent 不必等子代理完成”的问题：子代理先在当前进程里后台运行，父 Agent 之后查询状态并领取结果。
 
-核心实现索引：[角色 Catalog](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/agent_profiles.py)、[委派运行时](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py)、[受限 Skill Catalog](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/skills.py)、[父子工具视图](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/base.py)、[持久化结果校验](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/session.py)。
+固定在 v0.47 的代码索引：[角色目录](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/agent_profiles.py)、[委派执行](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/delegation.py)、[Skills 目录](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/skills.py)、[父子工具视图](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/tools/base.py)、[持久结果校验](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.47/src/mini_agent/session.py)。

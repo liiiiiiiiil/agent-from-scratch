@@ -1,101 +1,116 @@
-# 第 48 课：进程内后台子代理
+# 第 48 课：让子代理在后台调查
 
-上一课：[具名子代理角色](47-agent-profiles.md) · [教程总览](README.md) · 下一课：[可续接子会话](49-resumable-child-session.md)
+上一课：[给子代理设定角色](47-agent-profiles.md) · [教程总览](README.md) · 下一课：[恢复并继续子会话](49-resumable-child-session.md)
 
 代码快照：`v0.48` · 相邻差异：`v0.47..v0.48`
 
-本课命令使用 Bash/zsh。代码链接和示例对应 v0.48 源码快照。
+本课命令使用 Bash/zsh；代码链接和示例对应 `v0.48` 源码快照。
 
 ## 本课目标
 
-上一版的 `delegate_task` 会等子代理完成后才返回结果。即使父 Agent 已经有别的工作可做，它仍得停在原地等调查结束。本课增加进程内后台子代理：父 Agent 启动具名只读调查后，可以继续请求模型和使用工具，之后再按 ID 查询状态并领取结果。
+上一课的 `delegate_task` 会一直等子代理交回报告。即使父 Agent 还有别的工作，等待期间也不能继续处理。本课加入后台调查：父 Agent 先得到一个“已接受”回执，然后可以继续工作，之后再查询子代理状态并领取报告。
 
-读完后，你应能解释四个后台工具各自做什么，为什么两个并行启动要等整轮工具结果都提交后才真正启动，以及为什么正在运行或尚未领取的子任务会阻止 `/save` 和任务完成。
+这里的“后台”指调查在当前命令行程序中另一个工作线程里运行。它不是能在程序退出后继续工作的独立服务。正在处理用户任务的是父 Agent；负责只读调查的是子代理。
 
-## 前置条件
+读完后，你应能区分“启动回执”和“调查报告”，并理解为什么系统要等整轮启动记录安全提交后才启动子代理，以及为什么活动任务或未领取报告会阻止保存和结束父任务。
 
-只需要基础 Python、终端和 Git。建议先读第 34–39 课了解同步委派、预算、并行调度和 schema 3 持久工具边界，再读第 47 课了解具名角色和角色工具限制。
+## 前置条件与版本切换
 
-检查相邻版本差异。`v0.48` tag 由用户手动创建；在该 tag 出现前，可在当前工作分支阅读相同源码。tag 建立后可切换到固定快照：
+只需要基础 Python、终端和 Git。建议先读第 47 课了解角色如何限制子代理；第 34–39 课介绍了委派、并发和持久化工具结果，可作扩展阅读。
+
+检查相邻版本差异，再切到本课快照：
 
 ```bash
-git checkout v0.48
+git checkout v0.47
 git diff --stat v0.47..v0.48
-git diff v0.47..HEAD -- src/mini_agent/delegation.py src/mini_agent/runtime.py
+git diff v0.47..v0.48 -- src/mini_agent/delegation.py src/mini_agent/runtime.py
+git checkout v0.48
 ```
 
-读完后用 `git checkout -` 回到原分支。在 tag 建立前，可将上面的固定版本差异命令替换为 `git diff --stat v0.47..HEAD`。
+读完后用 `git checkout -` 返回切换前的分支。
 
 ## 上一版的问题
 
-v0.47 已经可以选择 `explorer`、`reviewer`、`tester` 或本地角色，但 `delegate_task` 是同步调用。父 Agent 在同一个模型回合启动多个调查时，子任务内部可以并行，父 Agent 仍需要等这些结果后才能进入下一轮。
+v0.47 的委派是同步的：父 Agent 发出 `delegate_task` 后，要等子代理完成才能继续下一轮。后台任务可以让父 Agent 在调查进行时继续处理其他事情。
 
-如果把工作线程直接放到工具 handler 里，handler 返回后线程就可能在 schema 3 的整轮提交之前运行。父进程若此时崩溃，磁盘上会留下“已经接受启动”的结果，但无法确定子代理是否真正开始。这一版因此同时处理两个问题：父模型可以边做边等；启动确认必须在父线程按序提交，整轮成功后才释放 worker。
+但启动时机不能随意提前。如果子代理在线程里立刻开始，父程序可能在还没把“已接受启动”这一事实写入保存文件时退出。恢复时就分不清它有没有开始，也可能错误地重复启动。
+
+因此本版规定：父线程先按顺序提交本轮所有启动回执；只有整轮写入成功后，才真正启动子代理。
 
 ## 新增与改动文件
 
-后台任务跨越工具、Runtime、State 和 CLI 生命周期，需要这些部分共同工作：
-
-| 文件 | 变化 | 作用 |
+| 文件 | 变化 | 读者可从这里看到什么 |
 |---|---|---|
-| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/tools/delegation.py)、[tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/tools/__init__.py) | 修改 | 注册后台启动、状态、结果和取消工具，只放进父侧 Registry。 |
-| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/delegation.py) | 修改 | 管理排队任务、worker、取消事件、并发槽位和父线程结果收集；与同步委派共用预算。 |
-| [runtime.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/runtime.py)、[agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/agent.py) | 修改 | 只允许纯启动回合，整轮提交后运行子任务；未领取时不把父任务判为完成。 |
-| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/state.py)、[trace.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/trace.py) | 修改 | 记录启动、收束、领取、放弃和中断事实，只保留有界摘要。 |
-| [session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/session.py)、[resume.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/resume.py) | 修改 | 校验 schema 3 的启动/领取身份；恢复时中断丢失的进程内任务，不重启 worker。 |
-| [__main__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/__main__.py)、[input_session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/input_session.py)、[output.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/output.py) | 修改 | 等待输入时继续收集短通知和推进队列；清理任务边界时保留结果直到 clean 保存成功。 |
+| [tools/delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/tools/delegation.py) 与 [tools/__init__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/tools/__init__.py) | 修改 | 四个后台工具如何注册到父 Agent。 |
+| [delegation.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/delegation.py) | 修改 | 如何管理工作线程、排队、取消、并发和结果收集。 |
+| [runtime.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/runtime.py) 与 [agent.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/agent.py) | 修改 | 为什么启动要等整轮保存成功，以及父任务何时可以结束。 |
+| [state.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/state.py) 与 [trace.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/trace.py) | 修改 | 父任务怎样记录启动、完成、领取或中断。 |
+| [session.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/session.py) 与 [resume.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/resume.py) | 修改 | 怎样保存启动事实，并在程序重启后记录旧工作已中断。 |
+| [__main__.py](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/__main__.py) 与输入/输出模块 | 修改 | 等待用户输入时怎样显示通知，以及退出时怎样清理任务。 |
 
-用 `git diff --stat v0.47..v0.48` 可看到这不是只加四个工具的改动：线程启动时机、持久边界和 CLI 任务清理也一起改变。
+`git diff --stat v0.47..v0.48` 会显示这次变化横跨工具、运行循环、保存和命令行退出流程，不只是多了几个工具。
 
 ## 版本变更定位
 
-先看 v0.47 的真实基线：父 Runtime 调用同步工具，Manager 等待结果，父 Runtime 再把结果作为 `role=tool` 消息提交。
+v0.47 的父 Agent 必须等同步委派返回报告；下面是该版本的基本路径：
 
 ```text
-[旧] 父 AgentRuntime
-  → delegate_task 参数校验与父 PermissionGate
-  → DelegationManager.run / SubagentRunner.run
-  → 等待只读子 AgentRuntime 完成
-  → 一个 SubagentResult → 父 role=tool → 下一次父模型请求
+[旧] 父 Agent
+  → delegate_task
+  → 启动只读子代理
+  → 等待完整报告
+  → 把报告交给父 Agent
 ```
 
-v0.48 新增一条异步生命周期。worker 只把有界结果放进完成队列；父线程在安全边界取出结果并更新 State。
+v0.48 把启动确认和报告领取分成了两次操作。`schema 3` 是本项目保存会话时使用的一种数据格式；本版用它记录每个启动回执以及整轮是否提交成功。
 
 ```text
-[~] 父 AgentRuntime
-  → [+] spawn_subagent（一轮只能包含一个或多个纯启动调用）
-  → [C] ToolExecutor / PermissionGate / 阶段闸门
-  → [~] 按模型顺序提交启动确认和 role=tool
-  → [B] 整轮 schema 3 提交失败 → 不启动任何 worker
-  → [+] 整轮提交成功 → Manager 启动 worker → 父 Agent 继续模型轮次
-                                      ↓
-          worker 执行子 Runtime → 有界完成队列 → [C] 父线程 State/预算结算
-                                      ↓
-      [+] ID/状态通知 → get_subagent_status → get_subagent_result → role=tool
+[旧] 父 Agent 的同步委派
+  ↓
+[+] spawn_subagent（只返回启动回执）
+  → [~] 父 Agent 增加后台任务管理
+  → [C] 工具权限与任务阶段检查
+  → 按顺序保存启动回执
+  → [B] 整轮保存失败：不启动任何子代理
+  → 整轮保存成功：后台启动 worker
+       ├─ 父 Agent 继续处理其他工作
+       └─ 子代理完成 → 父线程收集结果
+                            → 查状态 → 显式领取报告
 ```
 
-图例：`[旧]` v0.47 已有；`[+]` v0.48 新增；`[~]` v0.48 修改；`[C]` 主要消费者；`[B]` 本版边界。箭头分别表示调用、数据流和控制流。父 Agent 的工具顺序仍决定 `role=tool` 消息顺序，子任务的完成先后不会改变它。
+图例：`[旧]` 为 v0.47 已有，`[+]` 为 v0.48 新增，`[~]` 为修改，`[C]` 为主要校验或使用方，`[B]` 为本版边界。`worker` 指执行子代理任务的工作线程。箭头表示调用、控制或数据流。完成先后的不同不会打乱父 Agent 中工具结果的顺序。
 
 ## 核心概念与数据结构
 
-### 1. 启动确认和子任务结果是两次不同的工具调用
+### 1. 启动、查询、领取和取消是四种操作
 
-`spawn_subagent` 只返回一次启动确认，其中包括 `child_session_id`、`delegation_id`、角色、接受状态和预算摘要。它不会在原工具调用里追加第二个结果。子任务结束后，父模型用另一个调用领取结果：
+后台子代理的工具只放在父 Agent 一侧。它们各自做一件事：
 
-| 工具 | 用途 | 是否返回调查正文 |
+| 工具 | 用途 | 是否包含调查报告 |
 |---|---|---|
-| `spawn_subagent` | 启动具名只读调查 | 否，只返回启动确认 |
-| `get_subagent_status` | 查询有界状态和 `result_id` | 否 |
-| `get_subagent_result` | 领取 `SubagentResult` | 是，收束后才返回 |
-| `cancel_subagent` | 发出协作式取消请求 | 否 |
+| `spawn_subagent` | 启动一项具名只读调查 | 否，只回报已接受及任务 ID |
+| `get_subagent_status` | 查看任务当前状态 | 否，只返回有界状态和可用时的结果 ID |
+| `get_subagent_result` | 领取已经收束的结果 | 是 |
+| `cancel_subagent` | 请求子代理停止 | 否 |
 
-状态查询不会把长正文带入模型上下文；完整内容只有在明确调用 `get_subagent_result` 后才作为普通工具结果进入父 history。重复领取返回同一个 `result_id` 和同一结果，父 State 只结算一次。
+`child_session_id` 是父任务内这项子任务的编号；`result_id` 标识完成后的报告。状态通知不会自动把报告正文塞进父 Agent 的对话。父 Agent 要阅读调查发现，必须显式调用 `get_subagent_result`。重复领取会返回同一份报告，父状态也只结算一次。
 
-### 2. 工具回合先完整提交，再启动 worker
+启动时必须指定第 47 课介绍的角色，并声明用途是只读调查。待用户批准的计划、验证、诊断和崩溃恢复阶段不允许启动后台任务；子代理不能因为被放到后台就取得额外能力。
 
-一个工具回合是模型一次性发出的所有工具调用及其对应结果。v0.48 为含启动请求的回合加了专用路径：同一回合可以有多个 `spawn_subagent`，但不能混入文件读取、状态查询或其他工具。父 Runtime 按调用顺序完成准入、写入唯一 `role=tool` 确认，并提交整轮边界，最后才告诉 Manager 启动 worker。
+下面只列出启动调用中与本课主题有关的两个字段；真实调用还要提供调查目标、范围和预算：
 
-关键控制顺序如下；整轮边界提交前，子代理还没有运行：
+```json
+{
+  "agent_profile": "reviewer",
+  "purpose": "investigation"
+}
+```
+
+### 2. 整轮保存成功后，子代理才开始运行
+
+“模型回合”是模型一次回答中发出的全部工具调用。一个含后台启动的回合可以启动一项或多项子任务，但不能夹带查询状态、读文件等其他工具调用。父线程按模型给出的顺序处理每个启动请求并写入对应回执，然后保存整轮边界。
+
+关键顺序可以简化为：
 
 ```python
 if self.session_boundary is not None:
@@ -104,79 +119,86 @@ manager.commit_background_spawn_round()
 manager.activate_background_tasks()
 ```
 
-如果 schema 3 在任一启动确认或整轮提交时失败，控制不会走到 worker 启动。这个闸门把“父模型收到接受确认”和“子代理开始消耗预算”连接成一个可恢复的顺序。
+第一步将本轮工具结果和状态作为一个完整边界提交；后两步才让后台管理器启动工作线程。若保存某个回执或整轮边界失败，流程就不会走到启动步骤。这样，模型已经收到的启动回执和实际开始消耗资源的子任务保持一致。
 
-### 3. worker 只产出结果，父线程负责结算
+### 3. 子线程只报告结果，父线程更新父任务
 
-子 Runtime 使用自己的 State、Context、角色和只读工具视图。worker 完成时只把有界 `SubagentResult` 放入线程安全完成队列，不改父 Context 或父 session。父 Runtime 在下一安全边界收集队列，更新委派记录、结算 usage，并显示只包含 ID、状态和结果 ID 的通知。CLI 等待输入时，主线程仍会收集完成项并启动队列中的下一个任务。
+每个子代理有独立的任务状态、对话和只读工具范围。工作线程完成后，把有限大小的结果放进线程安全队列。父线程稍后读取队列，更新父任务记录、结算预算并显示短通知。父 State（当前任务事实与进度）、对话历史和 session 文件不会由多个工作线程同时修改。
 
-同步和后台子代理共用父任务预算与并发槽位。默认最多创建 3 个子代理，同时运行最多 2 个；本地设置的更小并发上限也会生效。排队合同先占用总预算；worker 真正运行后占用并发槽位。失败、超时、异常和取消仍形成可领取的有界结果。
+同步与后台子代理共用预算：默认每个父任务最多创建 3 个子代理，同时最多运行 2 个；本地配置可以再设更小的并发限制。排队任务也会占用预留额度。`token` 是模型处理文本的计量单位，和模型调用数、工具调用数一样受预算限制。失败、超时和取消都会形成可查询的结果。
 
-### 4. 进程内任务不能伪装成安全点
+取消是协作式的：父 Agent 发出取消请求后，正在等待的模型请求可能要先返回；子代理会在接下来的安全检查点看到请求后停止。系统不强行杀掉线程。
 
-普通 safe point 要求任务状态完整且没有活动或未领取子代理。活动线程无法序列化，也不会保存为可续接子会话，因此 `/save` 明确拒绝并列出 ID；自动保存则等待子任务收束，不打断父 Agent。CLI 的 `/new`、`/reset`、EOF 和退出会先请求取消并有界等待。若线程没在期限内退出，旧任务保留，CLI 报告相关 ID。
+### 4. 活动或未领取的任务不能算完成
 
-父模型即使返回普通文本，也不能在活动子代理或未领取结果时宣布父任务完成。CLI 会把任务保持为活动状态；子结果也不自动成为父侧验证证据。
+safe point（安全保存点）是一个状态完整、没有未处理后台任务的会话快照。活动线程本身无法保存成可恢复的任务，所以手动 `/save` 会列出活动或未领取子任务并拒绝保存；自动保存则等待任务收束。
+
+命令行界面退出、输入结束、`/new` 或 `/reset` 时会先请求取消并等待一段有限时间。若线程无法按时结束，界面保留旧任务并报告相关 ID。即使父模型已输出普通结束文本，只要子任务还在运行或结果还未领取，父任务就不会进入 `done`。子代理报告也不会自动证明父任务的修改已经验证通过。
 
 ## 为什么这样设计
 
-启动确认和最终结果分成两次工具调用，父模型可以先启动调查，再自主决定何时查询和领取；这也保持了每个工具调用只有一个 `role=tool` 结果的协议。
+把“启动”和“读取结果”分开，父 Agent 可以先发起调查，再决定什么时候查看。它也保留了工具协议的一条简单规则：每次工具调用只有一个对应结果。
 
-worker 与父线程分工，是为了避免多个线程同时改父 State、history 或 session。子任务可以并发计算，但父侧事实按固定顺序提交。schema 3 只保存合同身份、预留预算和生命周期，不保存 Python 线程句柄。
+父线程独占父状态和会话写入，避免两个线程同时改同一段对话或存档。整轮提交闸门则确保不会出现“保存文件说已启动，但工作线程其实没启动”的模糊状态。
 
-本版用协作式取消：正在执行的 LLM 请求需要先返回，子 Runtime 才能在下一个边界观察取消事件。它不使用强制线程终止，因为那无法保证子任务和父账本停在一致状态。
+代价是后台任务只在当前程序进程中运行。退出后不能接管原工作线程；如果程序在结果领取前退出，恢复会把无法确认的工作标为中断，而不会自动重跑。
 
 ## 设计边界
 
-后台只在当前 CLI 进程内运行。若完整启动回合已经安全写入，但父进程在结果领取前退出，恢复分支会把子任务记为 `interrupted`，不重启 worker，不伪造结果 ID，并按预留上限保守结算未知用量；用户仍需逐项处理 crash recovery issue。
+若父程序在启动回合完整提交后退出、而结果尚未安全保存，恢复流程会记录任务为 `interrupted`（中断），不会重启旧线程或伪造报告，并按已预留的上限谨慎结算未知用量。用户仍须逐项处理崩溃恢复问题。
 
-如果启动 call 的逐项确认已经保存，但整轮尚未 committed，worker 从未启动，恢复会关闭未启动的预留。活动 worker 或未领取结果不会被保存为 clean safe point；用户结束任务时，已经收束但未领取的结果暂记为 `abandoned`。若 clean 保存失败，旧任务和内存结果仍可领取；成功提交后才释放结果正文。
+如果启动回执已经逐项保存，但整轮还没提交成功，子代理从未开始，恢复流程会关闭尚未启动的预算预留。已经完成但尚未领取的结果不能作为可恢复子会话保存；清理时会先把它保留到父会话成功提交为止。
 
-角色仍只决定只读提示和工具范围。子代理不能写文件、运行 shell、操作 MCP、再委派或执行父侧验证。v0.49 才计划讨论保存已收束的子 Context 并续接同一个子会话。
+子代理始终是只读调查者：不能写文件、运行 shell、使用 MCP（将外部工具服务接入 Agent 的协议）、继续委派或替父 Agent 做验证。要在另一次命令行进程中继续同一段子代理对话，需要第 49 课的会话快照能力。
 
 ## 关键流程
 
 ```text
-父模型提出 spawn_subagent
-  → schema / role / stage / PermissionGate 校验
-  → 父 State 预留子代理数、LLM/tool/token 预算
-  → handler 返回唯一启动确认
-  → 对应 role=tool 与 schema 3 call 按模型顺序提交
-  → 整轮 committed 后，Manager 启动可用并发槽位中的 worker
-  → worker 子 Runtime 完成并只写完成队列
-  → 父线程收集、结算 usage、显示 ID/状态通知
-  → 模型显式查询状态并领取结果
+父模型提出一轮后台启动
+  → 检查参数、角色、任务阶段与权限
+  → 预留子代理数和模型/工具/token 预算
+  → 按调用顺序提交每个启动回执
+  → 整轮保存成功后，后台任务管理器启动可运行的工作线程
+  → 工作线程将结果放入完成队列
+  → 父线程收集结果并显示 ID/状态通知
+  → 父模型查询状态，并显式领取报告
 
 失败路径：
-  启动/整轮 session 提交失败 → 该轮不启动 worker
-  旧进程退出且无安全结果 → interrupted + 预留额度保守结算 + crash issue
-  结果未收束 → status 工具只返回状态；父任务不能进入 done
+  任一启动回执或整轮保存失败 → 这一轮不启动 worker
+  旧进程退出而结果未保存 → 标记 interrupted，不自动重跑
+  结果仍在运行或尚未领取 → 父任务不能进入 done
 ```
 
 ## 运行与观察
 
-准备好本地模型配置后，用 Bash/zsh 启动命令行首条任务：
+配置好本地模型后，发起一条明确要求使用后台子代理的任务：
 
 ```bash
-PYTHONPATH=src python -m mini_agent "只读调查工具注册表与执行器的关系，并继续检查一次父侧参数校验"
+PYTHONPATH=src python -m mini_agent "请用 reviewer 角色启动一项只读调查，检查 src/mini_agent 的工具注册和参数校验；调查进行时继续查看父侧调用路径，之后查询状态并领取报告"
 ```
 
-观察父模型是否先得到一个带 `child_session_id` 的 `spawn_subagent` 工具结果，然后继续发出自己的工具调用或模型轮次。子代理收束时，终端通知只显示 ID、状态和 `result_id`。父模型要看到摘要和 findings，必须再调用 `get_subagent_result`。若它直接输出结束文本但没有领取结果，CLI 会说明后台任务仍活动或结果待领取，任务不会变成 `done`。
+观察是否先出现带 `child_session_id` 的启动回执，之后父 Agent 继续工作。调查结束时，终端通知只显示任务 ID、状态和可用的 `result_id`；报告正文应在父模型调用 `get_subagent_result` 后才进入对话。
 
-这几个现象分别说明启动确认不是最终报告、通知不隐式注入结果，以及父任务的完成判定会检查未领取任务。
+若父 Agent 尝试直接结束而任务仍活动或结果未领取，命令行界面会说明尚未收束的任务，父任务保持活动状态。这能帮助区分“子代理已启动”和“子代理报告已交回”。
 
 ## 实现拆解
 
-`tools/delegation.py` 提供严格的合同与 UUID 参数校验；`state.py` 预留聚合预算并保存 lifecycle。`DelegationManager.spawn_background()` 将合同放入待启动队列，但不启动线程。`AgentRuntime._run_background_spawn_round()` 在每个启动 call 的 `role=tool` 提交后确认启动事实，并仅在整轮 boundary committed 后释放 worker。
+后台任务管理器负责准备和管理子任务，但在整轮提交前不启动线程。父 Runtime 按调用顺序提交启动结果和 `schema 3` 边界，再通知管理器释放已预留任务。
 
-worker 复用 `SubagentRunner.run()` 与同一 `AgentRuntime.run()`，完成后只写 Manager 的线程安全队列。`AgentRuntime.collect_background_events()` 在父侧安全边界收集并通知。领取时，父 Runtime 校验结果身份，State 对 result ID/hash 进行一次性结算，`session.py` 再验证工具边界中的 `child_session_id`、`delegation_id` 和结果摘要。
+每个工作线程复用项目同一套 Agent 运行循环（安排模型请求、工具调用和结果），但只写入自己的结果队列。实现中，工作线程把完成信息放进队列：
 
-崩溃恢复由 `resume.py` 检测 active schema 3 tool boundary 中的后台合同。它不恢复线程；未安全保存的结果会中断，并将未知用量按预留上限结算。Trace 仅读取 State 结构化生命周期，不观察线程，也不读取子 history。
+```python
+self._background_events.put((selected.task.subagent_id, result))
+```
+
+父侧运行循环在安全边界收集结果、核对身份、结算使用量并通知模型。领取报告时，父状态还会核验子任务 ID、委派 ID、结果 ID 和结果摘要。
+
+恢复时，恢复模块检查已提交的后台启动记录。它读取父会话中的结构化任务记录，不读取子对话，也不尝试恢复 Python 工作线程。
 
 ## 本版特性、下一课与代码索引
 
-本版新增四个后台工具，保留同步 `delegate_task`；父 Agent 能跨模型轮次继续工作，子结果通过显式状态查询和领取进入 history。整轮持久化、父侧用量结算、safe point 与崩溃恢复继续由现有父 Runtime 和 schema 3 控制。
+本版保留同步 `delegate_task`，同时提供四个后台工具。父 Agent 可以在子代理调查期间继续工作，但必须显式查询并领取结果；启动确认要在整轮安全提交后才会真正启动子任务。
 
-下一课规划让父 Agent 继续追问一个已经收束并安全保存的子会话。v0.48 不保存运行线程或跨进程子 Context。
+下一课会让已完成、已领取的调查在保存后继续追问。v0.48 仍不会把工作线程或子代理对话保存到磁盘。
 
-核心实现索引：[后台任务管理](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/delegation.py)、[工具回合启动闸门](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/runtime.py)、[父侧阶段策略](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/agent.py)、[生命周期状态](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/state.py)、[schema 3 边界](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/session.py)、[崩溃恢复](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/resume.py)。
+固定在 v0.48 的代码索引：[后台任务管理](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/delegation.py)、[启动提交顺序](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/runtime.py)、[父任务阶段策略](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/agent.py)、[生命周期记录](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/state.py)、[会话保存与恢复](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.48/src/mini_agent/session.py)。
