@@ -1994,7 +1994,11 @@ def build_trace(
                 )
                 delegation_recovery_transition = (
                     record_type == "delegation"
-                    and event.get("kind") in {"delegation_result_recovered", "delegation_interrupted"}
+                    and event.get("kind") in {
+                        "delegation_result_recovered", "delegation_interrupted",
+                        "background_subagent_interrupted",
+                        "background_subagent_never_started",
+                    }
                     and isinstance(event_generation, int)
                     and isinstance(target_generation, int)
                     and event_generation >= target_generation
@@ -2425,7 +2429,8 @@ def build_trace(
         parent_attempt_id = record.get("parent_attempt_id")
         if parent_attempt_id is not None:
             attempt = _mapping_get(attempts, parent_attempt_id)
-            linked = isinstance(attempt, Mapping) and attempt.get("tool") == "delegate_task"
+            linked = (isinstance(attempt, Mapping)
+                      and attempt.get("tool") in {"delegate_task", "spawn_subagent"})
             if not linked and record.get("delivery_status") in {"committed", "interrupted"}:
                 _add_issue(issues, f"delegation {delegation_id}.parent_attempt_id 引用不存在或不是委派调用")
             all_edges.append(_edge(
@@ -2444,6 +2449,10 @@ def build_trace(
             and event.get("kind") in {
                 "delegation_created", "delegation_started", "delegation_result_ready",
                 "delegation_committed", "delegation_result_recovered", "delegation_interrupted",
+                "background_subagent_accepted", "background_subagent_started",
+                "background_subagent_result_ready", "background_subagent_cancel_requested",
+                "background_subagent_claimed", "background_subagent_abandoned",
+                "background_subagent_interrupted", "background_subagent_never_started",
             }
         ), key=lambda event: event.get("sequence_id", 0))
         previous = node
@@ -2453,9 +2462,20 @@ def build_trace(
                                    event.get("kind")))
             previous = current
         terminal = record.get("delivery_status")
-        expected_terminal = ({"delegation_committed", "delegation_result_recovered"}
-                             if terminal == "committed" else
-                             {"delegation_interrupted"} if terminal == "interrupted" else set())
+        if terminal == "committed":
+            expected_terminal = {
+                "delegation_committed", "delegation_result_recovered",
+                "background_subagent_claimed",
+            }
+        elif terminal == "interrupted":
+            expected_terminal = {
+                "delegation_interrupted", "background_subagent_interrupted",
+                "background_subagent_never_started",
+            }
+        elif terminal == "abandoned":
+            expected_terminal = {"background_subagent_abandoned"}
+        else:
+            expected_terminal = set()
         if expected_terminal and not any(event.get("kind") in expected_terminal for event in lifecycle):
             _add_issue(issues, f"delegation {delegation_id} 缺少终态 trace event")
             all_edges.append(_edge("delegation_lifecycle", previous,

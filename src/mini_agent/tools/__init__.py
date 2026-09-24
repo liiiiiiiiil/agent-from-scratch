@@ -60,7 +60,9 @@ def create_registry(state: AgentState | None = None,
             runtime_config.AGENT_PROFILES, provider_catalog=provider_catalog,
         )
         from mini_agent.delegation import DelegationManager
-        from mini_agent.tools.delegation import make_delegate_task_tool
+        from mini_agent.tools.delegation import (
+            make_background_subagent_tools, make_delegate_task_tool,
+        )
         manager = DelegationManager(
             workspace_root=workspace_root or os.getcwd(),
             subagent_llm=subagent_llm,
@@ -72,6 +74,8 @@ def create_registry(state: AgentState | None = None,
         )
         result._delegation_manager = manager
         result.register(make_delegate_task_tool(state, manager))
+        for tool in make_background_subagent_tools(state, manager):
+            result.register(tool)
     if state is not None:
         process_manager = process_manager or ProcessManager()
         if hasattr(state, "bind_process_manager"):

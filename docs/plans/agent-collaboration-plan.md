@@ -1,6 +1,6 @@
 # 阶段十三：轻量 Agent Collaboration 实施计划
 
-> 状态：待实施（`v0.47`–`v0.49`）
+> 状态：`v0.47` 与 `v0.48` 已实现；`v0.49` 待实施
 > 建议版本范围：`v0.47` Agent Profiles / Roles、`v0.48` Background Subagent、`v0.49` Resumable Child Session
 > 能力前置：阶段十受控子代理委派（`v0.34`–`v0.39`）、阶段九会话与崩溃恢复（`v0.30`–`v0.33`）、阶段十二本地 Skills（`v0.45`）
 > 关联计划：`subagent-delegation-plan.md`、`session-persistence-resume-plan.md`、`mcp-skills-plan.md`
@@ -11,7 +11,7 @@
 
 本阶段要回答的问题是：**怎样让父 Agent 选择合适的只读角色，边做自己的工作边等待子任务，并在以后继续同一个子会话，同时保持现有工具协议、授权和恢复边界？**
 
-目标流程：
+当前阶段的目标流程：
 
 ```text
 spawn(profile, task) → child_session_id + 已接受的启动结果
@@ -21,14 +21,17 @@ get_result(child_session_id) → 本轮有界结构化结果
 followup(child_session_id, task) → 同一子 Context 的下一轮工作
 ```
 
-`spawn`、`get_result`、`followup` 是交互语义，具体工具名在实现时冻结。保留现有 `delegate_task` 的同步行为作为兼容入口；不把它悄悄改成后台调用。阶段十三只扩展认知协作，父 Agent 仍独占工作区修改、主 Plan、权限交互、权威验证和完成判定。完成 `v0.49` 后，新增能力路线收口，阶段十四专注 Evaluation & Regression。
+`v0.48` 已将交互语义冻结为 `spawn_subagent`、`get_subagent_status`、`get_subagent_result`、
+`cancel_subagent`。保留现有 `delegate_task` 的同步行为作为兼容入口；不把它悄悄改成后台调用。
+阶段十三只扩展认知协作，父 Agent 仍独占工作区修改、主 Plan、权限交互、权威验证和完成判定。
+完成 `v0.49` 后，新增能力路线收口，阶段十四专注 Evaluation & Regression。
 
 ## 2. 范围与非目标
 
 ### 2.1 本阶段范围
 
 - `v0.47` 增加具名子代理 profile：`explorer`、`reviewer`、`tester`、`general`。每个 profile 冻结角色提示、获准的本地模型别名、四工具白名单内的工具子集、权限策略和可用 Skill ID；允许受限的本地自定义 profile。
-- `v0.48` 增加当前 CLI 进程内的后台子任务。父 Agent 在收到启动调用的唯一工具结果且整轮提交后继续工作；子任务在有界并发、预算和取消边界内运行。
+- `v0.48` 增加当前 CLI 进程内的后台子任务。父 Agent 在所有启动调用的唯一工具结果和整轮边界提交后继续工作；子任务在有界并发、预算和取消边界内运行。
 - 后台任务完成时产生可审计的状态事件和 CLI 通知。父 Agent 通过显式工具查询状态并领取有界结果；通知只携带身份和状态，不隐式注入完整子结果。
 - `v0.49` 为已收束的子任务保存有界、可校验的子会话快照；父 Agent 可按 `child_session_id` 在同一父任务中追加后续任务，跨一次安全保存与恢复仍能续接。
 - 同一子会话可有多个顺序执行的回合；每回合独立结果和 usage，累计预算与父任务聚合预算持续生效。
@@ -67,13 +70,15 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 工作线程只运行子 Runtime 并产出通过合同校验的结果，不直接改写父 Context、父 Plan、父 generation 或父 session。父 CLI/Runtime 在明确的安全边界收集完成事件，按固定顺序更新父侧生命周期和预算账本；父模型的工具结果仍按其调用顺序提交。完成顺序可以乱序，通知顺序有确定规则，并可按 ID 查询，不因通知丢失而丢结果。
 
-后台 worker 的数量、正在运行数、等待队列、单回合及累计模型调用/token/墙钟预算均有硬上限。启动前原子预留；失败、取消、超时与模型调用异常都必须结算实际消耗并形成有界结果。父模型结束文本不能绕过“仍有活动或未领取子任务”的完成门槛。
+后台 worker 的数量、正在运行数、等待队列、单回合及累计模型调用/token/墙钟预算均有硬上限。
+`MAX_SUBAGENTS` 与 `MAX_CONCURRENCY` 由 State 账本和同步/后台共用的并发槽位执行；启动前原子预留。
+只有每个启动确认按序提交且整个父工具回合 committed 后，worker 才可开始。失败、取消、超时与模型调用异常都必须结算实际消耗并形成有界结果。父模型结束文本不能绕过“仍有活动或未领取子任务”的完成门槛。
 
 ### D5：`v0.48` 的后台性限定在当前进程
 
 `v0.48` 允许父 Agent 在子任务运行时继续处理其他工作，但运行中的线程和请求不能成为 safe point。此时手动 `/save` 明确拒绝并说明活动 ID；CLI 的自动安全点保存应推迟到任务收束后，不能因暂时无法保存而中断父 Agent 的正常工作，也不能把活动线程伪装成可恢复的持久会话。`/new`、`/reset`、EOF、退出及异常清理沿用有界取消与等待：未收束时保留旧任务并报告 ID/原因。异常进程退出后的恢复记录为 interrupted，不自动重放，也不宣称已收到未持久化结果。
 
-若已开启 `/save`，启动 ack 的提交仍遵守 schema 3 的 handler 前 `handler_admitted`、逐 call 原子提交和整轮 committed 规则；需要先定义“已接受启动但 worker 尚未开始”的 durable 事实。启动结果提交完成前不得启动 worker；提交失败不得启动 worker，启动后结果尚未保存而崩溃不得伪造完成。该过渡语义应在 `v0.48` 实现前通过故障注入测试冻结。
+若已开启 `/save`，启动确认的提交仍遵守 schema 3 的 handler 前 `handler_admitted`、逐 call 原子提交和整轮 committed 规则。State 与 boundary 会保存接受的合同身份和预留预算，不保存线程句柄；worker 必须等完整回合提交后才启动。若启动结果或整轮提交失败，不启动 worker；若完整启动回合已保存而结果未安全领取便崩溃，恢复标记 `interrupted`、按预留上限结算且不恢复 worker。未完整提交的回合中已确认但未启动的请求释放预留，不伪造已执行结果。
 
 ### D6：`v0.49` 保存的是子会话，不只是一个 ID
 
@@ -106,14 +111,14 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 验收：相同任务选不同角色会得到可观察且受限的提示/工具/模型配置；`tester` 不能执行测试，Skill 不会授予工具权限；旧同步委派结果与预算合同保持兼容。
 
-### 4.2 `v0.48`：Background Subagent
+### 4.2 `v0.48`：Background Subagent（已实现）
 
-1. 增加后台启动、状态/结果查询和取消的父侧工具合同；启动返回 ID 与唯一工具结果，完成通知仅给 ID/状态，领取结果有独立工具调用与按 ID 幂等语义。
-2. 将现有有界 Scheduler 扩为跨父轮次的任务管理器；工作线程只写线程安全完成队列，父侧安全边界负责状态、预算、通知和结果交付。保留同步 `delegate_task` 路径。
-3. 明确 Plan/PermissionGate 准入、同轮调用顺序、活跃任务完成门槛、`/save` 拒绝、有界取消、退出与崩溃语义；为启动 ack 和完成事件设计必要的持久元数据，不扩大 schema 3 的旧调用承诺。
-4. 测试父 Agent 在子任务运行时继续模型轮次、乱序完成、通知丢失后的查询、重复领取、预算竞争、超时、取消、保存拒绝、提交失败与退出清理。
+1. 已增加 `spawn_subagent`、`get_subagent_status`、`get_subagent_result`、`cancel_subagent` 四个父侧工具；启动返回唯一确认，完成通知只给 ID/状态，结果按 ID 幂等领取。
+2. 已将 Manager 扩为跨父轮次任务管理器；worker 只写线程安全完成队列，父侧安全边界收集并结算。同步 `delegate_task` 路径保持原样，两种模式共享并发槽位和父聚合预算。
+3. 已冻结阶段准入、纯 spawn 回合闸门、整轮 durable commit 后启动、完成门槛、safe point 拒绝、有界取消、退出和崩溃语义；schema 3 只保存身份、预留预算和生命周期，不保存线程句柄。
+4. 已覆盖父 Agent 在子任务运行时继续模型轮次、乱序完成、状态查询、重复领取、预算竞争、取消、超时、异常、结果收集故障、safe point 拒绝、回合提交失败、崩溃不重放和同步委派兼容。
 
-验收：父 Agent 能在后台子任务未完成时继续独立工作；原启动 call 恰有一个结果，后续结果可查询且只交付一次事实；活动任务不能被保存为 clean 或让父任务进入 `done`。
+验收：已通过。父 Agent 能在后台子任务未完成时继续独立工作；原启动 call 恰有一个结果，后续结果可重复领取但只结算一次；活动任务不能被保存为 clean 或让父任务进入 `done`。
 
 ### 4.3 `v0.49`：Resumable Child Session
 
@@ -128,14 +133,14 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 | 位置 | 预计变化 | 责任 |
 |---|---|---|
-| `src/mini_agent/delegation.py` | 主要增量 | Profile 应用、后台生命周期、子会话恢复与累计预算；不复制 agent loop |
-| `src/mini_agent/tools/delegation.py`、`tools/__init__.py` | 增量 | 后台启动、查询/领取、取消、followup 的工具合同与注册 |
-| `src/mini_agent/runtime.py`、`tools/base.py` | 定点修改 | 启动 ack 顺序、工具准入与父安全边界收口 |
-| `src/mini_agent/state.py`、`session.py`、`resume.py` | 版本化修改 | 结构化生命周期、预算、子快照、安全保存和旧 schema 兼容 |
+| `src/mini_agent/delegation.py` | 已更新 | Profile 应用、进程内后台生命周期、共用并发槽位与 scope 检查；不复制 agent loop |
+| `src/mini_agent/tools/delegation.py`、`tools/__init__.py` | 已更新 | 后台启动、状态/结果查询、取消与同步工具兼容 |
+| `src/mini_agent/runtime.py`、`tools/base.py` | 已更新 | 纯启动回合、整轮提交后启动、父线程安全边界结算 |
+| `src/mini_agent/state.py`、`session.py`、`resume.py` | 已更新 | 结构化生命周期、预算、结果领取身份校验、崩溃中断与旧 schema 兼容 |
 | `src/mini_agent/permission.py`、`skills.py`、`prompt.py` | 定点修改 | Profile 权限交集、Skill 预授权和子身份提示 |
 | `src/mini_agent/__main__.py`、`config.py` | 增量 | 本地配置、完成通知、`/save`、恢复和任务边界清理 |
 | `tests/`、`docs/tutorials/`、操作手册、`README.md`、`CHANGELOG.md` | 每版同步 | 离线并发/故障测试、一版一个教学主线和导航 |
-| `AGENTS.md` | v0.47 必须审查 | 仅在子 Skill 合同实际实现时修订“子代理不可见 Skills”等运行时硬约束 |
+| `AGENTS.md` | v0.47、v0.48 已更新 | 子 Skill 合同、后台生命周期、safe point、持久化与恢复硬约束 |
 
 ## 6. 横向验收与交付
 
@@ -159,8 +164,8 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 ## 8. 完成定义与后续阶段
 
-- [ ] `v0.47` 四个角色与受限自定义 profile 可复现；模型、提示、工具、权限、Skills 绑定均经运行时校验，旧 `delegate_task` 兼容。
-- [ ] `v0.48` 父 Agent 可跨轮次继续工作，子完成可通知和查询；活动任务有界取消，保存与崩溃语义明确。
+- [x] `v0.47` 四个角色与受限自定义 profile 可复现；模型、提示、工具、权限、Skills 绑定均经运行时校验，旧 `delegate_task` 兼容。
+- [x] `v0.48` 父 Agent 可跨轮次继续工作，子完成可通知和查询；活动任务有界取消，保存与崩溃语义明确。
 - [ ] `v0.49` 同一子会话可安全 followup，空闲快照可跨进程恢复，累计预算与权限不倒退。
 - [ ] 同步委派、工具协议、持久边界、恢复、Plan、verification 和阶段十二外部能力隔离无回归。
 - [ ] 全量测试、教程/README 检查和阶段级故障注入通过，版本文档与操作手册同步。

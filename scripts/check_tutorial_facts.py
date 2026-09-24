@@ -59,6 +59,7 @@ EXPECTED = {
     "45-local-skills.md": ("v0.45", "v0.44..v0.45"),
     "46-mcp-http-resources-prompts.md": ("v0.46", "v0.45..v0.46"),
     "47-agent-profiles.md": ("v0.47", "v0.46..v0.47"),
+    "48-background-subagents.md": ("v0.48", "v0.47..v0.48"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

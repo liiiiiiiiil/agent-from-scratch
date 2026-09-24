@@ -2,6 +2,7 @@
 
 import os
 import sys
+from threading import Event
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -61,6 +62,25 @@ def test_prompt_toolkit_mode_binds_enter_and_shift_enter():
     assert fake_session.kwargs["multiline"] is True
     assert fake_session.buffer.text == "\n"
     assert fake_session.buffer.submitted is True
+
+
+def test_polling_keeps_cli_thread_available_until_input_arrives():
+    with patch("mini_agent.input_session._load_prompt_toolkit", return_value=None):
+        session = InputSession()
+    release_input = Event()
+    polled = Event()
+
+    def delayed_input(_prompt):
+        assert release_input.wait(2)
+        return "continue"
+
+    def poll():
+        polled.set()
+        release_input.set()
+
+    with patch("builtins.input", side_effect=delayed_input):
+        assert session.read_while_polling("you: ", poll, interval=0.001) == "continue"
+    assert polled.is_set()
 
 
 if __name__ == "__main__":

@@ -298,6 +298,12 @@ class TerminalOutput:
             return
         self._notice(message)
 
+    def subagent_notice(self, message: Any) -> None:
+        """Show a short lifecycle notice without accepting child result text."""
+        if not message:
+            return
+        self._notice(_clip(_single_line(message), 300), force=True)
+
     def cli_notice(self, message: Any) -> None:
         """Show an explicit CLI notice in every mode, including quiet."""
         if not message:

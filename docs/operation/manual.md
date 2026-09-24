@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.47**（具名子代理角色；含此前同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.48**（进程内后台子代理；含此前具名角色、同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -283,7 +283,62 @@ State、Trace 摘要或 verification evidence。未传 `agent_profile` 的旧委
 ```
 
 运行后可在结构化委派结果中看到 `agent_profile` 与指纹，同时仍只有原有的同步 JSON 结果。
-本版没有后台子代理或子会话续接能力；它们属于后续版本计划。
+v0.48 增加独立的后台工具组，下面说明它们与 `delegate_task` 的区别。
+
+## v0.48 进程内后台子代理
+
+同步 `delegate_task` 会等子代理完成，再把一个结果交回父模型。后台任务解决的是另一种情况：
+父 Agent 启动只读调查后，可以先处理自己的模型轮次和工具调用，之后再查询并领取结果。
+`child_session_id` 是当前父任务内的 UUID；它只在这个 CLI 进程中代表一个后台任务，不能在新进程
+里续接同一份子 Context。
+
+后台启动要求显式选择一个具名 `agent_profile`，并把 `purpose` 固定为 `investigation`。
+只有父任务在 `direct`、`exploring` 或 `executing` 阶段时才可启动；等待计划批准、诊断、崩溃调查、
+独立 verification、terminal 状态和未结算 crash recovery 都不能启动后台调查。诊断与崩溃调查仍使用
+同步 `delegate_task`，并继续引用当前失败或恢复 issue。
+
+四个父侧工具及其职责如下。它们仍经过 Registry、ToolExecutor、PermissionGate、任务阶段门和 schema 3
+工具边界；工具的调查正文不会自动插入父 history。
+
+| 工具 | 作用 |
+|---|---|
+| `spawn_subagent` | 按 `delegate_task` 的合同启动具名只读调查，返回唯一启动确认：child ID、delegation ID、角色、接受状态和预算摘要 |
+| `get_subagent_status` | 查询 `queued`、`running`、`result_ready`、`claimed`、`cancelled`、`interrupted` 等有界状态与 `result_id`，不返回调查正文 |
+| `get_subagent_result` | 子任务收束后返回 `SubagentResult`；未收束时只返回状态，重复领取仍返回同一结果 ID 和正文 |
+| `cancel_subagent` | 发出协作式取消请求并返回当前状态；收束结果仍通过 `get_subagent_result` 领取 |
+
+一轮父模型回复若包含启动调用，只能包含一个或多个 `spawn_subagent`，不能混入其他工具。父 Runtime
+按模型调用顺序准入、记录并回灌每个启动确认；开启 `/save` 时先提交 handler admission 和逐 call 结果。
+整轮 tool boundary 成功提交后才启动该轮 worker。这样，即使整轮提交失败，任何子代理也不会提前运行。
+父 Agent 随后可以请求下一轮模型，不必等待正在运行的只读调查。
+
+worker 只执行子 Runtime 并向线程安全队列交出有界结果。父线程在 Runtime 安全边界收集完成项、更新
+State、结算实际用量并显示只包含 ID 和状态的通知；完整结果只在显式领取时进入对应的普通
+`role=tool` 结果。通知不构成 verification evidence，子代理 findings 和 evidence 也不进入父侧
+`verification_evidence`。CLI 等待用户输入时，输入由独立线程读取，CLI 主线程继续收集完成事件、
+显示通知并启动已排队的下一个子任务。
+
+同步与后台子代理共用同一个聚合预算和并发限制：默认最多 3 个子代理、同时运行 2 个，且父任务可将
+并发上限设得更小。排队任务会预留总子代理数和请求额度；只有运行 worker 占用并发槽位。完成、失败、
+超时、取消都以同一个子结果身份结算一次；不能通过反复领取、恢复或改用新 ID 清零用量。
+
+活动后台任务和未领取结果都会阻止父任务进入 `done` 或保存普通 safe point。手动 `/save` 会列出
+活动 ID 并拒绝；自动安全点保存会顺延，不打断父 Agent。`/new`、`/reset`、EOF、`exit` 和异常退出
+先请求取消并有界等待；如果线程仍未收束，CLI 保留旧任务并报告未收束 ID。若任务已完成但结果未领取，
+在安全提交 `clean` 前会暂记 `abandoned` 事实；保存失败时撤销该事实并保留内存结果，提交成功后才释放正文。
+
+崩溃恢复不启动旧 worker。完整启动回合在 schema 3 中留下 active、committed 的 tool boundary；若进程
+退出时结果还未安全领取，恢复会派生新 session，把后台任务标成 `interrupted`，清除未知结果身份，按
+保留的预算上限保守结算用量，并增加待用户逐项 `/resolve` 的恢复 issue。若启动结果已提交、但包含
+它的整轮尚未 committed，则 worker 从未启动，恢复会关闭该未启动预留，不伪造已执行结果。结果领取
+按普通父工具调用保存，并检查 `child_session_id`、合同身份、结果 ID 和 hash 与 State 一致。
+
+ScopeGate 从工作区根目录逐段使用不跟随符号链接的目录 fd 打开文件；读取、列表和搜索都基于实际打开的
+fd，而不在路径检查后重新按路径打开。除常见 session 敏感目录外，还会排除当前真实
+`SessionStore.root`；根目录身份变化、符号链接或越界路径会拒绝读取。
+
+本版只支持当前 CLI 进程内运行和查询。父 Agent 不能把子结果当成权威验证；子 Context、线程和结果
+不会变成可恢复子会话。已收束子会话的 followup 与跨进程续接留给 v0.49。
 
 ## v0.42 具名本地 References
 
@@ -859,13 +914,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.47，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.48，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，v0.47 增加具名同步子代理角色，详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)、[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)和[第 47 课](../tutorials/47-agent-profiles.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，v0.47 增加具名同步子代理角色，v0.48 增加进程内后台子代理。详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)、[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)、[第 47 课](../tutorials/47-agent-profiles.md)和[第 48 课](../tutorials/48-background-subagents.md)。
 
 ### 3.1 上下文架构
 

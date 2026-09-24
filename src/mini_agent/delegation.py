@@ -18,9 +18,10 @@ import ntpath
 import os
 import re
 import socket
+import stat
 from collections import deque
-from queue import Queue
-from threading import Event, Lock, Thread
+from queue import Empty, Queue
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -33,7 +34,7 @@ from mini_agent.prompt import build_subagent_prompt
 from mini_agent.providers.base import ProviderResponse
 from mini_agent.providers.catalog import ModelBinding, ModelBindingRef, ProviderCatalog
 from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
-from mini_agent.state import AgentState
+from mini_agent.state import AgentState, MAX_CONCURRENCY
 from mini_agent.tools.base import (
     ExecutionResult,
     ToolExecutor,
@@ -151,6 +152,8 @@ class ScopeGate:
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root)))
         if not os.path.isdir(self.workspace_root):
             raise DelegationError("workspace_root 必须是目录")
+        root_info = os.stat(self.workspace_root, follow_symlinks=False)
+        self._root_identity = (root_info.st_dev, root_info.st_ino)
         home_sessions = os.path.realpath(os.path.expanduser("~/.mini_agent/sessions"))
         workspace_sensitive = (
             os.path.join(self.workspace_root, ".mini_agent", "sessions"),
@@ -234,6 +237,20 @@ class ScopeGate:
             raise DelegationError("path 不在委派 scope 内")
         return resolved
 
+    def validate_resolved_path(self, path: Any) -> str:
+        """Recheck a canonical path handed from registry admission to a reader."""
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise DelegationError("内部读取路径必须是绝对 canonical path")
+        absolute = os.path.abspath(path)
+        resolved = os.path.realpath(absolute)
+        if absolute != resolved:
+            raise DelegationError("读取期间路径解析发生变化")
+        self._require_inside_workspace(resolved)
+        self._reject_sensitive(resolved, "path")
+        if not self._inside_scope(resolved):
+            raise DelegationError("path 不在委派 scope 内")
+        return resolved
+
     def validate_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
         # The filtered registry admits ``skill`` only when the role runner has
         # supplied its parent-authorized restricted catalog. It is not a path
@@ -256,72 +273,135 @@ class ScopeGate:
         self.validate_path(path)
         return self._validate_relative(path, "evidence.path")
 
+    def _open_child_path(self, path: str, *, directory: bool) -> int:
+        """Open from the frozen workspace directory without following symlinks."""
+        canonical = self.validate_resolved_path(path)
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise DelegationError("当前平台缺少安全目录 fd 读取能力")
+        relative = os.path.relpath(canonical, self.workspace_root)
+        root_parts = [part for part in self.workspace_root.split(os.sep) if part]
+        parts = [] if relative == "." else relative.split(os.sep)
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        fd = os.open(os.path.sep, flags | os.O_DIRECTORY)
+        try:
+            for part in root_parts:
+                next_fd = os.open(part, flags | os.O_DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            root_info = os.fstat(fd)
+            if (root_info.st_dev, root_info.st_ino) != self._root_identity:
+                raise DelegationError("工作区根目录身份发生变化")
+            for index, part in enumerate(parts):
+                last = index == len(parts) - 1
+                next_fd = os.open(
+                    part, flags | (os.O_DIRECTORY if not last or directory else 0),
+                    dir_fd=fd,
+                )
+                os.close(fd)
+                fd = next_fd
+            mode = os.fstat(fd).st_mode
+            if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+                raise DelegationError("子代理只能读取普通文件或目录")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
     def wrap_handler(self, name: str, handler: Callable) -> Callable:
         """Keep broad directory readers from exposing the local config file."""
         if name == "read_file":
-            def safe_read_file(path, *args, **kwargs):
-                self.validate_path(path)
-                return handler(path, *args, **kwargs)
+            def safe_read_file(path, offset=0, limit=2000):
+                fd = self._open_child_path(path, directory=False)
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    lines = stream.readlines()
+                total = len(lines)
+                start = max(0, offset)
+                end = min(start + limit, total)
+                numbered = [f"{index + 1:05d}|{lines[index]}" for index in range(start, end)]
+                if end < total:
+                    suffix = f"\n(共 {total} 行，已读 {end - start} 行，还有 {total - end} 行未读)"
+                else:
+                    suffix = f"\n(End of file - 共 {total} 行)" if total > 0 else ""
+                return "".join(numbered) + suffix
             return safe_read_file
         if name == "list_dir":
             def safe_list_dir(path="."):
-                self.validate_path(path)
-                rendered = handler(path)
-                if not isinstance(rendered, str):
+                canonical = self.validate_resolved_path(path)
+                fd = self._open_child_path(canonical, directory=True)
+                try:
+                    entries = []
+                    for entry in sorted(os.listdir(fd)):
+                        candidate = os.path.join(canonical, entry)
+                        try:
+                            self._reject_sensitive(candidate, "path")
+                            info = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+                        except (DelegationError, OSError):
+                            continue
+                        if stat.S_ISLNK(info.st_mode):
+                            continue
+                        entries.append(entry + ("/" if stat.S_ISDIR(info.st_mode) else ""))
+                    if not entries:
+                        return f"目录为空: {canonical}"
+                    rendered = "\n".join(entries[:200])
+                    if len(entries) > 200:
+                        rendered += f"\n(共 {len(entries)} 条，仅显示前 200 条)"
                     return rendered
-                safe_lines = []
-                for line in rendered.splitlines():
-                    entry = line.strip().rstrip("/")
-                    if not entry:
-                        safe_lines.append(line)
-                        continue
-                    candidate = os.path.join(os.fspath(path), entry)
-                    try:
-                        self._reject_sensitive(candidate, "path")
-                    except DelegationError:
-                        continue
-                    safe_lines.append(line)
-                return "\n".join(safe_lines)
+                finally:
+                    os.close(fd)
             return safe_list_dir
         if name != "grep":
             return handler
 
         def safe_grep(pattern: str, path=".", include="*"):
+            canonical_root = self.validate_resolved_path(path)
             regex = re.compile(pattern)
             results: list[str] = []
             max_results = 100
-            for root, dirs, files in os.walk(path):
-                kept_dirs = []
-                for directory in dirs:
-                    canonical = os.path.realpath(os.path.join(root, directory))
+            root_fd = self._open_child_path(canonical_root, directory=True)
+
+            def walk(directory_fd: int, directory_path: str) -> None:
+                for entry in sorted(os.listdir(directory_fd)):
+                    if len(results) >= max_results:
+                        return
+                    candidate = os.path.join(directory_path, entry)
                     try:
-                        self._reject_sensitive(canonical, "path")
-                    except DelegationError:
+                        self._reject_sensitive(candidate, "path")
+                        if not self._inside_scope(candidate):
+                            continue
+                        info = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
+                            child_fd = os.open(
+                                entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory_fd,
+                            )
+                            try:
+                                walk(child_fd, candidate)
+                            finally:
+                                os.close(child_fd)
+                        elif stat.S_ISREG(info.st_mode) and fnmatch.fnmatch(entry, include):
+                            file_fd = os.open(
+                                entry, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd,
+                            )
+                            with os.fdopen(file_fd, "r", encoding="utf-8", errors="ignore") as stream:
+                                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                                    continue
+                                display_path = os.path.relpath(candidate, self.workspace_root)
+                                for line_number, line in enumerate(stream, 1):
+                                    if regex.search(line):
+                                        results.append(f"{display_path}:{line_number}: {line.rstrip()}")
+                                        if len(results) >= max_results:
+                                            return
+                    except (DelegationError, PermissionError, OSError):
                         continue
-                    if (self._safe_commonpath(self.workspace_root, canonical)
-                            and self._inside_scope(canonical)):
-                        kept_dirs.append(directory)
-                dirs[:] = kept_dirs
-                for filename in sorted(files):
-                    if not fnmatch.fnmatch(filename, include):
-                        continue
-                    file_path = os.path.realpath(os.path.join(root, filename))
-                    try:
-                        self._reject_sensitive(file_path, "path")
-                    except DelegationError:
-                        continue
-                    if not self._inside_scope(file_path):
-                        continue
-                    try:
-                        with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
-                            for line_number, line in enumerate(stream, 1):
-                                if regex.search(line):
-                                    display_path = os.path.relpath(file_path, self.workspace_root)
-                                    results.append(f"{display_path}:{line_number}: {line.rstrip()}")
-                                    if len(results) >= max_results:
-                                        return "\n".join(results) + f"\n(结果已达 {max_results} 条上限)"
-                    except (PermissionError, OSError):
-                        continue
+
+            try:
+                walk(root_fd, canonical_root)
+            finally:
+                os.close(root_fd)
+            if len(results) >= max_results:
+                return "\n".join(results) + f"\n(结果已达 {max_results} 条上限)"
             return "\n".join(results) if results else "无匹配"
 
         return safe_grep
@@ -1542,6 +1622,19 @@ class _PreparedDelegation:
     cancel_event: Event
 
 
+@dataclass
+class _BackgroundDelegation:
+    task: DelegatedTask
+    state: AgentState | None
+    cancel_event: Event = field(default_factory=Event)
+    status: str = "queued"
+    startup_confirmed: bool = False
+    round_committed: bool = False
+    cancel_requested: bool = False
+    result: SubagentResult | None = None
+    thread: Thread | None = None
+
+
 class DelegationScheduler:
     """Run a reserved delegation batch with bounded, index-addressed workers."""
 
@@ -1582,10 +1675,21 @@ class DelegationScheduler:
         completed: Queue[tuple[int, SubagentResult]] = Queue()
 
         def worker(item: _PreparedDelegation) -> None:
+            acquired = False
             try:
-                result = self.manager._run_child(item.task, item.cancel_event)
+                while not item.cancel_event.is_set():
+                    if self.manager.acquire_concurrency_slot(timeout=0.05):
+                        acquired = True
+                        break
+                if acquired:
+                    result = self.manager._run_child(item.task, item.cancel_event)
+                else:
+                    result = self.manager._cancelled_result(item.task, "cancelled_before_slot")
             except BaseException as error:
                 result = self.manager._runner_error_result(item.task, error)
+            finally:
+                if acquired:
+                    self.manager.release_concurrency_slot()
             self.manager._child_finished(item.task, result)
             completed.put((item.index, result))
 
@@ -1639,7 +1743,7 @@ class DelegationScheduler:
 
 
 class DelegationManager:
-    """Own compatible single-run and v0.38 parallel delegation entry points."""
+    """Own synchronous and process-local background Subagent lifecycles."""
 
     def __init__(self, workspace_root: str | os.PathLike[str] | None = None, *,
                  subagent_llm: Callable | None = None, llm: Callable | None = None,
@@ -1672,10 +1776,16 @@ class DelegationManager:
         self._done_event = Event()
         self._done_event.set()
         self._interrupted = False
+        self._background: dict[str, _BackgroundDelegation] = {}
+        self._background_events: Queue[tuple[str, SubagentResult]] = Queue()
+        self._concurrency_condition = Condition()
+        self._running_workers = 0
         self.last_task: DelegatedTask | None = None
         self.last_result: SubagentResult | None = None
 
     def create_task(self, arguments: dict[str, Any], state: AgentState | None = None) -> DelegatedTask:
+        if self.parent_state is None and state is not None:
+            self.parent_state = state
         return build_delegated_task(
             arguments, state, workspace_root=self.workspace_root,
             provider_catalog=self.provider_catalog,
@@ -1690,6 +1800,349 @@ class DelegationManager:
     def bind_parent_permission_gate(self, gate: PermissionGate) -> None:
         """Bind the current parent executor's permission policy for Skill grants."""
         self.parent_permission_gate = gate
+
+    def _concurrency_limit(self) -> int:
+        configured = getattr(
+            getattr(self.parent_state, "delegation_budget", None),
+            "max_concurrency", MAX_CONCURRENCY,
+        )
+        if isinstance(configured, bool) or not isinstance(configured, int):
+            configured = MAX_CONCURRENCY
+        return max(1, min(MAX_CONCURRENCY, configured))
+
+    def acquire_concurrency_slot(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._concurrency_condition:
+            while self._running_workers >= self._concurrency_limit():
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._concurrency_condition.wait(
+                    0.05 if remaining is None else min(0.05, remaining),
+                )
+            self._running_workers += 1
+            return True
+
+    def release_concurrency_slot(self) -> None:
+        with self._concurrency_condition:
+            if self._running_workers <= 0:
+                raise RuntimeError("子代理并发槽位重复释放")
+            self._running_workers -= 1
+            self._concurrency_condition.notify_all()
+
+    @staticmethod
+    def _background_confirmation(task: DelegatedTask, accepted: bool,
+                                 budget: dict[str, Any], reason: str | None = None) -> str:
+        payload: dict[str, Any] = {
+            "child_session_id": task.subagent_id,
+            "delegation_id": task.delegation_id,
+            "agent_profile": task.agent_profile,
+            "status": "accepted" if accepted else "rejected",
+            "accepted": accepted,
+            "budget": {
+                "max_rounds": task.budget.max_rounds,
+                "max_llm_calls": task.budget.max_llm_calls,
+                "max_tool_calls": task.budget.max_tool_calls,
+                "max_tokens": task.budget.max_tokens,
+                "timeout_seconds": task.budget.timeout_seconds,
+                "parent_remaining": {
+                    key: budget.get(key) for key in (
+                        "remaining_subagents", "remaining_llm_calls",
+                        "remaining_tool_calls", "remaining_tokens",
+                    )
+                },
+            },
+        }
+        if reason:
+            payload["reason"] = _safe_error_detail(reason, 300)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def spawn_background(self, arguments: dict[str, Any],
+                         state: AgentState | None = None) -> str:
+        """Reserve one named investigation and defer its worker until Runtime commit."""
+        state = state or self.parent_state
+        task: DelegatedTask | None = None
+        try:
+            task = self.create_task(arguments, state)
+            if task.purpose != "investigation" or task.agent_profile is None:
+                raise DelegationError("后台子代理必须指定角色且 purpose 固定为 investigation")
+            task = self._authorize_role_skills(task)
+            if state is None:
+                raise DelegationError("后台子代理需要绑定父 State")
+            state.reserve_delegation(task, mode="background")
+            with self._lock:
+                if task.subagent_id in self._background:
+                    raise DelegationError("child_session_id 已存在")
+                self._background[task.subagent_id] = _BackgroundDelegation(task, state)
+                self._done_event.clear()
+            return self._background_confirmation(
+                task, True, state.delegation_budget_snapshot(),
+            )
+        except Exception as error:
+            if task is None:
+                try:
+                    # Keep a unique request identity even for a rejected contract.
+                    task = self.create_task(arguments, state)
+                except Exception:
+                    return json.dumps({
+                        "child_session_id": None, "delegation_id": None,
+                        "agent_profile": arguments.get("agent_profile")
+                        if isinstance(arguments, dict) else None,
+                        "status": "rejected", "accepted": False,
+                        "budget": {}, "reason": _safe_error_detail(error, 300),
+                    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            snapshot = state.delegation_budget_snapshot() if state is not None else {}
+            return self._background_confirmation(task, False, snapshot, str(error))
+
+    def confirm_background_startup(self, child_session_id: str) -> None:
+        with self._lock:
+            item = self._background.get(child_session_id)
+        if item is None:
+            raise DelegationError("未知 child_session_id")
+        if item.state is not None:
+            item.state.confirm_background_startup(item.task.delegation_id)
+        with self._lock:
+            item.startup_confirmed = True
+
+    def commit_background_spawn_round(self) -> None:
+        """Release accepted startup confirmations after the whole round commits."""
+        with self._lock:
+            for item in self._background.values():
+                if item.status == "queued" and item.startup_confirmed:
+                    item.round_committed = True
+
+    def activate_background_tasks(self) -> None:
+        """Start only confirmations whose full parent tool round has committed."""
+        launches: list[tuple[str, _BackgroundDelegation, Thread]] = []
+        with self._lock:
+            waiting = [item for item in self._background.values()
+                       if item.status == "queued" and item.startup_confirmed
+                       and item.round_committed]
+        for item in waiting:
+            if not self.acquire_concurrency_slot(timeout=0):
+                break
+            try:
+                if item.state is not None:
+                    item.state.start_delegation(item.task.delegation_id)
+                with self._lock:
+                    current = self._background.get(item.task.subagent_id)
+                    if current is not item or item.status != "queued" or item.cancel_event.is_set():
+                        self.release_concurrency_slot()
+                        continue
+                    item.status = "running"
+
+                    def worker(selected=item):
+                        try:
+                            result = self._run_child(selected.task, selected.cancel_event)
+                        except BaseException as error:
+                            result = self._runner_error_result(selected.task, error)
+                        finally:
+                            # A worker publishes only the bounded completion value.
+                            pass
+                        self._background_events.put((selected.task.subagent_id, result))
+                        self.release_concurrency_slot()
+
+                    thread = Thread(
+                        target=worker,
+                        name=f"mini-agent-subagent-{item.task.subagent_id[:8]}",
+                        daemon=True,
+                    )
+                    item.thread = thread
+                    launches.append((item.task.subagent_id, item, thread))
+            except Exception as error:
+                self.release_concurrency_slot()
+                result = self._runner_error_result(item.task, error)
+                self._background_events.put((item.task.subagent_id, result))
+        for child_session_id, item, thread in launches:
+            try:
+                thread.start()
+            except BaseException as error:
+                self.release_concurrency_slot()
+                self._background_events.put((child_session_id, self._runner_error_result(item.task, error)))
+
+    def collect_background_events(self, *, dispatch: bool = True) -> list[dict[str, str]]:
+        """Settle completed worker results on the parent Runtime thread."""
+        notices: list[dict[str, str]] = []
+        while True:
+            try:
+                child_session_id, result = self._background_events.get_nowait()
+            except Empty:
+                break
+            with self._lock:
+                item = self._background.get(child_session_id)
+                if item is None or item.result is not None:
+                    continue
+            if item.state is not None:
+                try:
+                    item.state.delegation_result_ready(item.task.delegation_id, result)
+                except BaseException:
+                    self._background_events.put((child_session_id, result))
+                    raise
+            with self._lock:
+                if item.result is not None:
+                    continue
+                item.result = result
+                item.status = "cancelled" if result.outcome == "cancelled" else "result_ready"
+                self.last_task, self.last_result = item.task, result
+            notices.append({
+                "child_session_id": child_session_id,
+                "status": item.status,
+                "result_id": result.result_id,
+            })
+        if dispatch:
+            self.activate_background_tasks()
+        with self._lock:
+            live = bool(self._active) or any(
+                item.status == "running" for item in self._background.values()
+            )
+            if not live:
+                self._done_event.set()
+        return notices
+
+    def background_status(self, child_session_id: str,
+                          state: AgentState | None = None) -> dict[str, Any]:
+        with self._lock:
+            item = self._background.get(child_session_id)
+        if item is not None:
+            return {
+                "child_session_id": child_session_id,
+                "delegation_id": item.task.delegation_id,
+                "agent_profile": item.task.agent_profile,
+                "status": item.status,
+                "cancel_requested": item.cancel_requested,
+                "result_id": item.result.result_id if item.result is not None else None,
+            }
+        state = state or self.parent_state
+        record = next((record for record in getattr(state, "delegation_records", [])
+                       if record.mode == "background" and record.subagent_id == child_session_id), None)
+        if record is None:
+            return {"child_session_id": child_session_id, "status": "not_found", "result_id": None}
+        status = {
+            "created": "queued", "running": "running", "result_ready": "result_ready",
+            "committed": "claimed", "interrupted": "interrupted", "abandoned": "abandoned",
+        }.get(record.delivery_status, "interrupted")
+        if record.outcome == "cancelled" and status == "result_ready":
+            status = "cancelled"
+        return {
+            "child_session_id": child_session_id,
+            "delegation_id": record.delegation_id,
+            "agent_profile": record.agent_profile,
+            "status": status,
+            "cancel_requested": bool(record.cancellation_reason),
+            "result_id": record.result_id,
+        }
+
+    def background_result(self, child_session_id: str,
+                          state: AgentState | None = None) -> str:
+        self.collect_background_events()
+        with self._lock:
+            item = self._background.get(child_session_id)
+            result = item.result if item is not None else None
+        if result is not None:
+            return result.to_json()
+        status = self.background_status(child_session_id, state)
+        return json.dumps(status, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def cancel_background(self, child_session_id: str,
+                          reason: str = "requested") -> dict[str, Any]:
+        safe_reason = _safe_error_detail(reason, 240)
+        with self._lock:
+            item = self._background.get(child_session_id)
+            if item is None:
+                return {"child_session_id": child_session_id, "status": "not_found",
+                        "cancel_requested": False, "result_id": None}
+            status = item.status
+            if status == "queued":
+                item.cancel_requested = True
+                item.cancel_event.set()
+            elif status == "running":
+                item.cancel_requested = True
+                item.cancel_event.set()
+            result = item.result
+        if status in {"queued", "running"} and item.state is not None:
+            item.state.note_delegation_cancellation(item.task.delegation_id, safe_reason)
+        if status == "queued" and result is None:
+            self._finish_queued_cancellation(item, safe_reason)
+        return self.background_status(child_session_id)
+
+    def _finish_queued_cancellation(self, item: _BackgroundDelegation, reason: str) -> None:
+        with self._lock:
+            if item.status != "queued" or item.result is not None:
+                return
+            confirmed = item.startup_confirmed and item.round_committed
+            result = self._cancelled_result(item.task, reason) if confirmed else None
+        if not confirmed:
+            if item.state is not None:
+                item.state.cancel_unstarted_background_delegation(
+                    item.task.delegation_id, reason,
+                )
+            with self._lock:
+                if item.status == "queued":
+                    item.status = "interrupted"
+            return
+        if item.state is not None:
+            item.state.delegation_result_ready(item.task.delegation_id, result)
+        with self._lock:
+            if item.status != "queued" or item.result is not None:
+                return
+            item.result = result
+            item.status = "cancelled"
+            self.last_task, self.last_result = item.task, result
+
+    def mark_background_claimed(self, child_session_id: str, result_id: str) -> None:
+        with self._lock:
+            item = self._background.get(child_session_id)
+            if item is None:
+                return
+            if item.result is None or item.result.result_id != result_id:
+                raise DelegationError("领取结果与内存结果 ID 不一致")
+            if item.status == "claimed":
+                return
+            item.status = "claimed"
+            self._done_event.set()
+
+    def cleanup_background(self, task_id: str | None, timeout: float = 2.0,
+                           *, abandon: bool = True) -> dict[str, Any]:
+        """Cancel, collect and mark unclaimed background results as abandoned."""
+        self.cancel(task_id, "task_boundary", interrupt=False)
+        if not self.wait(timeout):
+            return {"complete": False, **self.active_info()}
+        self.collect_background_events(dispatch=False)
+        with self._lock:
+            entries = [item for item in self._background.values()
+                       if item.task.parent_task_id == task_id
+                       and item.status in {"result_ready", "cancelled"}]
+        if abandon:
+            for item in entries:
+                if item.state is not None:
+                    item.state.abandon_background_delegation(
+                        item.task.delegation_id, "父任务边界关闭时结果未领取",
+                    )
+                with self._lock:
+                    item.status = "abandoned"
+                    item.result = None
+        with self._lock:
+            complete = not any(item.task.parent_task_id == task_id
+                               and item.status in ({"queued", "running"} if not abandon else
+                                                   {"queued", "running", "result_ready", "cancelled"})
+                               for item in self._background.values())
+            if complete and not self._active:
+                self._done_event.set()
+        return {"complete": complete, **self.active_info()}
+
+    def discard_background_results(self, delegation_ids: list[str]) -> None:
+        """Drop result bodies only after the clean handoff has committed."""
+        selected = set(delegation_ids)
+        with self._lock:
+            for item in self._background.values():
+                if item.task.delegation_id in selected:
+                    if item.state is None or next(
+                        (record.delivery_status for record in item.state.delegation_records
+                         if record.delegation_id == item.task.delegation_id), None
+                    ) != "abandoned":
+                        raise DelegationError("后台结果尚未提交放弃事实")
+                    item.status = "abandoned"
+                    item.result = None
 
     def _authorize_role_skills(self, task: DelegatedTask) -> DelegatedTask:
         if task.agent_profile is None:
@@ -1753,12 +2206,23 @@ class DelegationManager:
         with self._lock:
             entries = list(self._active.items())
             first = entries[0][1][0] if entries else None
+            backgrounds = [item for item in self._background.values()
+                           if item.status not in {"claimed", "abandoned", "interrupted"}]
             return {
-                "active": bool(entries),
-                "active_count": len(entries),
-                "task_ids": [item[1][0].parent_task_id for item in entries],
-                "delegation_ids": [item[0] for item in entries],
-                "subagent_ids": [item[1][0].subagent_id for item in entries],
+                "active": bool(entries or backgrounds),
+                "active_count": len(entries) + len(backgrounds),
+                "task_ids": ([item[1][0].parent_task_id for item in entries]
+                              + [item.task.parent_task_id for item in backgrounds]),
+                "delegation_ids": ([item[0] for item in entries]
+                                    + [item.task.delegation_id for item in backgrounds]),
+                "subagent_ids": ([item[1][0].subagent_id for item in entries]
+                                 + [item.task.subagent_id for item in backgrounds]),
+                "child_session_ids": [item.task.subagent_id for item in backgrounds],
+                "background_statuses": [
+                    {"child_session_id": item.task.subagent_id, "status": item.status,
+                     "result_id": item.result.result_id if item.result else None}
+                    for item in backgrounds[:8]
+                ],
                 "task_id": first.parent_task_id if first else None,
                 "delegation_id": entries[0][0] if entries else None,
                 "cancel_requested": bool(self._cancel_reason),
@@ -1780,16 +2244,20 @@ class DelegationManager:
                *, interrupt: bool = True) -> bool:
         """Broadcast cooperative cancellation to all children of a parent task."""
         with self._lock:
-            if not self._active:
+            if not self._active and not any(
+                    item.status in {"queued", "running"} for item in self._background.values()):
                 return False
-            if task_id is not None and task_id not in {
-                    item[0].parent_task_id for item in self._active.values()
-            }:
+            owned = ({item[0].parent_task_id for item in self._active.values()}
+                     | {item.task.parent_task_id for item in self._background.values()
+                        if item.status in {"queued", "running"}})
+            if task_id is not None and task_id not in owned:
                 return False
             self._cancel_reason = _safe_error_detail(reason, 240)
             if interrupt:
                 self._interrupted = True
             entries = list(self._active.values())
+            backgrounds = [item for item in self._background.values()
+                           if item.status in {"queued", "running"}]
         for task, cancel_event, state in entries:
             cancel_event.set()
             if state is not None:
@@ -1797,11 +2265,34 @@ class DelegationManager:
                     state.note_delegation_cancellation(task.delegation_id, self._cancel_reason)
                 except ValueError:
                     pass
+        for item in backgrounds:
+            item.cancel_requested = True
+            item.cancel_event.set()
+            if item.state is not None:
+                try:
+                    item.state.note_delegation_cancellation(
+                        item.task.delegation_id, self._cancel_reason,
+                    )
+                except ValueError:
+                    pass
+            if item.status == "queued":
+                self._finish_queued_cancellation(item, self._cancel_reason)
         return True
 
     def wait(self, timeout: float | None = None) -> bool:
         """Wait for all children of the current parent task to settle."""
-        return self._done_event.wait(timeout)
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                sync_active = bool(self._active)
+                threads = [item.thread for item in self._background.values()
+                           if item.status == "running" and item.thread is not None]
+            if not sync_active and not any(thread.is_alive() for thread in threads):
+                return True
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return False
+            self._done_event.wait(min(0.02, remaining) if remaining is not None else 0.02)
 
     @staticmethod
     def _rejected_result(task: DelegatedTask, outcome: str, detail: str) -> SubagentResult:
@@ -2039,7 +2530,17 @@ class DelegationManager:
                 return result
         event = Event()
         self._register([(task, event, state)])
-        result = self._run_child(task, event)
+        acquired = False
+        try:
+            while not event.is_set():
+                if self.acquire_concurrency_slot(timeout=0.05):
+                    acquired = True
+                    break
+            result = (self._run_child(task, event) if acquired else
+                      self._cancelled_result(task, "cancelled_before_slot"))
+        finally:
+            if acquired:
+                self.release_concurrency_slot()
         self._child_finished(task, result)
         if state is not None:
             state.delegation_result_ready(task.delegation_id, result)

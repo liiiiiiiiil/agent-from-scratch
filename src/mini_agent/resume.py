@@ -464,12 +464,24 @@ def prepare_resume(store: SessionStore, session_id: str,
         raise ResumeError("schema 1 会话只供诊断，不能续跑")
     if envelope.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
         raise ResumeError("不支持的 session schema，不能续跑")
+    active_background_records = [
+        item for item in envelope.get("state", {}).get("delegation_records", [])
+        if isinstance(item, dict) and item.get("mode") == "background"
+        and item.get("delivery_status") not in {"committed", "interrupted", "abandoned"}
+    ]
+    committed_background_handoff = (
+        envelope.get("schema_version") == SCHEMA_VERSION
+        and envelope.get("handoff_status") == "active"
+        and envelope.get("save_kind") == "tool_boundary"
+        and envelope.get("tool_boundary", {}).get("status") == "committed"
+        and bool(active_background_records)
+    )
     crash_mode = (
         envelope.get("schema_version") == SCHEMA_VERSION
         and envelope.get("handoff_status") == "active"
         and envelope.get("save_kind") == "tool_boundary"
         and envelope.get("tool_boundary", {}).get("status") == "pending"
-    )
+    ) or committed_background_handoff
     workspace_observation: dict[str, Any] | None = None
     if crash_mode:
         workspace_observation = observe_workspace_manifest(envelope, workspace_root)
@@ -512,6 +524,25 @@ def prepare_resume(store: SessionStore, session_id: str,
         state.reconcile_pending_delegation_boundary(
             raw_boundary["calls"], pending_results,
         )
+        if raw_boundary.get("status") == "pending":
+            # A spawn from this incomplete round cannot have launched: workers
+            # start only after the full round commit. Release its reservation
+            # without inventing a child execution fact.
+            for call in raw_boundary.get("calls", []):
+                if (isinstance(call, dict) and call.get("tool") == "spawn_subagent"
+                        and call.get("status") == "committed"
+                        and isinstance(call.get("delegation_id"), str)):
+                    record = next((item for item in state.delegation_records
+                                   if item.delegation_id == call["delegation_id"]), None)
+                    if (record is not None and record.mode == "background"
+                            and record.delivery_status == "created"):
+                        state.cancel_unstarted_background_delegation(
+                            record.delegation_id,
+                            "启动确认工具结果属于未 complete 的父工具回合；worker 未启动。",
+                        )
+        interrupted_background = state.interrupt_unclaimed_background_subagents(
+            "父进程退出时后台结果未安全保存；不恢复旧 worker。",
+        )
         # A durable child result is a complete fact.  Settle the parent
         # attempt before opening the fresh crash generation; no child worker or
         # child LLM is started during this path.
@@ -537,6 +568,7 @@ def prepare_resume(store: SessionStore, session_id: str,
             envelope["session_generation"], envelope["integrity"]["sha256"],
             envelope["tool_boundary"].get("round_id", 0), pending_calls, issues,
             workspace_observation.get("observed_digest") if workspace_observation else None,
+            interrupted_background=interrupted_background,
         )
     else:
         # A clean derived branch may be reopened while its crash issues are
@@ -604,6 +636,9 @@ def prepare_resume(store: SessionStore, session_id: str,
         state, workspace_root=root, process_manager=process_manager,
         provider_catalog=provider_catalog,
     )
+    delegation_manager = getattr(registry, "_delegation_manager", None)
+    if delegation_manager is not None and hasattr(delegation_manager, "bind_session_root"):
+        delegation_manager.bind_session_root(store.root)
     # Do not restore candidates from the session.  Bind a fresh parent-side
     # retriever to the current workspace store for the next LLM request.
     try:

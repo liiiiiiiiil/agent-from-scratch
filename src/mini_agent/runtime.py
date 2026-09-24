@@ -55,6 +55,7 @@ class ToolRoundPlan:
     serial: bool
     rejection_by_index: Mapping[int, ExecutionResult] = field(default_factory=dict)
     parallel_delegation: bool = False
+    background_spawn: bool = False
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,28 @@ class AgentRuntime:
             model_binding_ref=getattr(self.model_binding, "reference", None),
         )
 
+    def collect_background_events(self) -> list[dict[str, str]]:
+        """Collect child completions and render ID-only notices at a safe boundary."""
+        manager = getattr(getattr(self.executor, "registry", None), "_delegation_manager", None)
+        if manager is None or not hasattr(manager, "collect_background_events"):
+            return []
+        notices = manager.collect_background_events()
+        if self.output is not None:
+            for item in notices:
+                message = (
+                    "后台子代理已收束："
+                    f"child_session_id={item['child_session_id']} "
+                    f"status={item['status']} result_id={item['result_id']}；"
+                    "请通过 get_subagent_result 领取正文。"
+                )
+                if hasattr(self.output, "subagent_notice"):
+                    self.output.subagent_notice(message)
+                elif hasattr(self.output, "status_notice"):
+                    self.output.status_notice(message)
+                if hasattr(self.output, "close"):
+                    self.output.close()
+        return notices
+
     def _refresh_usage(self) -> None:
         if self.usage_meter is None or self._usage_start is None:
             self.estimated_tokens = self.input_tokens + self.output_tokens
@@ -464,6 +487,17 @@ class AgentRuntime:
             if state is not None and hasattr(state, "record_execution_result"):
                 attempt = state.record_execution_result(actual)
         state = getattr(self.context, "state", None)
+        background_claim = None
+        if name == "get_subagent_result" and state is not None:
+            try:
+                parsed = json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("result_id") and parsed.get("delegation_id"):
+                state.commit_delegation_tool_result(content)
+                background_claim = (
+                    parsed.get("subagent_id"), parsed.get("result_id"),
+                )
         durable_delegation = (
             name == "delegate_task"
             and self.session_boundary is not None
@@ -499,6 +533,10 @@ class AgentRuntime:
             )
         if name == "delegate_task" and state is not None and hasattr(state, "commit_delegation_tool_result"):
             state.commit_delegation_tool_result(content)
+        if background_claim is not None:
+            manager = getattr(getattr(self.executor, "registry", None), "_delegation_manager", None)
+            if manager is not None:
+                manager.mark_background_claimed(*background_claim)
 
     def _start_durable_round(self, calls: tuple[dict[str, Any], ...]) -> None:
         if self.session_boundary is None:
@@ -563,6 +601,8 @@ class AgentRuntime:
         self._start_durable_round(calls)
         if self.output is not None and hasattr(self.output, "tools_start"):
             self.output.tools_start(calls)
+        if plan.background_spawn:
+            return self._run_background_spawn_round(calls, plan)
         if plan.parallel_delegation:
             return self._run_parallel_delegation_round(calls, plan)
         records: list[tuple[ExecutionResult | None, ExecutionResult, str] | None] = [None] * len(calls)
@@ -646,6 +686,68 @@ class AgentRuntime:
             self.session_boundary.complete_round(
                 getattr(self.context, "state", None), self.context,
             )
+        self.executions = [record[1] for record in records]
+        self.tool_calls += len(calls)
+        return tuple(self.executions)
+
+    def _run_background_spawn_round(
+        self, calls: tuple[dict[str, Any], ...], plan: ToolRoundPlan,
+    ) -> tuple[ExecutionResult, ...]:
+        """Commit pure spawn confirmations in model order before starting workers."""
+        records: list[tuple[ExecutionResult | None, ExecutionResult, str] | None] = [None] * len(calls)
+        manager = getattr(getattr(self.executor, "registry", None), "_delegation_manager", None)
+        for index, call in enumerate(calls):
+            if self.normalized and call["id"] in self.normalized.errors_by_call_id:
+                record = self._run_tool_call(index, call, plan)
+            elif index in plan.rejection_by_index:
+                record = self._run_tool_call(index, call, plan)
+            else:
+                name, arguments = self.parsed_calls[index]
+                admission = self.executor.admit(name, arguments, self.context.state)
+                if isinstance(admission, ToolAdmission):
+                    if self.session_boundary is not None:
+                        self.session_boundary.record_admission(
+                            f"r-{self.rounds}-c-{index}", admission,
+                            self.context.state, self.context,
+                        )
+                    actual, display = self._execute_call(index, admission=admission)
+                else:
+                    actual, display = admission, admission
+                content = self.policy.after_tool_result(self, call, display)
+                if not isinstance(content, str):
+                    content = format_tool_result(content)
+                record = (actual, display, content)
+            records[index] = record
+            self._commit_one(index, call, *record)
+            if (manager is not None and record[1].outcome == "succeeded"
+                    and isinstance(record[1].output, str)):
+                try:
+                    confirmation = json.loads(record[1].output)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    confirmation = None
+                if (isinstance(confirmation, dict) and confirmation.get("accepted") is True
+                        and isinstance(confirmation.get("child_session_id"), str)):
+                    manager.confirm_background_startup(confirmation["child_session_id"])
+
+        if self.output is not None and hasattr(self.output, "tool_result"):
+            for call, record in zip(calls, records):
+                _actual, display, content = record
+                function = call.get("function", {})
+                self.output.tool_result(
+                    function.get("name", "<missing>"),
+                    function.get("arguments", "{}"), content, display,
+                )
+            if hasattr(self.output, "close"):
+                self.output.close()
+        if self.session_boundary is not None:
+            self.session_boundary.complete_round(
+                getattr(self.context, "state", None), self.context,
+            )
+        if manager is not None:
+            # Workers are released only after the entire ordered confirmation
+            # boundary has been committed.
+            manager.commit_background_spawn_round()
+            manager.activate_background_tasks()
         self.executions = [record[1] for record in records]
         self.tool_calls += len(calls)
         return tuple(self.executions)

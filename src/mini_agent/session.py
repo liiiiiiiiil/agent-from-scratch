@@ -559,7 +559,7 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         }
         extended_call_fields = call_fields | {
             "delegation_id", "subagent_id", "delegation_result_hash",
-            "agent_profile", "agent_profile_fingerprint",
+            "agent_profile", "agent_profile_fingerprint", "child_session_id",
         }
         # v0.32 boundaries did not retain the original reservation hash.  They
         # remain readable for clean replay diagnostics, but a pending admitted
@@ -580,11 +580,18 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("tool_boundary 调用身份不匹配")
         delegation_id = call.get("delegation_id")
         if delegation_id is not None and (
-                call.get("tool") != "delegate_task" or not isinstance(delegation_id, str) or not delegation_id
-        ):
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
+                or not isinstance(delegation_id, str) or not delegation_id):
             raise SessionValidationError("tool_boundary delegation_id 引用无效")
+        child_session_id = call.get("child_session_id")
+        if child_session_id is not None and (
+                call.get("tool") not in {"spawn_subagent", "get_subagent_result"}
+                or not isinstance(child_session_id, str)
+                or not re.fullmatch(r"[0-9a-fA-F-]{36}", child_session_id)):
+            raise SessionValidationError("tool_boundary child_session_id 引用无效")
         if call.get("subagent_id") is not None and (
-                call.get("tool") != "delegate_task" or not isinstance(call.get("subagent_id"), str)
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
+                or not isinstance(call.get("subagent_id"), str)
                 or not call.get("subagent_id")
         ):
             raise SessionValidationError("tool_boundary subagent_id 引用无效")
@@ -593,7 +600,7 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         if (role_id is None) != (role_fingerprint is None):
             raise SessionValidationError("tool_boundary agent_profile 身份字段不完整")
         if role_id is not None and (
-                call.get("tool") != "delegate_task"
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
                 or not isinstance(role_id, str)
                 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role_id)
                 or not isinstance(role_fingerprint, str)
@@ -694,6 +701,50 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                             or content_raw.get("agent_profile_fingerprint")
                             != delegation.get("agent_profile_fingerprint")):
                         raise SessionValidationError("committed 委派结果与 State 不一致")
+        elif call.get("tool") == "spawn_subagent" and child_session_id is not None:
+            delegation = state_delegations.get(delegation_id)
+            if (delegation is None or delegation.get("mode") != "background"
+                    or delegation.get("subagent_id") != child_session_id):
+                raise SessionValidationError("spawn_subagent 与 State 后台委派身份不一致")
+            if call.get("subagent_id") != child_session_id:
+                raise SessionValidationError("spawn_subagent subagent_id 与 child_session_id 不一致")
+            if (call.get("agent_profile") != delegation.get("agent_profile")
+                    or call.get("agent_profile_fingerprint")
+                    != delegation.get("agent_profile_fingerprint")):
+                raise SessionValidationError("spawn_subagent 角色与 State 不一致")
+            if call.get("status") == "committed":
+                try:
+                    confirmation = json.loads(call.get("result", {}).get("content", ""))
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise SessionValidationError("spawn_subagent 启动确认无效") from error
+                if (not isinstance(confirmation, dict) or confirmation.get("accepted") is not True
+                        or confirmation.get("child_session_id") != child_session_id
+                        or confirmation.get("delegation_id") != delegation_id
+                        or confirmation.get("agent_profile") != delegation.get("agent_profile")):
+                    raise SessionValidationError("spawn_subagent 启动确认与 State 不一致")
+                if status == "committed" and delegation.get("startup_confirmed") is not True:
+                    raise SessionValidationError("committed spawn_subagent 缺少 State 启动确认事实")
+        elif call.get("tool") == "get_subagent_result" and delegation_id is not None:
+            delegation = state_delegations.get(delegation_id)
+            if (delegation is None or delegation.get("mode") != "background"
+                    or delegation.get("subagent_id") != child_session_id
+                    or call.get("subagent_id") != child_session_id):
+                raise SessionValidationError("后台结果领取与 State 身份不一致")
+            if call.get("status") == "committed" and call.get("delegation_result_hash") is not None:
+                if (delegation.get("delivery_status") != "committed"
+                        or call.get("delegation_result_hash") != delegation.get("result_hash")):
+                    raise SessionValidationError("后台结果领取 hash 与 State 不一致")
+                try:
+                    _, content_hash, raw_result = _canonical_delegation_result(
+                        json.loads(call.get("result", {}).get("content", "")),
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError, SessionError) as error:
+                    raise SessionValidationError("后台结果领取正文无效") from error
+                if (content_hash != delegation.get("result_hash")
+                        or raw_result.get("result_id") != delegation.get("result_id")
+                        or raw_result.get("delegation_id") != delegation_id
+                        or raw_result.get("subagent_id") != child_session_id):
+                    raise SessionValidationError("后台结果领取正文与 State 不一致")
         elif invocation_id in pending_result_by_invocation:
             raise SessionValidationError("待交付结果只能引用 delegate_task")
         if (call.get("status") == "pending" and call.get("handler_admitted")
@@ -876,7 +927,8 @@ class SessionStore:
             active_delegations = [
                 item.get("delegation_id", "?")
                 for item in state.get("delegation_records", [])
-                if isinstance(item, dict) and item.get("delivery_status") not in {"committed", "interrupted"}
+                if isinstance(item, dict)
+                and item.get("delivery_status") not in {"committed", "interrupted", "abandoned"}
             ]
             if active_delegations:
                 raise SessionValidationError(
@@ -1246,16 +1298,35 @@ class SessionStore:
         _validate_context_export(context_export)
         if tool_boundary.get("status") != "committed":
             raise SessionValidationError("崩溃恢复派生 boundary 必须 committed")
+
+        def recovery_source_allowed(envelope: dict[str, Any]) -> bool:
+            if (envelope.get("schema_version") != SCHEMA_VERSION
+                    or envelope.get("handoff_status") != "active"
+                    or envelope.get("save_kind") != "tool_boundary"):
+                return False
+            boundary = envelope.get("tool_boundary", {})
+            if boundary.get("status") == "pending":
+                return True
+            if boundary.get("status") != "committed":
+                return False
+            state = envelope.get("state", {})
+            return any(
+                isinstance(item, dict)
+                and item.get("mode") == "background"
+                and item.get("startup_confirmed") is True
+                and item.get("delivery_status") in {"created", "running", "result_ready"}
+                for item in state.get("delegation_records", [])
+            )
+
+        if not recovery_source_allowed(expected):
+            raise SessionValidationError("源 session 不是可恢复的 active tool_boundary")
         lock_fd = self._acquire_lock(selected_id)
         claim_lock_fd: int | None = None
         try:
             claim_lock_fd = self._acquire_crash_claim_lock()
             current = self.load(selected_id)
-            if (current.get("schema_version") != SCHEMA_VERSION
-                    or current.get("handoff_status") != "active"
-                    or current.get("save_kind") != "tool_boundary"
-                    or current.get("tool_boundary", {}).get("status") != "pending"):
-                raise SessionValidationError("源 session 已不是 active pending tool_boundary")
+            if not recovery_source_allowed(current):
+                raise SessionValidationError("源 session 已不是可恢复的 active tool_boundary")
             expected_digest = expected.get("integrity", {}).get("sha256")
             current_digest = current.get("integrity", {}).get("sha256")
             if current.get("integrity") != expected.get("integrity"):
@@ -1748,6 +1819,53 @@ class DurableToolBoundary:
                 "exit_code": getattr(execution, "exit_code", None),
             },
         })
+        if call.get("tool") == "spawn_subagent" and getattr(execution, "outcome", None) == "succeeded":
+            try:
+                confirmation = json.loads(str(content))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                confirmation = None
+            if isinstance(confirmation, dict) and confirmation.get("accepted") is True:
+                child_session_id = confirmation.get("child_session_id")
+                delegation_id = confirmation.get("delegation_id")
+                record = next((item for item in getattr(state, "delegation_records", [])
+                               if item.delegation_id == delegation_id), None)
+                if (not isinstance(child_session_id, str) or record is None
+                        or record.mode != "background"
+                        or record.subagent_id != child_session_id):
+                    raise SessionValidationError("后台启动确认缺少匹配的 State 委派合同")
+                call.update({
+                    "child_session_id": child_session_id,
+                    "delegation_id": delegation_id,
+                    "subagent_id": child_session_id,
+                    "agent_profile": record.agent_profile,
+                    "agent_profile_fingerprint": record.agent_profile_fingerprint,
+                })
+                if hasattr(state, "bind_delegation_parent_attempt") and call.get("attempt_id"):
+                    state.bind_delegation_parent_attempt(delegation_id, call["attempt_id"])
+        elif call.get("tool") == "get_subagent_result" and getattr(execution, "outcome", None) == "succeeded":
+            try:
+                raw_result = json.loads(str(content))
+                result_json, result_hash, parsed_result = _canonical_delegation_result(raw_result)
+            except (TypeError, ValueError, json.JSONDecodeError, SessionError):
+                raw_result = None
+            if isinstance(raw_result, dict) and isinstance(parsed_result, dict):
+                delegation_id = parsed_result.get("delegation_id")
+                record = next((item for item in getattr(state, "delegation_records", [])
+                               if item.delegation_id == delegation_id), None)
+                if (record is None or record.mode != "background"
+                        or record.delivery_status != "committed"
+                        or record.result_id != parsed_result.get("result_id")
+                        or record.result_hash != result_hash
+                        or result_json != str(content)):
+                    raise SessionValidationError("领取的后台结果与 State ID/hash 不一致")
+                call.update({
+                    "child_session_id": record.subagent_id,
+                    "delegation_id": record.delegation_id,
+                    "subagent_id": record.subagent_id,
+                    "delegation_result_hash": result_hash,
+                    "agent_profile": record.agent_profile,
+                    "agent_profile_fingerprint": record.agent_profile_fingerprint,
+                })
         return self._save(state, context)
 
     def record_delegation_result_ready(

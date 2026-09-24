@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from queue import Empty, Queue
+from threading import Thread
 from typing import Any
 
 
@@ -58,3 +60,25 @@ class InputSession:
             multiline=True,
             key_bindings=bindings,
         )
+
+    def read_while_polling(self, prompt: str, poll: Any, *, interval: float = 0.05) -> str:
+        """Keep CLI lifecycle collection on the caller thread while input waits."""
+        completed: Queue[tuple[bool, Any]] = Queue(maxsize=1)
+
+        def reader() -> None:
+            try:
+                completed.put((True, self.read(prompt)))
+            except BaseException as error:
+                completed.put((False, error))
+
+        Thread(target=reader, name="mini-agent-cli-input", daemon=True).start()
+        while True:
+            try:
+                success, value = completed.get(timeout=interval)
+            except Empty:
+                poll()
+                continue
+            poll()
+            if success:
+                return value
+            raise value

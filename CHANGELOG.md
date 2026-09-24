@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.48.0] - In-process background Subagents
+
+- Added parent-only `spawn_subagent`, `get_subagent_status`, `get_subagent_result`, and `cancel_subagent` tools while preserving synchronous `delegate_task` behavior. Background investigations require an explicit named role and run only in the current CLI process.
+- Extended `DelegationManager` with queued cross-round workers, shared concurrency and aggregate budgets, cooperative cancellation, bounded completion events, parent-thread settlement, repeatable result claims, and result abandonment at clean task boundaries.
+- Added the pure spawn-round gate: handler admission and startup confirmations commit in model order, and no worker starts until the entire durable schema 3 tool round commits. Mixed spawn/tool rounds are rejected.
+- Extended State, Trace, session validation, and crash recovery for startup identity, result ID/hash claims, interrupted work, reserved-maximum usage settlement, safe-point refusal, and non-replay of process-local workers. Hardened `ScopeGate` against the actual session root, symlink escape, and path or file-identity changes while reading.
+- Added lesson 48 and synchronized `AGENTS.md`, the operation manual, tutorial index, collaboration plan, README files, and package version metadata.
+
 ## [v0.47.0] - Named Subagent roles
 
 - Added the optional `delegate_task.agent_profile` selector with frozen `explorer`, `reviewer`, `tester`, `general`, and validated local custom roles; role prompts, tool subsets, static permissions, child model aliases, and configuration fingerprints are fixed when each Runtime is assembled.

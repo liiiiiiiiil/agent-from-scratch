@@ -188,9 +188,11 @@ class ParentRuntimePolicy:
 
     def before_prepare(self, runtime):
         state = getattr(runtime.context, "state", None)
+        runtime.collect_background_events()
         status_before_sync = getattr(state, "status", None)
         self._sync_processes(runtime)
-        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+        if (state is not None and hasattr(state, "has_active_synchronous_delegations")
+                and state.has_active_synchronous_delegations()):
             return RuntimeDecision(
                 "finish", "委派结果尚未提交，当前任务不能继续请求模型。", "delegation_pending",
             )
@@ -201,6 +203,7 @@ class ParentRuntimePolicy:
         return None
 
     def before_llm(self, runtime):
+        runtime.collect_background_events()
         return None
 
     def llm_options(self, runtime):
@@ -224,6 +227,7 @@ class ParentRuntimePolicy:
 
     def on_text(self, runtime, content):
         state = getattr(runtime.context, "state", None)
+        runtime.collect_background_events()
         self._sync_processes(runtime)
         terminal = self._terminal_state_result(state)
         if terminal is not None:
@@ -232,9 +236,15 @@ class ParentRuntimePolicy:
                 and state.active_process_records()):
             state.enter_awaiting_process("still_running")
             return RuntimeDecision("finish", content, "awaiting_process")
-        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+        if (state is not None and hasattr(state, "has_active_synchronous_delegations")
+                and state.has_active_synchronous_delegations()):
             return RuntimeDecision(
                 "finish", content, "delegation_pending",
+            )
+        if (state is not None and hasattr(state, "has_unclaimed_background_subagents")
+                and state.has_unclaimed_background_subagents()):
+            return RuntimeDecision(
+                "finish", content, "awaiting_subagents",
             )
         if (state is not None
                 and getattr(getattr(state, "planning_state", None), "phase", None) == "exploring"
@@ -271,6 +281,7 @@ class ParentRuntimePolicy:
         return RuntimeDecision("finish", content, "text")
 
     def prepare_tool_round(self, runtime, calls):
+        runtime.collect_background_events()
         parsed_calls = runtime.parsed_calls
         effects = runtime.effects
         state = getattr(runtime.context, "state", None)
@@ -326,6 +337,21 @@ class ParentRuntimePolicy:
                         "delegation_batch_gate",
                     )
 
+        has_background_spawn = any(name == "spawn_subagent" for name, _ in parsed_calls)
+        pure_background_spawn = has_background_spawn and all(
+            name == "spawn_subagent" for name, _ in parsed_calls
+        )
+        if has_background_spawn and not pure_background_spawn:
+            detail = "工具调用拒绝: spawn_subagent 只能与同一回合中的其他 spawn_subagent 一起提交"
+            for index in range(len(parsed_calls)):
+                if index not in rejections:
+                    rejections[index] = self._rejection(
+                        runtime, index,
+                        json.dumps({"status": "error", "error_kind": "background_spawn_batch_gate",
+                                    "message": detail}, ensure_ascii=False),
+                        "background_spawn_batch_gate",
+                    )
+
         has_other_possible = any(
             effect == "possible" and not (
                 name == "run_shell" and args.get("purpose", "execution") == "verification"
@@ -371,6 +397,7 @@ class ParentRuntimePolicy:
             serial=has_possible or has_serial_plan_write or has_serial_process_observation,
             rejection_by_index=rejections,
             parallel_delegation=has_delegation and not mixed_delegation and not rejections,
+            background_spawn=pure_background_spawn and not mixed_delegation,
         )
 
     def after_tool_result(self, runtime, call, execution):
@@ -395,6 +422,7 @@ class ParentRuntimePolicy:
 
     def after_tool_round(self, runtime, calls, results):
         state = getattr(runtime.context, "state", None)
+        runtime.collect_background_events()
         manager = getattr(getattr(runtime.executor, "registry", None), "_delegation_manager", None)
         if manager is not None and manager.consume_interrupt():
             # The cancelled child already has its ordered parent tool result.
@@ -404,7 +432,8 @@ class ParentRuntimePolicy:
         terminal = self._terminal_state_result(state)
         if terminal is not None:
             return RuntimeDecision("finish", terminal, getattr(state, "status", "terminal"))
-        if state is not None and hasattr(state, "has_active_delegations") and state.has_active_delegations():
+        if (state is not None and hasattr(state, "has_active_synchronous_delegations")
+                and state.has_active_synchronous_delegations()):
             return RuntimeDecision(
                 "finish", "委派结果尚未提交，当前任务不能继续请求模型。", "delegation_pending",
             )

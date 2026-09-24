@@ -27,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.47`（具名子代理角色）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.48`（进程内后台子代理）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 v0.46 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的配置项才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP、Resource 和 Prompt 不进入 Subagent。
 配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。父 Runtime 在新任务和恢复任务中从当前配置重新连接与发现目录，退出、`/new`、`/reset` 和恢复失败都必须有界关闭连接。
@@ -84,14 +84,42 @@ State/Trace 摘要或 verification evidence，也不能自动执行正文提到�
 子模型默认选择；显式 `model_profile` 必须与角色解析模型一致，越权或未知模型在请求
 LLM 前拒绝且不回退。`tester` 只能分析并建议测试，不能执行测试或报告测试已通过。显式
 角色的 ID 和无提示正文的配置指纹进入合同、State、schema 3 结果和 Trace；旧的无角色合同
-哈希及结果/session 字段保持原样。角色仍是同步、单层、只读委派，不增加后台或续接能力。
+哈希及结果/session 字段保持原样。`delegate_task` 仍保持同步、单层、只读行为；`spawn_subagent` 是独立的 v0.48 后台入口，不改变同步工具合同。
 恢复和新任务从当前磁盘重新装配 Catalog，不信任 session 中的旧目录快照，也不重新读取历史中
 已经加载的正文；开启 `/save` 后普通工具 history 仍可能保存已加载正文。
+
+进程内后台子代理硬约束：父侧只通过 `spawn_subagent`、`get_subagent_status`、
+`get_subagent_result`、`cancel_subagent` 四个 Tool Registry 工具管理后台只读调查，所有调用仍经过
+ToolExecutor、PermissionGate 和父 Runtime 阶段闸门。启动必须显式指定 `agent_profile`，且
+`purpose="investigation"`；仅 `direct`、`exploring`、`executing` 可启动。`diagnosis` 和
+`crash_investigation` 仍只用同步 `delegate_task`。待审批、独立 verification、terminal 和未结算
+crash recovery 阶段拒绝后台启动。子代理仍是 depth=1；结果只是不可信调查材料，不产生父侧
+verification evidence。
+
+同一模型回合只能包含一个或多个 `spawn_subagent`，不得混入其他工具。父线程逐 call 准入并按模型
+顺序提交唯一启动确认；schema 3 下每个 call 的 `handler_admitted` 和启动结果必须提交成功，整轮
+`tool_boundary` committed 后才能启动 worker。部分提交、提交失败或整轮提交失败都不得启动任何该轮
+worker。子 worker 只运行独立子 Runtime 并向线程安全完成队列写入有界结果；父线程独占完成收集、
+State 更新、用量结算、通知、结果领取和 session 写入。同步与后台调用共享 `MAX_SUBAGENTS=3`、
+`MAX_CONCURRENCY=2`（并受父任务更小的并发配置限制）及聚合 LLM、tool、token 预算。
+
+`child_session_id` 是当前父任务内的 UUID，不是跨进程子会话。状态查询不返回正文；只有
+`get_subagent_result` 返回收束后的 `SubagentResult`。重复领取必须返回相同 `result_id` 和结果，State
+只结算一次；取消是协作式请求，最终结果仍通过结果工具读取。活动任务或未领取结果必须阻止父任务
+进入 `done` 和普通 safe point；手动 `/save` 列出 ID 并拒绝，自动保存顺延。`/new`、`/reset`、EOF、
+退出和异常清理先取消并有界等待；未收束时保留旧任务并报告 ID/原因，已收束但未领取的结果在
+`clean` 前记为 `abandoned`。
+
+`active + schema 3 + committed tool_boundary` 中已持久提交启动确认但没有安全保存的后台结果，恢复时
+派生新 session，把后台记录标为 `interrupted`，不恢复旧 worker、不伪造结果 ID/正文，并按预留上限
+保守结算未知用量；对应恢复 issue 必须由用户逐项 `/resolve`。领取结果属于普通父工具调用，session
+必须校验 `child_session_id`、`delegation_id`、`result_id`、结果 hash 与 State 一致。Trace 只回放
+State 中的父侧 lifecycle 摘要，不观察线程或读取子 history。
 
 ## 架构索引
 
 - `src/mini_agent/agent.py`：HTTP/LLM 传输、兼容入口和父 Runtime policy；`runtime.py`：父子共用的 canonical `AgentRuntime.run()`。
-- `delegation.py`：v0.34 委派合同、scope gate、子 Runtime policy、同步 Subagent Runner 和 Manager。
+- `delegation.py`：v0.34 委派合同、scope gate、子 Runtime policy、同步与进程内后台 Subagent Runner/Manager。
 - `context.py`：每轮上下文视图、预算裁剪、历史压缩和受保护指令注入。
 - `state.py`：独立于消息历史的任务、Plan Contract、工具和验证状态；`current_goal`、`unfinished_todos()` 与 `snapshot()["todos"]` 只是 active plan 的只读投影。
 - `permission.py`：按工具与参数模式匹配的 allow/deny/ask 权限闸门。

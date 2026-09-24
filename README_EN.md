@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.47` are complete (lesson 47: named Subagent roles); Stage 13 begins with synchronous read-only delegation roles: `explorer`, `reviewer`, `tester`, `general`, and local custom roles. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the mainline code has completed `v0.48` (lesson 48: in-process background Subagents). Stage 13 keeps synchronous read-only delegation and lets the parent start a named background investigation, continue its own model rounds, then query and claim the result by ID; child work runs only inside the current CLI process. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -87,6 +87,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.46</strong></td><td><a href="./docs/tutorials/46-mcp-http-resources-prompts.md">Restricted HTTP MCP, text Resources, and Prompts</a></td><td>Connect to JSON-only HTTP MCP, freeze paginated Resource and Prompt directories, and let the parent CLI select untrusted material or reviewed templates within permission and preview boundaries.</td></tr>
     <tr><th colspan="3"><a id="stage-13"></a>Stage 13 · Lightweight Agent collaboration</th></tr>
     <tr><td><strong>v0.47</strong></td><td><a href="./docs/tutorials/47-agent-profiles.md">Named Subagent roles</a></td><td>Select a frozen role prompt, read-only tool subset, model alias, and parent-preauthorized Skills for synchronous delegation; the tester role can analyze and suggest tests only.</td></tr>
+    <tr><td><strong>v0.48</strong></td><td><a href="./docs/tutorials/48-background-subagents.md">In-process background Subagents</a></td><td>Let the parent continue model rounds while named read-only investigations run, then query and explicitly claim results; workers start only after the full durable round commits, and active or unclaimed work blocks safe saves and completion.</td></tr>
   </tbody>
 </table>
 

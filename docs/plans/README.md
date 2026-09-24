@@ -18,7 +18,7 @@
 
 阶段十一已完成 v0.40–v0.42：工作区 Memory 支持显式 CRUD 与相关检索，父 Context 可按预算临时注入不可信候选，父 Agent 可按稳定 alias 查阅受权限保护的本地资料。
 - [`mcp-skills-plan.md`](mcp-skills-plan.md) — 阶段十二 MCP 与 Skills 实施计划；v0.43–v0.46 已实现 stdio/受限 HTTP MCP、父侧 MCP Tool、文本 Resource、文本 Prompt 与本地按需 Skills。
-- [`agent-collaboration-plan.md`](agent-collaboration-plan.md) — 阶段十三轻量 Agent Collaboration 实施计划；规划 v0.47 角色 Profiles、v0.48 后台子代理和 v0.49 可续接子会话，保持单层只读与父 Agent 独占执行权。
+- [`agent-collaboration-plan.md`](agent-collaboration-plan.md) — 阶段十三轻量 Agent Collaboration 实施计划；v0.47 角色 Profiles 与 v0.48 进程内后台子代理已实现，v0.49 可续接子会话待实施，保持单层只读与父 Agent 独占执行权。
 - [`terminal-output-plan.md`](terminal-output-plan.md) — 终端输出、流式观察、CLI 交互和三种输出模式的实施计划（A–D 已完成）。
 
 ## 文档约定

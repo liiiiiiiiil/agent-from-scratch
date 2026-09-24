@@ -342,6 +342,9 @@ def main():
         nonlocal session_store
         if session_store is None:
             session_store = SessionStore()
+            manager = getattr(run_registry, "_delegation_manager", None)
+            if manager is not None and hasattr(manager, "bind_session_root"):
+                manager.bind_session_root(session_store.root)
         return session_store
 
     def sync_processes():
@@ -355,18 +358,23 @@ def main():
     def cleanup_delegation_boundary() -> bool:
         """Cancel every child before a task boundary or clean save."""
         manager = getattr(run_registry, "_delegation_manager", None)
-        if manager is not None and manager.active_info().get("active"):
-            task_id = getattr(state, "task_id", "") or None
-            manager.cancel(task_id, "task_boundary")
-            if not manager.wait(2.0):
-                info = manager.active_info()
+        if manager is not None and hasattr(manager, "cleanup_background"):
+            report = manager.cleanup_background(
+                getattr(state, "task_id", "") or None, timeout=2.0,
+                abandon=False,
+            )
+            if not report.get("complete"):
+                info = report
                 cli_notice(
                     "子代理取消未在限定时间内收束；旧任务已保留，"
-                    f"subagent_id={','.join(info.get('subagent_ids') or ['-'])}；"
+                    f"child_session_id={','.join(info.get('child_session_ids') or ['-'])}；"
                     f"原因={_single_line_notice(info.get('cancel_reason') or 'timeout', 300)}。"
                 )
                 return False
-        pending = getattr(state, "active_delegation_records", [])
+        pending = [
+            item for item in getattr(state, "active_delegation_records", [])
+            if item.mode != "background" or item.delivery_status != "result_ready"
+        ]
         if pending:
             cli_notice(
                 "委派结果尚未提交；旧任务已保留，delegation_id="
@@ -574,7 +582,7 @@ def main():
         context.skill_catalog = getattr(run_registry, "_skill_catalog", None)
         context.skill_permission_policy = tool_executor.gate.policy
 
-    def save_session(handoff_status="active", manual=False):
+    def save_session(handoff_status="active", manual=False, *, sync_before_save=True):
         """Save only a complete safe point; failed saves leave State untouched."""
         nonlocal session_id, persistence_halted
         if persistence_halted:
@@ -585,7 +593,21 @@ def main():
             if manual:
                 cli_notice("用法: /save（当前没有活动任务）")
             return False
-        sync_processes()
+        pending_delegations = getattr(state, "active_delegation_records", [])
+        if pending_delegations:
+            if manual:
+                ids = [
+                    getattr(item, "subagent_id", "-") if getattr(item, "mode", "synchronous") == "background"
+                    else getattr(item, "delegation_id", "-")
+                    for item in pending_delegations
+                ]
+                cli_notice(
+                    "存在活动或未领取的子代理任务，safe point 保存已拒绝；"
+                    "child_session_id/delegation_id=" + ",".join(ids[:16])
+                )
+            return False
+        if sync_before_save:
+            sync_processes()
         try:
             envelope = get_session_store().save(
                 session_id,
@@ -660,8 +682,18 @@ def main():
             return False
         if not cleanup_mcp_boundary():
             return False
-        if session_id is not None and not save_session("clean"):
+        manager = getattr(run_registry, "_delegation_manager", None)
+        pending_background = [
+            item.delegation_id for item in state.background_subagent_records()
+            if item.delivery_status == "result_ready"
+        ] if hasattr(state, "background_subagent_records") else []
+        abandon_token = state.stage_background_abandon(pending_background) if pending_background else None
+        if session_id is not None and not save_session("clean", sync_before_save=False):
+            if abandon_token is not None:
+                state.rollback_background_abandon(abandon_token)
             return False
+        if manager is not None and hasattr(manager, "discard_background_results"):
+            manager.discard_background_results(pending_background)
         return True
 
     def run_task(user_input, mode="auto", *, crash_investigation=False):
@@ -724,6 +756,15 @@ def main():
         except Exception:
             state.status = "failed"
             raise
+        delegation_manager = getattr(run_registry, "_delegation_manager", None)
+        if delegation_manager is not None and hasattr(delegation_manager, "collect_background_events"):
+            for event in delegation_manager.collect_background_events():
+                cli_notice(
+                    "后台子代理已收束："
+                    f"child_session_id={event['child_session_id']} "
+                    f"status={event['status']} result_id={event['result_id']}；"
+                    "请通过 get_subagent_result 领取正文。"
+                )
         if result == "达到最大迭代次数":
             if state.status not in ("blocked", "failed"):
                 state.status = "failed"
@@ -745,6 +786,19 @@ def main():
             else:
                 status_notice("仍在只读调查阶段，请继续调查并提交计划。")
         elif (state.status == "running"
+              and hasattr(state, "has_unclaimed_background_subagents")
+              and state.has_unclaimed_background_subagents()):
+            pending = [item for item in state.background_subagent_records()
+                       if item.delivery_status not in {"committed", "interrupted", "abandoned"}]
+            details = ", ".join(
+                f"{item.subagent_id}:{item.delivery_status}:result_id={item.result_id or '-'}"
+                for item in pending[:8]
+            )
+            cli_notice(
+                "后台子代理仍活动或结果尚未领取；当前任务保持活动状态。"
+                + (" " + details if details else "")
+            )
+        elif (state.status == "running"
               and hasattr(state, "has_active_delegations")
               and state.has_active_delegations()):
             cli_notice("委派结果尚未提交；当前任务保持活动状态。")
@@ -761,10 +815,29 @@ def main():
         if first_task is not None:
             run_task(first_task, mode=first_mode)
 
+        def collect_cli_background() -> None:
+            manager = getattr(run_registry, "_delegation_manager", None)
+            if manager is None or not hasattr(manager, "collect_background_events"):
+                return
+            for event in manager.collect_background_events():
+                cli_notice(
+                    "后台子代理已收束："
+                    f"child_session_id={event['child_session_id']} "
+                    f"status={event['status']} result_id={event['result_id']}；"
+                    "请通过 get_subagent_result 领取正文。"
+                )
+
         while True:
             try:
                 prompt = "你 › "
-                user_input = input_session.read(prompt).strip()
+                manager = getattr(run_registry, "_delegation_manager", None)
+                if (manager is not None and manager.active_info().get("active")
+                        and hasattr(input_session, "read_while_polling")):
+                    user_input = input_session.read_while_polling(
+                        prompt, collect_cli_background,
+                    ).strip()
+                else:
+                    user_input = input_session.read(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 break
             if not user_input or user_input.lower() in ("exit", "quit"):

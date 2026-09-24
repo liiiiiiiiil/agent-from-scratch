@@ -145,7 +145,9 @@ class DelegationBudget:
         return self.max_subagents - self.created_subagents
 
 
-DelegationDeliveryStatus = Literal["created", "running", "result_ready", "committed", "interrupted"]
+DelegationDeliveryStatus = Literal[
+    "created", "running", "result_ready", "committed", "interrupted", "abandoned",
+]
 DelegationOutcome = Literal[
     "pending", "completed", "failed", "timed_out", "cancelled", "budget_exhausted",
 ]
@@ -178,6 +180,13 @@ class DelegationRecord:
     parent_attempt_id: str | None = None
     agent_profile: str | None = None
     agent_profile_fingerprint: str | None = None
+    # New fields are omitted from synchronous legacy records to preserve their
+    # exported shape. Background task records are process-local capabilities;
+    # only their bounded lifecycle and immutable identity are serialized.
+    mode: Literal["synchronous", "background"] = "synchronous"
+    startup_confirmed: bool = False
+    claimed_at: str | None = None
+    abandoned_at: str | None = None
 
 
 def _delegation_record_payload(record: DelegationRecord) -> dict[str, Any]:
@@ -186,6 +195,11 @@ def _delegation_record_payload(record: DelegationRecord) -> dict[str, Any]:
     if payload.get("agent_profile") is None:
         payload.pop("agent_profile", None)
         payload.pop("agent_profile_fingerprint", None)
+    if payload.get("mode") == "synchronous":
+        payload.pop("mode", None)
+        payload.pop("startup_confirmed", None)
+        payload.pop("claimed_at", None)
+        payload.pop("abandoned_at", None)
     return payload
 
 
@@ -1029,6 +1043,7 @@ class AgentState:
                 "get_process", "read_process", "list_processes", "wait_process",
                 "list_memories", "read_memory", "search_memories",
                 "list_references", "search_reference", "read_reference",
+                "get_subagent_status", "get_subagent_result", "cancel_subagent",
             }
             if name == "delegate_task" and isinstance(arguments, dict):
                 if arguments.get("purpose") == "crash_investigation":
@@ -1039,8 +1054,10 @@ class AgentState:
 
     def delegation_gate(self, name: str, arguments: dict[str, Any] | None = None,
                         effect_class: EffectClass = "none") -> str | None:
-        """Gate the parent-only delegate_task contract before its handler."""
-        if name != "delegate_task":
+        """Gate parent-side delegation lifecycle tools before their handlers."""
+        if name not in {
+                "delegate_task", "spawn_subagent", "get_subagent_status",
+                "get_subagent_result", "cancel_subagent"}:
             return None
         arguments = arguments if isinstance(arguments, dict) else {}
         with self._lock:
@@ -1049,11 +1066,13 @@ class AgentState:
             if self.status != "running":
                 return "工具调用拒绝: 当前任务不在 idle/running 委派状态"
             if effect_class != "none":
-                return "工具调用拒绝: delegate_task 必须是无副作用调用"
+                return "工具调用拒绝: 子代理工具必须是无副作用调用"
             phase = self.planning_state.phase
             repair = self._repair_phase
             purpose = arguments.get("purpose")
             source_id = arguments.get("source_id")
+            if name in {"get_subagent_status", "get_subagent_result", "cancel_subagent"}:
+                return None
             if phase == "awaiting_approval" or repair == "verification_required":
                 return "工具调用拒绝: 当前阶段不能委派调查"
             unresolved = [item for item in self.crash_issues
@@ -1068,8 +1087,16 @@ class AgentState:
                     return "工具调用拒绝: crash_investigation 必须引用当前 issue"
                 return None
             if repair == "diagnosis_required":
+                if name == "spawn_subagent":
+                    return "工具调用拒绝: diagnosis_required 只能使用同步 delegate_task"
                 if purpose != "diagnosis" or source_id != self._active_failure_id:
                     return "工具调用拒绝: diagnosis 必须引用当前 active_failure_id"
+                return None
+            if name == "spawn_subagent":
+                if purpose != "investigation":
+                    return "工具调用拒绝: spawn_subagent 只允许 investigation"
+                if phase not in ("direct", "exploring", "executing"):
+                    return "工具调用拒绝: 当前计划阶段不能启动后台调查"
                 return None
             if purpose != "investigation":
                 return "工具调用拒绝: 当前空闲阶段只允许 investigation"
@@ -1081,12 +1108,32 @@ class AgentState:
     def active_delegation_records(self) -> list[DelegationRecord]:
         with self._lock:
             return [item for item in self.delegation_records
-                    if item.delivery_status not in {"committed", "interrupted"}]
+                    if item.delivery_status not in {"committed", "interrupted", "abandoned"}]
 
     def has_active_delegations(self) -> bool:
         with self._lock:
-            return any(item.delivery_status not in {"committed", "interrupted"}
+            return any(item.delivery_status not in {"committed", "interrupted", "abandoned"}
                        for item in self.delegation_records)
+
+    def has_active_synchronous_delegations(self) -> bool:
+        with self._lock:
+            return any(
+                item.mode == "synchronous"
+                and item.delivery_status not in {"committed", "interrupted", "abandoned"}
+                for item in self.delegation_records
+            )
+
+    def has_unclaimed_background_subagents(self) -> bool:
+        with self._lock:
+            return any(
+                item.mode == "background"
+                and item.delivery_status not in {"committed", "interrupted", "abandoned"}
+                for item in self.delegation_records
+            )
+
+    def background_subagent_records(self) -> list[DelegationRecord]:
+        with self._lock:
+            return [item for item in self.delegation_records if item.mode == "background"]
 
     def bind_delegation_parent_attempt(self, delegation_id: str, attempt_id: str) -> DelegationRecord:
         """Keep the durable parent invocation reference for read-only Trace."""
@@ -1147,15 +1194,16 @@ class AgentState:
                if getattr(task, "agent_profile_fingerprint", None) else {}),
         }
 
-    def reserve_delegation(self, task: Any) -> DelegationRecord:
+    def reserve_delegation(self, task: Any, *, mode: str = "synchronous") -> DelegationRecord:
         """Atomically create a record and reserve its requested child budget."""
-        records = self.reserve_delegation_batch([task])
+        records = self.reserve_delegation_batch([task], mode=mode)
         record = records[0]
         if isinstance(record, Exception):
             raise record
         return record
 
-    def reserve_delegation_batch(self, tasks: list[Any]) -> list[DelegationRecord | Exception]:
+    def reserve_delegation_batch(self, tasks: list[Any], *,
+                                 mode: str = "synchronous") -> list[DelegationRecord | Exception]:
         """Reserve a model-ordered batch while holding the State ledger lock.
 
         A later refusal never reallocates an earlier reservation.  Each item
@@ -1164,6 +1212,8 @@ class AgentState:
         """
         if not isinstance(tasks, list):
             raise TypeError("tasks 必须是 list")
+        if mode not in {"synchronous", "background"}:
+            raise ValueError("委派 mode 无效")
         if not tasks:
             return []
         prepared: list[tuple[Any, DelegationUsage]] = []
@@ -1227,6 +1277,7 @@ class AgentState:
                     reserved_usage=request_usage,
                     agent_profile=getattr(task, "agent_profile", None),
                     agent_profile_fingerprint=getattr(task, "agent_profile_fingerprint", None),
+                    mode=mode,
                 )
                 self.delegation_records.append(record)
                 budget = replace(
@@ -1279,7 +1330,24 @@ class AgentState:
             updated = replace(record, delivery_status="running", started_at=_delegation_now())
             self.delegation_records[index] = updated
             self._append_trace_event_locked(
-                "delegation_started", record_type="delegation", record_id=delegation_id,
+                "background_subagent_started" if record.mode == "background"
+                else "delegation_started",
+                record_type="delegation", record_id=delegation_id,
+            )
+            return updated
+
+    def confirm_background_startup(self, delegation_id: str) -> DelegationRecord:
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.mode != "background" or record.delivery_status != "created":
+                raise ValueError("只有已预留的后台委派可以确认启动")
+            if record.startup_confirmed:
+                return record
+            updated = replace(record, startup_confirmed=True)
+            self.delegation_records[index] = updated
+            self._append_trace_event_locked(
+                "background_subagent_accepted", record_type="delegation",
+                record_id=delegation_id,
             )
             return updated
 
@@ -1312,6 +1380,8 @@ class AgentState:
             if (raw.get("agent_profile") != record.agent_profile
                     or raw.get("agent_profile_fingerprint") != record.agent_profile_fingerprint):
                 raise ValueError("SubagentResult agent_profile 身份不一致")
+            if record.mode == "background" and not record.startup_confirmed:
+                raise ValueError("后台子代理启动确认尚未提交")
             if record.delivery_status == "committed":
                 if record.result_id == result_id and record.result_hash == result_hash:
                     return record
@@ -1348,7 +1418,9 @@ class AgentState:
             )
             self.delegation_records[index] = updated
             self._append_trace_event_locked(
-                "delegation_result_ready", record_type="delegation", record_id=delegation_id,
+                "background_subagent_result_ready" if record.mode == "background"
+                else "delegation_result_ready",
+                record_type="delegation", record_id=delegation_id,
             )
             return updated
 
@@ -1359,14 +1431,21 @@ class AgentState:
                 if result_id is None or result_id == record.result_id:
                     return record
                 raise ValueError("重复 commit 引用了不同 result_id")
+            if record.delivery_status == "abandoned":
+                raise ValueError("已放弃的后台委派结果不能领取")
             if record.delivery_status != "result_ready" or not record.result_id:
                 raise ValueError("委派必须先进入 result_ready 才能 committed")
             if result_id is not None and result_id != record.result_id:
                 raise ValueError("result_id 与 result_ready 结果不一致")
-            updated = replace(record, delivery_status="committed", committed_at=_delegation_now())
+            updated = replace(
+                record, delivery_status="committed", committed_at=_delegation_now(),
+                claimed_at=_delegation_now() if record.mode == "background" else None,
+            )
             self.delegation_records[index] = updated
             self._append_trace_event_locked(
-                "delegation_committed", record_type="delegation", record_id=delegation_id,
+                "background_subagent_claimed" if record.mode == "background"
+                else "delegation_committed",
+                record_type="delegation", record_id=delegation_id,
             )
             self._stagnation_progress_marker = self._progress_marker_locked()
             return updated
@@ -1378,7 +1457,19 @@ class AgentState:
             return None
         if not isinstance(raw, dict) or not raw.get("delegation_id"):
             return None
-        return self.commit_delegation(raw["delegation_id"], result_id=raw.get("result_id"))
+        if not isinstance(raw.get("result_id"), str) or not raw.get("result_id"):
+            return None
+        result_hash = delegation_result_hash(raw)
+        with self._lock:
+            _, record = self._find_delegation_locked(raw["delegation_id"])
+            if (record.result_id != raw["result_id"] or record.result_hash != result_hash
+                    or raw.get("subagent_id") != record.subagent_id
+                    or raw.get("parent_task_id") != record.parent_task_id
+                    or raw.get("contract_hash") != record.task_contract_hash
+                    or raw.get("agent_profile") != record.agent_profile
+                    or raw.get("agent_profile_fingerprint") != record.agent_profile_fingerprint):
+                raise ValueError("tool result ID/hash 与 State result_ready 不一致")
+        return self.commit_delegation(raw["delegation_id"], result_id=raw["result_id"])
 
     def mark_delegation_interrupted(self, delegation_id: str, reason: str) -> DelegationRecord:
         """Close a created/running child as an audit fact during recovery.
@@ -1392,32 +1483,135 @@ class AgentState:
             index, record = self._find_delegation_locked(delegation_id)
             if record.delivery_status == "interrupted":
                 return record
-            if record.delivery_status == "committed":
+            if record.delivery_status in {"committed", "abandoned"}:
                 raise ValueError("已交付委派不能标记为调查中断")
-            if record.delivery_status == "result_ready":
+            if record.delivery_status == "result_ready" and record.mode != "background":
                 raise ValueError("result_ready 委派不能标记为调查中断")
             reserved = record.reserved_usage
             budget = self.delegation_budget
+            was_reserved = record.delivery_status in {"created", "running"}
+            prior_usage = record.usage if record.delivery_status == "result_ready" else DelegationUsage()
             self.delegation_budget = replace(
                 budget,
-                reserved_subagents=max(0, budget.reserved_subagents - 1),
-                reserved_llm_calls=max(0, budget.reserved_llm_calls - reserved.llm_calls),
-                reserved_tool_calls=max(0, budget.reserved_tool_calls - reserved.tool_calls),
-                reserved_tokens=max(0, budget.reserved_tokens - reserved.tokens),
-                used_llm_calls=budget.used_llm_calls + reserved.llm_calls,
-                used_tool_calls=budget.used_tool_calls + reserved.tool_calls,
-                used_tokens=budget.used_tokens + reserved.tokens,
+                reserved_subagents=max(0, budget.reserved_subagents - (1 if was_reserved else 0)),
+                reserved_llm_calls=max(0, budget.reserved_llm_calls - (reserved.llm_calls if was_reserved else 0)),
+                reserved_tool_calls=max(0, budget.reserved_tool_calls - (reserved.tool_calls if was_reserved else 0)),
+                reserved_tokens=max(0, budget.reserved_tokens - (reserved.tokens if was_reserved else 0)),
+                used_llm_calls=max(0, budget.used_llm_calls - prior_usage.llm_calls) + reserved.llm_calls,
+                used_tool_calls=max(0, budget.used_tool_calls - prior_usage.tool_calls) + reserved.tool_calls,
+                used_tokens=max(0, budget.used_tokens - prior_usage.tokens) + reserved.tokens,
             )
             updated = replace(
                 record,
                 delivery_status="interrupted",
                 outcome="failed",
+                result_id=None, result_hash=None, progress_hash=None,
+                usage=DelegationUsage(), committed_at=None, claimed_at=None,
                 diagnostic_reason=(str(reason)[:400] + "；实际用量未知，预算按预留上限保守占用"),
                 result_summary="调查中断；未恢复旧子代理",
             )
             self.delegation_records[index] = updated
             self._append_trace_event_locked(
-                "delegation_interrupted", record_type="delegation", record_id=delegation_id,
+                "background_subagent_interrupted" if record.mode == "background"
+                else "delegation_interrupted",
+                record_type="delegation", record_id=delegation_id,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return updated
+
+    def abandon_background_delegation(self, delegation_id: str, reason: str) -> DelegationRecord:
+        """Record deliberate result abandonment at a CLI task boundary."""
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.mode != "background":
+                raise ValueError("只有后台委派可以放弃")
+            if record.delivery_status == "abandoned":
+                return record
+            if record.delivery_status in {"committed", "interrupted"}:
+                return record
+            if record.delivery_status != "result_ready":
+                raise ValueError("后台委派必须先收束才能放弃")
+            updated = replace(
+                record, delivery_status="abandoned", abandoned_at=_delegation_now(),
+                diagnostic_reason=str(reason)[:400],
+            )
+            self.delegation_records[index] = updated
+            self._append_trace_event_locked(
+                "background_subagent_abandoned", record_type="delegation",
+                record_id=delegation_id,
+            )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return updated
+
+    def stage_background_abandon(self, delegation_ids: list[str]) -> tuple[Any, ...]:
+        """Prepare a clean handoff while retaining enough state to undo a failed save."""
+        with self._lock:
+            prior = []
+            for delegation_id in delegation_ids:
+                index, record = self._find_delegation_locked(delegation_id)
+                if record.mode != "background" or record.delivery_status != "result_ready":
+                    raise ValueError("只能暂存已收束且未领取的后台结果")
+                prior.append((index, record))
+            trace_length = len(self.trace_events)
+            next_sequence = self._next_trace_sequence
+            marker = self._stagnation_progress_marker
+            for index, record in prior:
+                self.delegation_records[index] = replace(
+                    record, delivery_status="abandoned", abandoned_at=_delegation_now(),
+                    diagnostic_reason="父任务边界关闭时结果未领取",
+                )
+                self._append_trace_event_locked(
+                    "background_subagent_abandoned", record_type="delegation",
+                    record_id=record.delegation_id,
+                )
+            self._stagnation_progress_marker = self._progress_marker_locked()
+            return (tuple(prior), trace_length, next_sequence, marker)
+
+    def rollback_background_abandon(self, token: tuple[Any, ...]) -> None:
+        """Restore unclaimed results when the clean handoff was not committed."""
+        prior, trace_length, next_sequence, marker = token
+        with self._lock:
+            if (len(self.trace_events) != trace_length + len(prior)
+                    or self._next_trace_sequence != next_sequence + len(prior)):
+                raise RuntimeError("后台结果放弃期间 State 发生其他变化，不能回滚")
+            for index, record in prior:
+                current = self.delegation_records[index]
+                if (current.delegation_id != record.delegation_id
+                        or current.delivery_status != "abandoned"):
+                    raise RuntimeError("后台结果放弃期间委派记录发生变化，不能回滚")
+                self.delegation_records[index] = record
+            del self.trace_events[trace_length:]
+            self._next_trace_sequence = next_sequence
+            self._stagnation_progress_marker = marker
+
+    def cancel_unstarted_background_delegation(
+        self, delegation_id: str, reason: str,
+    ) -> DelegationRecord:
+        """Close a queued request whose startup-confirmation round never committed."""
+        with self._lock:
+            index, record = self._find_delegation_locked(delegation_id)
+            if record.mode != "background" or record.delivery_status != "created":
+                raise ValueError("只有未启动的 queued 后台委派可以直接取消")
+            reserved = record.reserved_usage
+            budget = self.delegation_budget
+            self.delegation_budget = replace(
+                budget,
+                created_subagents=max(0, budget.created_subagents - 1),
+                reserved_subagents=max(0, budget.reserved_subagents - 1),
+                reserved_llm_calls=max(0, budget.reserved_llm_calls - reserved.llm_calls),
+                reserved_tool_calls=max(0, budget.reserved_tool_calls - reserved.tool_calls),
+                reserved_tokens=max(0, budget.reserved_tokens - reserved.tokens),
+            )
+            updated = replace(
+                record, delivery_status="interrupted", outcome="cancelled",
+                reserved_usage=DelegationUsage(),
+                diagnostic_reason=str(reason)[:400],
+                result_summary="启动确认回合未提交；worker 未启动",
+            )
+            self.delegation_records[index] = updated
+            self._append_trace_event_locked(
+                "background_subagent_never_started", record_type="delegation",
+                record_id=delegation_id,
             )
             self._stagnation_progress_marker = self._progress_marker_locked()
             return updated
@@ -1496,6 +1690,11 @@ class AgentState:
             self.delegation_records[index] = replace(
                 record, cancellation_reason=str(reason)[:500],
             )
+            if record.mode == "background" and record.cancellation_reason != str(reason)[:500]:
+                self._append_trace_event_locked(
+                    "background_subagent_cancel_requested", record_type="delegation",
+                    record_id=delegation_id,
+                )
 
     def reconcile_pending_delegation_boundary(
         self, calls: list[dict[str, Any]],
@@ -1509,7 +1708,7 @@ class AgentState:
         created/running records are closed as interruption facts and their
         pending budget is charged conservatively.
         """
-        pending = [item for item in calls if item.get("tool") == "delegate_task"
+        pending = [item for item in calls if item.get("tool") in {"delegate_task", "spawn_subagent"}
                    and item.get("status") == "pending"]
         if not pending:
             return
@@ -1531,6 +1730,14 @@ class AgentState:
                 delegation_id, "调查运行中丢失；恢复分支不重启旧子代理。",
             )
 
+    def interrupt_unclaimed_background_subagents(self, reason: str) -> list[DelegationRecord]:
+        """Close every unclaimed in-memory result during crash recovery."""
+        with self._lock:
+            ids = [item.delegation_id for item in self.delegation_records
+                   if item.mode == "background"
+                   and item.delivery_status in {"created", "running", "result_ready"}]
+        return [self.mark_delegation_interrupted(item, reason) for item in ids]
+
     def begin_crash_recovery(
         self,
         source_session_id: str,
@@ -1541,6 +1748,7 @@ class AgentState:
         pending_calls: list[dict[str, Any]],
         workspace_report: list[str] | tuple[str, ...] = (),
         workspace_observation_digest: str | None = None,
+        interrupted_background: list[DelegationRecord] | tuple[DelegationRecord, ...] = (),
     ) -> CrashRecoveryRecord:
         """Convert one durable pending suffix into a new, non-replayable generation."""
         with self._lock:
@@ -1636,6 +1844,23 @@ class AgentState:
                     False, None, None, generation_id, "workspace_drift",
                     "恢复准备阶段观察到工作区与 durable manifest 不一致；变化只能作为调查证据，"
                     "不能推断任何 pending handler 是否执行。",
+                    "unresolved",
+                ))
+
+            for delegation in interrupted_background:
+                if (not isinstance(delegation, DelegationRecord)
+                        or delegation.mode != "background"
+                        or delegation.delivery_status != "interrupted"):
+                    raise ValueError("crash recovery 后台委派记录无效")
+                issue_id = f"issue-{self._next_crash_issue}"
+                self._next_crash_issue += 1
+                add_issue(CrashRecoveryIssue(
+                    issue_id, recovery_id,
+                    f"background:{delegation.delegation_id}", "spawn_subagent",
+                    "none", True, None, None, generation_id,
+                    "uncertain_state_or_result",
+                    f"后台子代理 {delegation.subagent_id} 未领取且未安全保存结果；"
+                    "旧 worker 未恢复，用量按预留上限保守结算。",
                     "unresolved",
                 ))
 
@@ -3931,7 +4156,7 @@ class AgentState:
                     ),
                 }
             active_delegations = [item for item in self.delegation_records
-                                  if item.delivery_status not in {"committed", "interrupted"}]
+                                  if item.delivery_status not in {"committed", "interrupted", "abandoned"}]
             if active_delegations:
                 return {
                     "unfinished_todos": [],
@@ -4033,7 +4258,7 @@ class AgentState:
         if self._pending_process_controls and not allow_pending:
             issues.append("存在未提交的进程控制结果")
         active_delegations = [item.delegation_id for item in self.delegation_records
-                              if item.delivery_status not in {"committed", "interrupted"}]
+                              if item.delivery_status not in {"committed", "interrupted", "abandoned"}]
         if active_delegations and not allow_pending:
             issues.append("存在活动或待提交委派: " + ", ".join(active_delegations))
         active = [item for item in self.process_records
@@ -4242,7 +4467,7 @@ class AgentState:
             raise SessionExportError("delegation_records 类型无效")
         seen_delegations: set[str] = set()
         delegation_ids_by_status: dict[str, set[str]] = {name: set() for name in (
-            "created", "running", "result_ready", "committed", "interrupted",
+            "created", "running", "result_ready", "committed", "interrupted", "abandoned",
         )}
         usage_totals = {"llm_calls": 0, "tool_calls": 0, "tokens": 0}
         reserved_totals = {"llm_calls": 0, "tool_calls": 0, "tokens": 0}
@@ -4254,7 +4479,7 @@ class AgentState:
                 raise SessionExportError("delegation_id 无效或重复")
             seen_delegations.add(delegation_id)
             delivery_status = raw.get("delivery_status")
-            if delivery_status not in {"created", "running", "result_ready", "committed", "interrupted"}:
+            if delivery_status not in {"created", "running", "result_ready", "committed", "interrupted", "abandoned"}:
                 raise SessionExportError("delegation delivery_status 无效")
             delegation_ids_by_status[delivery_status].add(delegation_id)
             if raw.get("outcome") not in {"pending", "completed", "failed", "timed_out", "cancelled", "budget_exhausted"}:
@@ -4271,7 +4496,21 @@ class AgentState:
                     or not isinstance(role_fingerprint, str)
                     or not re.fullmatch(r"[0-9a-f]{64}", role_fingerprint)):
                 raise SessionExportError("delegation agent_profile 身份无效")
-            if delivery_status in {"result_ready", "committed"}:
+            mode = raw.get("mode", "synchronous")
+            if mode not in {"synchronous", "background"}:
+                raise SessionExportError("delegation mode 无效")
+            if mode == "background":
+                if not isinstance(raw.get("startup_confirmed"), bool):
+                    raise SessionExportError("background startup_confirmed 无效")
+                for field_name in ("claimed_at", "abandoned_at"):
+                    value = raw.get(field_name)
+                    if value is not None and not isinstance(value, str):
+                        raise SessionExportError(f"background {field_name} 无效")
+                if delivery_status in {"running", "result_ready", "committed", "abandoned"} and not raw.get("startup_confirmed"):
+                    raise SessionExportError("后台委派状态与启动确认不一致")
+            elif any(field_name in raw for field_name in ("startup_confirmed", "claimed_at", "abandoned_at")):
+                raise SessionExportError("同步委派包含后台生命周期字段")
+            if delivery_status in {"result_ready", "committed", "abandoned"}:
                 if not isinstance(raw.get("result_id"), str) or not raw["result_id"]:
                     raise SessionExportError(f"{delivery_status} delegation 缺少 result_id")
                 if not isinstance(raw.get("result_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", raw["result_hash"]):
@@ -4279,6 +4518,10 @@ class AgentState:
             if delivery_status == "interrupted" and (raw.get("result_id") is not None
                     or raw.get("result_hash") is not None or raw.get("committed_at") is not None):
                 raise SessionExportError("interrupted delegation 不能伪造已交付结果")
+            if delivery_status == "committed" and mode == "background" and not raw.get("claimed_at"):
+                raise SessionExportError("已领取后台委派缺少 claimed_at")
+            if delivery_status == "abandoned" and (mode != "background" or not raw.get("abandoned_at")):
+                raise SessionExportError("abandoned delegation 生命周期无效")
             parent_attempt_id = raw.get("parent_attempt_id")
             if parent_attempt_id is not None and (not isinstance(parent_attempt_id, str)
                     or not re.fullmatch(r"a-[1-9][0-9]*", parent_attempt_id)):
@@ -4991,6 +5234,8 @@ class AgentState:
                 DelegationUsage.from_value(raw.get("reserved_usage", {})),
                 raw.get("progress_hash"), raw.get("parent_attempt_id"),
                 raw.get("agent_profile"), raw.get("agent_profile_fingerprint"),
+                raw.get("mode", "synchronous"), raw.get("startup_confirmed", False),
+                raw.get("claimed_at"), raw.get("abandoned_at"),
             ))
         raw_budget = payload.get("delegation_budget") or {}
         delegation_budget = DelegationBudget(**{
