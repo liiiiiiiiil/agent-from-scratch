@@ -1,6 +1,6 @@
 # 第 41 课：让 Agent 找回相关记忆，而不是翻遍所有记录
 
-上一课：[给 Agent 一份可控的长期备忘录](40-persistent-memory.md) · [教程总览](README.md) · 下一课：[具名本地资料](42-local-references.md)
+上一课：[给 Agent 一份可控的长期备忘录](40-persistent-memory.md) · [教程总览](README.md) · 下一课：[具名本地 References](42-local-references.md)
 
 > 代码快照：`v0.41` · 相邻差异：`v0.40..v0.41` · 命令环境：Bash/zsh
 
@@ -217,7 +217,7 @@ Memory JSON 时，当前请求仍能构造普通消息，修复后下一次请�
 v0.41 完成了显式相关搜索和父 Context 的有界自动候选。候选始终是不可信资料，不能
 推进 Plan、创建 verification evidence 或覆盖项目指令。下一课将把“工作区内的长期
 记忆”与“工作区外的本地资料”区分开来：
-[第 42 课：具名本地资料](42-local-references.md)。
+[第 42 课：具名本地 References](42-local-references.md)。
 
 - [`retrieval.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.41/src/mini_agent/retrieval.py)：词法匹配、字段权重、稳定排序和结果结构。
 - [`memory.py`](https://github.com/liiiiiiiiil/agent-from-scratch/blob/v0.41/src/mini_agent/memory.py)：`snapshot()` 的只读存储边界。

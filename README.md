@@ -55,7 +55,7 @@
     <tr><td><strong>v0.20</strong></td><td><a href="./docs/tutorials/20-repair-loop.md">修复循环</a></td><td>把失败、诊断、受限恢复和独立验证串成有上限的阶段化循环。</td></tr>
     <tr><td><strong>v0.21</strong></td><td><a href="./docs/tutorials/21-trace-replay.md">任务轨迹回放</a></td><td>按 generation 只读回放 Todo、执行、失败、恢复、验证和终态的因果链。</td></tr>
     <tr><th colspan="3"><a id="stage-7"></a>阶段七 · 结构化计划</th></tr>
-    <tr><td><strong>v0.22</strong></td><td><a href="./docs/tutorials/22-plan-contract.md">结构化计划合同</a></td><td>用不可变 revision 保存计划结构，用独立 progress event 推进步骤状态，并把计划执行视图注入上下文。</td></tr>
+    <tr><td><strong>v0.22</strong></td><td><a href="./docs/tutorials/22-plan-contract.md">Plan Contract（结构化计划）</a></td><td>用不可变 revision 保存计划结构，用独立 progress event 推进步骤状态，并把计划执行视图注入上下文。</td></tr>
     <tr><td><strong>v0.23</strong></td><td><a href="./docs/tutorials/23-plan-mode-handoff.md">只读规划与用户交接</a></td><td>复杂任务先只读调查；计划模式提交后等待用户决定，批准仍不绕过工具授权。</td></tr>
     <tr><td><strong>v0.24</strong></td><td><a href="./docs/tutorials/24-replanning-policy.md">证据驱动重规划与停滞收口</a></td><td>执行中引用真实 failure 或观察修订计划；重复工具回合先提醒，再有界阻塞。</td></tr>
     <tr><td><strong>v0.25</strong></td><td><a href="./docs/tutorials/25-plan-trace-evaluation.md">计划轨迹回放与验收</a></td><td>按顺序事件连接 generation、revision、触发事实、用户决定、执行与独立验证。</td></tr>
@@ -76,11 +76,11 @@
     <tr><td><strong>v0.37</strong></td><td><a href="./docs/tutorials/37-subagent-lifecycle-budget.md">子代理生命周期与聚合预算</a></td><td>记录委派交付状态，按父任务聚合预算预留与结算，并用协作式取消收束同步子代理。</td></tr>
     <tr><td><strong>v0.38</strong></td><td><a href="./docs/tutorials/38-parallel-delegation.md">有界并行子代理</a></td><td>在固定并发上限下运行多个只读调查，并按模型 tool-call 顺序提交父结果。</td></tr>
     <tr><td><strong>v0.39</strong></td><td><a href="./docs/tutorials/39-durable-delegation.md">持久委派交付</a></td><td>先保存已校验的子结果，再按父调用顺序原子交付并支持跨进程恢复。</td></tr>
-    <tr><th colspan="3"><a id="stage-11"></a>阶段十一 · 工作区记忆与资料引用</th></tr>
+    <tr><th colspan="3"><a id="stage-11"></a>阶段十一 · 工作区 Memory &amp; References</th></tr>
     <tr><td><strong>v0.40</strong></td><td><a href="./docs/tutorials/40-persistent-memory.md">轻量持久 Memory</a></td><td>由父 Agent 显式查看、保存、修订和遗忘工作区记忆，支持分页、工作区外存储和不确定提交核查，并通过权限、revision、原子存储和恢复边界保持可核查。</td></tr>
     <tr><td><strong>v0.41</strong></td><td><a href="./docs/tutorials/41-memory-retrieval.md">相关记忆检索</a></td><td>用标准库词法检索找回少量相关候选，并把不可信摘要按 Context 预算临时注入父 Agent；显式搜索与自动检索都不改变 Memory、State 或 session。</td></tr>
-    <tr><td><strong>v0.42</strong></td><td><a href="./docs/tutorials/42-local-references.md">具名本地资料</a></td><td>通过稳定 alias 发现、搜索和按行读取工作区外的本地资料；每次访问重新检查权限、符号链接和敏感目录，References 不进入自动 Context 或子代理。</td></tr>
-    <tr><th colspan="3"><a id="stage-12"></a>阶段十二 · 外部协议与可复用工作流</th></tr>
+    <tr><td><strong>v0.42</strong></td><td><a href="./docs/tutorials/42-local-references.md">具名本地 References</a></td><td>通过稳定 alias 发现、搜索和按行读取工作区外的本地资料；每次访问重新检查权限、符号链接和敏感目录，References 不进入自动 Context 或子代理。</td></tr>
+    <tr><th colspan="3"><a id="stage-12"></a>阶段十二 · MCP &amp; Skills</th></tr>
     <tr><td><strong>v0.43</strong></td><td><a href="./docs/tutorials/43-stdio-mcp-client.md">最小 stdio MCP 客户端</a></td><td>用独立命令连接本地 MCP Server，完成固定生命周期、分页列工具和逐次确认的手动调用；MCP Tool 仍不进入 Agent。</td></tr>
     <tr><td><strong>v0.44</strong></td><td><a href="./docs/tutorials/44-mcp-tools-runtime.md">MCP Tool 接入父 Agent Runtime</a></td><td>让显式启用的本地 MCP Tool 经过统一 Registry、权限、计划、持久工具边界和恢复流程；严格校验参数、区分失败结果，并保持 Subagent 隔离。</td></tr>
     <tr><td><strong>v0.45</strong></td><td><a href="./docs/tutorials/45-local-skills.md">本地 Skills 发现与按需加载</a></td><td>只展示固定目录中的 Skill 元数据，获准后按需读取正文；Skill 只指导现有工具的工作流，不授予权限、不自动执行命令，并保持正文与 State/Trace 隔离。</td></tr>

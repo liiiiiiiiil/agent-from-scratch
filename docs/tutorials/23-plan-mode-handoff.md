@@ -1,6 +1,6 @@
 # 第 23 课：先调查，再交付计划（v0.23）
 
-上一课：[结构化计划合同](22-plan-contract.md) · [教程总览](README.md) · 下一课：[v0.24 证据驱动重规划与停滞收口](24-replanning-policy.md)
+上一课：[Plan Contract（结构化计划）](22-plan-contract.md) · [教程总览](README.md) · 下一课：[v0.24 证据驱动重规划与停滞收口](24-replanning-policy.md)
 
 > 代码快照：`v0.23` · 相邻差异：`v0.22..v0.23` · 命令环境：Bash/zsh
 

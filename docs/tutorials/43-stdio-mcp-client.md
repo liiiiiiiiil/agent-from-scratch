@@ -1,6 +1,6 @@
 # 第 43 课：用 stdio 连接一个 MCP Server
 
-上一课：[具名本地资料](42-local-references.md) · [教程总览](README.md) · 下一课：[把 MCP Tool 接入 Agent](44-mcp-tools-runtime.md)
+上一课：[具名本地 References](42-local-references.md) · [教程总览](README.md) · 下一课：[把 MCP Tool 接入 Agent](44-mcp-tools-runtime.md)
 
 代码快照：`v0.43` · 相邻差异：`v0.42..v0.43`
 
