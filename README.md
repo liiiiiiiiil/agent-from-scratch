@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码已完成 `v0.48`（第 48 课：进程内后台子代理）。阶段十三在保留同步只读委派的同时，允许父 Agent 启动具名后台调查、继续自己的模型轮次，再按 ID 查询并领取结果；子任务只在当前 CLI 进程运行。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线代码已完成 `v0.49`（第 49 课：可续接子会话）。父 Agent 可在领取成功调查结果后，用原 ID 为具名只读子代理提交下一轮调查，并将空闲子会话随安全点保存、恢复；活动 worker 不跨进程恢复。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -88,6 +88,7 @@
     <tr><th colspan="3"><a id="stage-13"></a>阶段十三 · 轻量 Agent 协作</th></tr>
     <tr><td><strong>v0.47</strong></td><td><a href="./docs/tutorials/47-agent-profiles.md">具名子代理角色</a></td><td>为同步只读委派选择冻结的角色提示、工具子集、模型别名与父侧预授权 Skill；tester 只能分析并建议测试。</td></tr>
     <tr><td><strong>v0.48</strong></td><td><a href="./docs/tutorials/48-background-subagents.md">进程内后台子代理</a></td><td>父 Agent 启动具名只读调查后继续模型轮次，通过状态查询与显式领取接收结果；整轮持久提交前不启动 worker，活动或未领取任务不能安全保存或完成。</td></tr>
+    <tr><td><strong>v0.49</strong></td><td><a href="./docs/tutorials/49-resumable-child-session.md">可续接子会话</a></td><td>用原 child ID 为已领取成功结果追加完整调查合同；schema 4 安全点原子保存有界子历史，恢复时重核角色、模型和 Skill 身份，并保留累计预算。</td></tr>
   </tbody>
 </table>
 

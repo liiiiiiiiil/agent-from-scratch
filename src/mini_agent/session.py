@@ -1,6 +1,6 @@
 """Private, atomic session storage and durable tool boundaries.
 
-Schema 3 keeps State, Context, and the current tool boundary in one atomic
+Schema 4 keeps State, Context, child snapshots, and the current tool boundary in one atomic
 session file. Loading remains a side-effect-free validation operation;
 runtime construction and resume admission live in :mod:`mini_agent.resume`.
 """
@@ -26,7 +26,8 @@ from mini_agent.state import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+SCHEMA_3_VERSION = 3
 SCHEMA_2_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
@@ -42,11 +43,19 @@ _NO_OUTER_ATTEMPT_BOUNDARY_TOOLS = {
 }
 _MAX_PENDING_DELEGATION_RESULTS_BYTES = 128 * 1024
 _MAX_PENDING_DELEGATION_RESULT_BYTES = 16 * 1024
+_MAX_CHILD_SESSION_SNAPSHOTS = 3
+_MAX_CHILD_SESSION_SNAPSHOT_BYTES = 256 * 1024
+_MAX_CHILD_SESSION_SNAPSHOTS_BYTES = 720 * 1024
+_CHILD_SESSION_UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
 _DELEGATION_RESULT_FIELDS = {
     "result_id", "delegation_id", "subagent_id", "parent_task_id", "outcome",
     "summary", "findings", "evidence", "limitations", "usage", "contract_hash",
     "started_at", "finished_at", "error_kind", "error_detail", "model_profile",
     "binding_fingerprint", "agent_profile", "agent_profile_fingerprint",
+    "round_index",
 }
 
 
@@ -88,6 +97,10 @@ def _canonical_delegation_result(raw: Any) -> tuple[str, str, dict[str, Any]]:
             or not isinstance(raw["started_at"], str)
             or not isinstance(raw["finished_at"], str)):
         raise SessionValidationError("待交付委派结果字段值无效")
+    if "round_index" in raw and (
+            isinstance(raw["round_index"], bool) or not isinstance(raw["round_index"], int)
+            or not 1 <= raw["round_index"] <= 4):
+        raise SessionValidationError("待交付委派结果 round_index 无效")
     normalized = json.loads(json.dumps(raw, ensure_ascii=False, sort_keys=True))
     encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(encoded) > _MAX_PENDING_DELEGATION_RESULT_BYTES:
@@ -560,6 +573,7 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         extended_call_fields = call_fields | {
             "delegation_id", "subagent_id", "delegation_result_hash",
             "agent_profile", "agent_profile_fingerprint", "child_session_id",
+            "round_index",
         }
         # v0.32 boundaries did not retain the original reservation hash.  They
         # remain readable for clean replay diagnostics, but a pending admitted
@@ -580,17 +594,17 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
             raise SessionValidationError("tool_boundary 调用身份不匹配")
         delegation_id = call.get("delegation_id")
         if delegation_id is not None and (
-                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "followup_subagent", "get_subagent_result"}
                 or not isinstance(delegation_id, str) or not delegation_id):
             raise SessionValidationError("tool_boundary delegation_id 引用无效")
         child_session_id = call.get("child_session_id")
         if child_session_id is not None and (
-                call.get("tool") not in {"spawn_subagent", "get_subagent_result"}
+                call.get("tool") not in {"spawn_subagent", "followup_subagent", "get_subagent_result"}
                 or not isinstance(child_session_id, str)
-                or not re.fullmatch(r"[0-9a-fA-F-]{36}", child_session_id)):
+                or not _CHILD_SESSION_UUID_RE.fullmatch(child_session_id)):
             raise SessionValidationError("tool_boundary child_session_id 引用无效")
         if call.get("subagent_id") is not None and (
-                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "followup_subagent", "get_subagent_result"}
                 or not isinstance(call.get("subagent_id"), str)
                 or not call.get("subagent_id")
         ):
@@ -600,7 +614,7 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         if (role_id is None) != (role_fingerprint is None):
             raise SessionValidationError("tool_boundary agent_profile 身份字段不完整")
         if role_id is not None and (
-                call.get("tool") not in {"delegate_task", "spawn_subagent", "get_subagent_result"}
+                call.get("tool") not in {"delegate_task", "spawn_subagent", "followup_subagent", "get_subagent_result"}
                 or not isinstance(role_id, str)
                 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role_id)
                 or not isinstance(role_fingerprint, str)
@@ -611,6 +625,11 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                 or not re.fullmatch(r"[0-9a-f]{64}", call["delegation_result_hash"])
         ):
             raise SessionValidationError("tool_boundary delegation result hash 无效")
+        if call.get("round_index") is not None and (
+                isinstance(call.get("round_index"), bool)
+                or not isinstance(call.get("round_index"), int)
+                or not 1 <= call["round_index"] <= 4):
+            raise SessionValidationError("tool_boundary round_index 无效")
         if not isinstance(call.get("arguments_summary"), dict):
             raise SessionValidationError("tool_boundary 参数摘要无效")
         if "arguments_hash" in call and (
@@ -701,29 +720,38 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                             or content_raw.get("agent_profile_fingerprint")
                             != delegation.get("agent_profile_fingerprint")):
                         raise SessionValidationError("committed 委派结果与 State 不一致")
-        elif call.get("tool") == "spawn_subagent" and child_session_id is not None:
+        elif call.get("tool") in {"spawn_subagent", "followup_subagent"} and child_session_id is not None:
             delegation = state_delegations.get(delegation_id)
             if (delegation is None or delegation.get("mode") != "background"
                     or delegation.get("subagent_id") != child_session_id):
-                raise SessionValidationError("spawn_subagent 与 State 后台委派身份不一致")
+                raise SessionValidationError("后台启动与 State 委派身份不一致")
             if call.get("subagent_id") != child_session_id:
-                raise SessionValidationError("spawn_subagent subagent_id 与 child_session_id 不一致")
+                raise SessionValidationError("后台启动 subagent_id 与 child_session_id 不一致")
             if (call.get("agent_profile") != delegation.get("agent_profile")
                     or call.get("agent_profile_fingerprint")
                     != delegation.get("agent_profile_fingerprint")):
-                raise SessionValidationError("spawn_subagent 角色与 State 不一致")
+                raise SessionValidationError("后台启动角色与 State 不一致")
             if call.get("status") == "committed":
                 try:
                     confirmation = json.loads(call.get("result", {}).get("content", ""))
                 except (TypeError, ValueError, json.JSONDecodeError) as error:
-                    raise SessionValidationError("spawn_subagent 启动确认无效") from error
+                    raise SessionValidationError("后台启动确认无效") from error
                 if (not isinstance(confirmation, dict) or confirmation.get("accepted") is not True
                         or confirmation.get("child_session_id") != child_session_id
                         or confirmation.get("delegation_id") != delegation_id
                         or confirmation.get("agent_profile") != delegation.get("agent_profile")):
-                    raise SessionValidationError("spawn_subagent 启动确认与 State 不一致")
+                    raise SessionValidationError("后台启动确认与 State 不一致")
+                expected_round = 1 if call.get("tool") == "spawn_subagent" else call.get("round_index")
+                if (confirmation.get("round_index") != expected_round
+                        or delegation.get("round_index") is not None):
+                    # Round ownership lives in the child_session_records ledger.
+                    lifecycle = next((item for item in state.get("child_session_records", [])
+                                      if item.get("child_session_id") == child_session_id), None)
+                    if (lifecycle is None or confirmation.get("round_index") != lifecycle.get("round_index")
+                            or call.get("round_index") not in (None, lifecycle.get("round_index"))):
+                        raise SessionValidationError("后台启动确认轮次与 State 不一致")
                 if status == "committed" and delegation.get("startup_confirmed") is not True:
-                    raise SessionValidationError("committed spawn_subagent 缺少 State 启动确认事实")
+                    raise SessionValidationError("committed 后台启动缺少 State 启动确认事实")
         elif call.get("tool") == "get_subagent_result" and delegation_id is not None:
             delegation = state_delegations.get(delegation_id)
             if (delegation is None or delegation.get("mode") != "background"
@@ -825,6 +853,170 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         raise SessionValidationError("complete tool_boundary 缺少 Context 结果")
 
 
+def _validate_child_session_snapshots(
+    snapshots: Any, state: dict[str, Any], workspace_root: str,
+    *, save_kind: str,
+) -> None:
+    if not isinstance(snapshots, list) or len(snapshots) > _MAX_CHILD_SESSION_SNAPSHOTS:
+        raise SessionValidationError("child_sessions 数量超过上限")
+    lifecycle_records = state.get("child_session_records", [])
+    lifecycle_by_id = {
+        item.get("child_session_id"): item for item in lifecycle_records
+        if isinstance(item, dict)
+    }
+    delegations_by_child: dict[str, list[dict[str, Any]]] = {}
+    for record in state.get("delegation_records", []):
+        if isinstance(record, dict) and record.get("mode") == "background":
+            delegations_by_child.setdefault(record.get("subagent_id", ""), []).append(record)
+    expected_workspace = hashlib.sha256(
+        os.path.normcase(os.path.realpath(os.path.abspath(workspace_root))).encode("utf-8")
+    ).hexdigest()
+    seen: set[str] = set()
+    total_bytes = 0
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            raise SessionValidationError("child_sessions 含非 object 快照")
+        expected_fields = {
+            "format", "format_version", "child_session_id", "parent_task_id",
+            "workspace_fingerprint", "agent_profile", "agent_profile_fingerprint",
+            "model_binding_ref", "skill_identities", "round_index", "cumulative_usage",
+            "last_claimed_result_id", "last_claimed_result_hash", "last_result_json",
+            "observations", "context",
+        }
+        if (set(snapshot) != expected_fields
+                or snapshot.get("format") != "mini_agent.child_session"
+                or snapshot.get("format_version") != 1):
+            raise SessionValidationError("child session 快照字段或版本无效")
+        child_id = snapshot.get("child_session_id")
+        if (not isinstance(child_id, str) or not _CHILD_SESSION_UUID_RE.fullmatch(child_id)
+                or child_id in seen):
+            raise SessionValidationError("child session 快照 ID 无效或重复")
+        seen.add(child_id)
+        lifecycle = lifecycle_by_id.get(child_id)
+        if lifecycle is None:
+            raise SessionValidationError(f"child session {child_id} 缺少 State lifecycle")
+        if (snapshot.get("parent_task_id") != state.get("task_id")
+                or snapshot.get("parent_task_id") != lifecycle.get("parent_task_id")):
+            raise SessionValidationError(f"child session {child_id} parent task_id 不匹配")
+        if (snapshot.get("workspace_fingerprint") != expected_workspace
+                or snapshot.get("workspace_fingerprint") != lifecycle.get("workspace_fingerprint")):
+            raise SessionValidationError(f"child session {child_id} workspace 身份不匹配")
+        if (snapshot.get("agent_profile") != lifecycle.get("agent_profile")
+                or snapshot.get("agent_profile_fingerprint") != lifecycle.get("agent_profile_fingerprint")
+                or snapshot.get("model_binding_ref") != lifecycle.get("model_binding_ref")):
+            raise SessionValidationError(f"child session {child_id} 角色或模型来源摘要不匹配")
+        round_index = snapshot.get("round_index")
+        if isinstance(round_index, bool) or not isinstance(round_index, int) or not 1 <= round_index <= 4:
+            raise SessionValidationError(f"child session {child_id} round_index 无效")
+        usage = snapshot.get("cumulative_usage")
+        usage_fields = {
+            "rounds", "llm_calls", "tool_calls", "input_tokens", "output_tokens",
+            "token_accounting", "elapsed_ms", "result_bytes",
+        }
+        if not isinstance(usage, dict) or set(usage) != usage_fields:
+            raise SessionValidationError(f"child session {child_id} 累计用量字段无效")
+        for key in usage_fields - {"token_accounting"}:
+            value = usage.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise SessionValidationError(f"child session {child_id} 累计用量 {key} 无效")
+        if usage.get("token_accounting") not in {"provider", "estimated", "mixed"}:
+            raise SessionValidationError(f"child session {child_id} token_accounting 无效")
+        if usage != lifecycle.get("cumulative_usage"):
+            raise SessionValidationError(f"child session {child_id} 累计用量与 State lifecycle 不匹配")
+        if (usage["llm_calls"] > 16 or usage["tool_calls"] > 48
+                or usage["input_tokens"] + usage["output_tokens"] > 64_000
+                or usage["elapsed_ms"] > 240_000):
+            raise SessionValidationError(f"child session {child_id} 累计用量超过固定上限")
+        if not isinstance(snapshot.get("last_claimed_result_id"), str) or not snapshot["last_claimed_result_id"]:
+            raise SessionValidationError(f"child session {child_id} 缺少最近领取的 result_id")
+        result_hash = snapshot.get("last_claimed_result_hash")
+        if not isinstance(result_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", result_hash):
+            raise SessionValidationError(f"child session {child_id} 最近结果 hash 无效")
+        try:
+            last_result = json.loads(snapshot.get("last_result_json", ""))
+            result_json, computed_hash, parsed_result = _canonical_delegation_result(last_result)
+        except (TypeError, ValueError, json.JSONDecodeError, SessionError) as error:
+            raise SessionValidationError(f"child session {child_id} 最近结果无法校验") from error
+        if (result_json != snapshot.get("last_result_json") or computed_hash != result_hash
+                or parsed_result.get("result_id") != snapshot.get("last_claimed_result_id")
+                or parsed_result.get("subagent_id") != child_id
+                or parsed_result.get("outcome") != "completed"
+                or parsed_result.get("round_index") != round_index):
+            raise SessionValidationError(f"child session {child_id} 最近结果 ID/hash/轮次不匹配")
+        model_ref = snapshot.get("model_binding_ref")
+        if model_ref is not None and (
+                not isinstance(model_ref, dict)
+                or set(model_ref) != {"provider", "profile", "protocol", "fingerprint"}
+                or any(not isinstance(model_ref.get(key), str)
+                       for key in ("provider", "profile", "protocol", "fingerprint"))
+                or not re.fullmatch(r"[0-9a-f]{64}", model_ref.get("fingerprint", ""))):
+            raise SessionValidationError(f"child session {child_id} model binding 来源摘要无效")
+        skills = snapshot.get("skill_identities")
+        if not isinstance(skills, list) or len(skills) > 16:
+            raise SessionValidationError(f"child session {child_id} Skill 身份列表无效")
+        seen_skills: set[str] = set()
+        for skill in skills:
+            if (not isinstance(skill, dict) or set(skill) != {"skill_id", "source", "fingerprint"}
+                    or not isinstance(skill.get("skill_id"), str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", skill["skill_id"])
+                    or skill["skill_id"] in seen_skills
+                    or skill.get("source") not in {"project", "global"}
+                    or not isinstance(skill.get("fingerprint"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", skill["fingerprint"])):
+                raise SessionValidationError(f"child session {child_id} Skill 身份摘要无效")
+            seen_skills.add(skill["skill_id"])
+        observations = snapshot.get("observations")
+        if not isinstance(observations, list) or len(observations) > 256:
+            raise SessionValidationError(f"child session {child_id} 只读观察摘要无效")
+        for fact in observations:
+            if (not isinstance(fact, dict)
+                    or set(fact) - {"kind", "tool", "path", "line", "hash"}
+                    or fact.get("kind") not in {"tool_observation", "file_location"}
+                    or not isinstance(fact.get("tool"), str)
+                    or not isinstance(fact.get("hash"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", fact["hash"])):
+                raise SessionValidationError(f"child session {child_id} 观察事实无效")
+            if fact.get("path") is not None and not isinstance(fact.get("path"), str):
+                raise SessionValidationError(f"child session {child_id} 观察路径无效")
+            if fact.get("line") is not None and (
+                    isinstance(fact.get("line"), bool) or not isinstance(fact.get("line"), int)
+                    or fact["line"] < 1):
+                raise SessionValidationError(f"child session {child_id} 观察行号无效")
+        try:
+            _validate_context_export(snapshot.get("context"))
+        except SessionValidationError as error:
+            raise SessionValidationError(f"child session {child_id} Context 校验失败: {error}") from error
+        encoded_size = len(_canonical_bytes(snapshot))
+        if encoded_size > _MAX_CHILD_SESSION_SNAPSHOT_BYTES:
+            raise SessionSizeError(f"child session {child_id} 快照超过 {_MAX_CHILD_SESSION_SNAPSHOT_BYTES} bytes")
+        total_bytes += encoded_size
+        records = delegations_by_child.get(child_id, [])
+        if round_index > len(records):
+            raise SessionValidationError(f"child session {child_id} 轮次引用缺失父记录")
+        round_record = records[round_index - 1]
+        if (round_record.get("result_id") != snapshot["last_claimed_result_id"]
+                or round_record.get("result_hash") != result_hash
+                or round_record.get("delivery_status") != "committed"):
+            raise SessionValidationError(f"child session {child_id} 最近结果与父记录不匹配")
+        if save_kind == "safe_point":
+            if (lifecycle.get("status") != "idle" or lifecycle.get("round_index") != round_index
+                    or lifecycle.get("last_claimed_result_id") != snapshot["last_claimed_result_id"]
+                    or lifecycle.get("last_claimed_result_hash") != result_hash):
+                raise SessionValidationError(f"safe_point child session {child_id} 不是当前 idle 快照")
+        elif lifecycle.get("status") in {"starting", "running", "result_ready"}:
+            if round_index != lifecycle.get("round_index") - 1:
+                raise SessionValidationError(f"活动 child session {child_id} 基础快照轮次不匹配")
+    if total_bytes > _MAX_CHILD_SESSION_SNAPSHOTS_BYTES:
+        raise SessionSizeError(
+            "child_sessions 总大小超过 720 KiB；child_session_id="
+            + ",".join(sorted(seen))
+        )
+    if save_kind == "safe_point":
+        for child_id, lifecycle in lifecycle_by_id.items():
+            if lifecycle.get("status") == "idle" and child_id not in seen:
+                raise SessionValidationError(f"child session {child_id} 缺少安全点快照")
+
+
 class SessionStore:
     """Store one JSON session per random ID using an exclusive writer lock."""
 
@@ -910,7 +1102,8 @@ class SessionStore:
                        handoff_status: str, save_kind: str,
                        *, session_generation: int = 1,
                        workspace_manifest: dict[str, Any] | None = None,
-                       tool_boundary: dict[str, Any] | None = None) -> dict[str, Any]:
+                       tool_boundary: dict[str, Any] | None = None,
+                       child_sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         self._check_id(session_id)
         if handoff_status not in {"active", "clean"}:
             raise SessionValidationError("handoff_status 必须是 active 或 clean")
@@ -935,11 +1128,15 @@ class SessionStore:
                     "safe_point 不能包含活动或待提交委派: " + ", ".join(active_delegations)
                 )
         boundary = deepcopy(tool_boundary) if tool_boundary is not None else _empty_tool_boundary()
+        child_snapshots = deepcopy(child_sessions) if child_sessions is not None else []
         _validate_context_export(
             context,
             allow_partial=(save_kind == "tool_boundary" and boundary.get("status") == "pending"),
         )
         _validate_tool_boundary(boundary, state, context)
+        _validate_child_session_snapshots(
+            child_snapshots, state, _normal_workspace_root(workspace_root), save_kind=save_kind,
+        )
         if boundary.get("status") == "pending" and (save_kind != "tool_boundary" or handoff_status != "active"):
             raise SessionValidationError("pending tool_boundary 只能以 active tool_boundary 保存")
         if save_kind == "safe_point" and boundary.get("status") != "committed":
@@ -960,6 +1157,7 @@ class SessionStore:
             "state": deepcopy(state),
             "context": deepcopy(context),
             "tool_boundary": boundary,
+            "child_sessions": child_snapshots,
         }
         digest = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
         payload["integrity"] = {"algorithm": _INTEGRITY_ALGORITHM, "sha256": digest}
@@ -1013,22 +1211,28 @@ class SessionStore:
     def save(self, session_id: str | None, state: Any, context: Any,
              *, workspace_root: str | os.PathLike[str] | None = None,
              handoff_status: str = "active", save_kind: str = "safe_point",
-             tool_boundary: dict[str, Any] | None = None) -> dict[str, Any]:
+             tool_boundary: dict[str, Any] | None = None,
+             child_sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Atomically save an exported State/Context and return the envelope."""
         selected_id = self._check_id(session_id) if session_id is not None else _new_session_id()
         if save_kind not in {"safe_point", "tool_boundary"}:
             raise SessionValidationError("save_kind 无效")
         selected_boundary = deepcopy(tool_boundary) if tool_boundary is not None else None
+        selected_child_sessions = deepcopy(child_sessions) if child_sessions is not None else None
         try:
             if selected_boundary is None and session_id is not None:
                 try:
                     previous_for_boundary = self.load(session_id)
-                    if previous_for_boundary.get("schema_version") == SCHEMA_VERSION:
+                    if previous_for_boundary.get("schema_version") in {SCHEMA_3_VERSION, SCHEMA_VERSION}:
                         selected_boundary = deepcopy(previous_for_boundary.get("tool_boundary"))
+                    if selected_child_sessions is None and save_kind == "tool_boundary":
+                        selected_child_sessions = deepcopy(previous_for_boundary.get("child_sessions", []))
                 except SessionError:
                     pass
             if selected_boundary is None:
                 selected_boundary = _empty_tool_boundary()
+            if selected_child_sessions is None:
+                selected_child_sessions = []
             partial = save_kind == "tool_boundary" and selected_boundary.get("status") == "pending"
             state_export = (
                 state.export_session(allow_pending=(save_kind == "tool_boundary"))
@@ -1060,6 +1264,7 @@ class SessionStore:
                 session_generation=previous_generation + 1,
                 workspace_manifest=manifest,
                 tool_boundary=selected_boundary,
+                child_sessions=selected_child_sessions,
             )
             self._write_atomic(selected_id, envelope)
         except BaseException:
@@ -1081,7 +1286,8 @@ class SessionStore:
 
     def claim_resume(self, session_id: str, expected: dict[str, Any], *,
                      state_export: dict[str, Any] | None = None,
-                     context_export: dict[str, Any] | None = None) -> dict[str, Any]:
+                     context_export: dict[str, Any] | None = None,
+                     child_sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Atomically claim one validated clean v2/v3 commit for this runtime.
 
         The expected integrity digest is checked again while the exclusive lock
@@ -1101,8 +1307,8 @@ class SessionStore:
         lock_fd = self._acquire_lock(selected_id)
         try:
             current = self.load(selected_id)
-            if current.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
-                raise SessionValidationError("待恢复 session 不是 schema 2/3")
+            if current.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_3_VERSION, SCHEMA_VERSION}:
+                raise SessionValidationError("待恢复 session 不是 schema 2/3/4")
             if current.get("handoff_status") != "clean" or current.get("save_kind") != "safe_point":
                 raise SessionValidationError("session 不是可恢复的 clean safe_point")
             if current.get("integrity") != expected.get("integrity"):
@@ -1117,9 +1323,11 @@ class SessionStore:
                     "恢复占用前工作区检查失败：" + "；".join(workspace_issues[:20])
                 )
             active = deepcopy(current)
-            if current.get("schema_version") == SCHEMA_2_VERSION:
+            if current.get("schema_version") in {SCHEMA_2_VERSION, SCHEMA_3_VERSION}:
                 active["schema_version"] = SCHEMA_VERSION
-                active["tool_boundary"] = _empty_tool_boundary()
+                if current.get("schema_version") == SCHEMA_2_VERSION:
+                    active["tool_boundary"] = _empty_tool_boundary()
+                active["child_sessions"] = []
             active["handoff_status"] = "active"
             active["session_generation"] = int(current.get("session_generation", 1)) + 1
             active["saved_at"] = self._saved_at()
@@ -1127,6 +1335,10 @@ class SessionStore:
                 active["state"] = deepcopy(state_export)
             if context_export is not None:
                 active["context"] = deepcopy(context_export)
+            if child_sessions is not None:
+                active["child_sessions"] = deepcopy(child_sessions)
+            elif "child_sessions" not in active:
+                active["child_sessions"] = []
             without_integrity = {key: value for key, value in active.items() if key != "integrity"}
             active["integrity"] = {
                 "algorithm": _INTEGRITY_ALGORITHM,
@@ -1285,6 +1497,7 @@ class SessionStore:
         state_export: dict[str, Any], context_export: dict[str, Any],
         tool_boundary: dict[str, Any], workspace_root: str | os.PathLike[str] | None = None,
         workspace_manifest: dict[str, Any] | None = None,
+        child_sessions: list[dict[str, Any]] | None = None,
         recovery_id: str = "",
     ) -> dict[str, Any]:
         """Idempotently derive a runnable recovery branch while preserving its source."""
@@ -1300,7 +1513,7 @@ class SessionStore:
             raise SessionValidationError("崩溃恢复派生 boundary 必须 committed")
 
         def recovery_source_allowed(envelope: dict[str, Any]) -> bool:
-            if (envelope.get("schema_version") != SCHEMA_VERSION
+            if (envelope.get("schema_version") not in {SCHEMA_3_VERSION, SCHEMA_VERSION}
                     or envelope.get("handoff_status") != "active"
                     or envelope.get("save_kind") != "tool_boundary"):
                 return False
@@ -1391,6 +1604,7 @@ class SessionStore:
                     workspace_root or current["workspace_root"], "active", "tool_boundary",
                     session_generation=1, workspace_manifest=manifest,
                     tool_boundary=deepcopy(tool_boundary),
+                    child_sessions=deepcopy(child_sessions or []),
                 )
                 # Phase 2a: durable derived branch.  A failure leaves the
                 # preparing record intact so retry can use this same ID.
@@ -1484,7 +1698,7 @@ class SessionStore:
         schema_version = envelope.get("schema_version")
         if (isinstance(schema_version, bool)
                 or not isinstance(schema_version, int)
-                or schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_2_VERSION, SCHEMA_VERSION}):
+                or schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_2_VERSION, SCHEMA_3_VERSION, SCHEMA_VERSION}):
             raise SessionValidationError("未知或不支持的 session schema_version")
         if schema_version == LEGACY_SCHEMA_VERSION:
             expected_fields = {
@@ -1497,11 +1711,18 @@ class SessionStore:
                 "saved_at", "save_kind", "handoff_status", "session_generation",
                 "workspace_manifest", "state", "context", "integrity",
             }
-        elif schema_version == SCHEMA_VERSION:
+        elif schema_version == SCHEMA_3_VERSION:
             expected_fields = {
                 "schema_version", "session_id", "writer_version", "workspace_root",
                 "saved_at", "save_kind", "handoff_status", "session_generation",
                 "workspace_manifest", "state", "context", "tool_boundary", "integrity",
+            }
+        elif schema_version == SCHEMA_VERSION:
+            expected_fields = {
+                "schema_version", "session_id", "writer_version", "workspace_root",
+                "saved_at", "save_kind", "handoff_status", "session_generation",
+                "workspace_manifest", "state", "context", "tool_boundary", "child_sessions",
+                "integrity",
             }
         else:
             expected_fields = {"schema_version"}
@@ -1524,7 +1745,7 @@ class SessionStore:
             raise SessionValidationError("handoff_status 无效")
         if envelope.get("save_kind") not in {"safe_point", "tool_boundary"}:
             raise SessionValidationError("save_kind 无效")
-        if schema_version in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
+        if schema_version in {SCHEMA_2_VERSION, SCHEMA_3_VERSION, SCHEMA_VERSION}:
             generation = envelope.get("session_generation")
             if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
                 raise SessionValidationError("session_generation 无效")
@@ -1546,14 +1767,14 @@ class SessionStore:
         try:
             AgentState.validate_session_export(
                 envelope.get("state"),
-                allow_pending=(schema_version == SCHEMA_VERSION
+                allow_pending=(schema_version in {SCHEMA_3_VERSION, SCHEMA_VERSION}
                                 and envelope.get("save_kind") == "tool_boundary"),
             )
         except (SessionExportError, KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"State 引用校验失败: {error}") from error
         try:
             allow_partial = (
-                schema_version == SCHEMA_VERSION
+                schema_version in {SCHEMA_3_VERSION, SCHEMA_VERSION}
                 and isinstance(envelope.get("tool_boundary"), dict)
                 and envelope["tool_boundary"].get("status") == "pending"
             )
@@ -1562,7 +1783,7 @@ class SessionStore:
             raise
         except (KeyError, TypeError, ValueError) as error:
             raise SessionValidationError(f"Context 引用校验失败: {error}") from error
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in {SCHEMA_3_VERSION, SCHEMA_VERSION}:
             _validate_tool_boundary(
                 envelope.get("tool_boundary"), envelope["state"], envelope["context"],
             )
@@ -1572,6 +1793,11 @@ class SessionStore:
                     raise SessionValidationError("pending tool_boundary 只能存在于 active tool_boundary session")
             elif envelope.get("save_kind") == "safe_point" and boundary_status != "committed":
                 raise SessionValidationError("safe_point 的 tool_boundary 必须 committed")
+        if schema_version == SCHEMA_VERSION:
+            _validate_child_session_snapshots(
+                envelope.get("child_sessions"), envelope["state"], envelope["workspace_root"],
+                save_kind=envelope.get("save_kind"),
+            )
 
     @staticmethod
     def _validate_workspace_manifest(manifest: Any, workspace_root: str) -> None:
@@ -1637,7 +1863,7 @@ class SessionStore:
 
 
 class DurableToolBoundary:
-    """Coordinate atomic schema 3 commits for one live tool round."""
+    """Coordinate atomic schema 4 commits for one live tool round."""
 
     def __init__(self, store: SessionStore, session_id: str,
                  workspace_root: str | os.PathLike[str]) -> None:
@@ -1819,7 +2045,7 @@ class DurableToolBoundary:
                 "exit_code": getattr(execution, "exit_code", None),
             },
         })
-        if call.get("tool") == "spawn_subagent" and getattr(execution, "outcome", None) == "succeeded":
+        if call.get("tool") in {"spawn_subagent", "followup_subagent"} and getattr(execution, "outcome", None) == "succeeded":
             try:
                 confirmation = json.loads(str(content))
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -1839,6 +2065,7 @@ class DurableToolBoundary:
                     "subagent_id": child_session_id,
                     "agent_profile": record.agent_profile,
                     "agent_profile_fingerprint": record.agent_profile_fingerprint,
+                    "round_index": confirmation.get("round_index", 1),
                 })
                 if hasattr(state, "bind_delegation_parent_attempt") and call.get("attempt_id"):
                     state.bind_delegation_parent_attempt(delegation_id, call["attempt_id"])
@@ -1858,6 +2085,11 @@ class DurableToolBoundary:
                         or record.result_hash != result_hash
                         or result_json != str(content)):
                     raise SessionValidationError("领取的后台结果与 State ID/hash 不一致")
+                lifecycle = next((item for item in getattr(state, "child_session_records", [])
+                                  if item.child_session_id == record.subagent_id), None)
+                if (parsed_result.get("round_index") is not None and lifecycle is not None
+                        and parsed_result.get("round_index") != lifecycle.round_index):
+                    raise SessionValidationError("领取结果 round_index 与 child session 不一致")
                 call.update({
                     "child_session_id": record.subagent_id,
                     "delegation_id": record.delegation_id,
@@ -1865,6 +2097,8 @@ class DurableToolBoundary:
                     "delegation_result_hash": result_hash,
                     "agent_profile": record.agent_profile,
                     "agent_profile_fingerprint": record.agent_profile_fingerprint,
+                    **({"round_index": parsed_result["round_index"]}
+                       if parsed_result.get("round_index") is not None else {}),
                 })
         return self._save(state, context)
 

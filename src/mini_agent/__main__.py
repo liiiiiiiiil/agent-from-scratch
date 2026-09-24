@@ -608,6 +608,16 @@ def main():
             return False
         if sync_before_save:
             sync_processes()
+        manager = getattr(run_registry, "_delegation_manager", None)
+        try:
+            child_sessions = (
+                manager.export_child_sessions(state)
+                if manager is not None and hasattr(manager, "export_child_sessions")
+                else []
+            )
+        except ValueError as error:
+            cli_notice(f"会话保存失败：{_single_line_notice(error, 500)}")
+            return False
         try:
             envelope = get_session_store().save(
                 session_id,
@@ -616,6 +626,7 @@ def main():
                 workspace_root=os.getcwd(),
                 handoff_status=handoff_status,
                 save_kind="safe_point",
+                child_sessions=child_sessions,
             )
         except SessionCommitUncertainError as error:
             session_id = error.session_id
@@ -638,6 +649,12 @@ def main():
         return True
 
     if resumed:
+        for issue in runtime.child_session_issues or []:
+            cli_notice(
+                "子会话无法续接："
+                f"child_session_id={issue['child_session_id']}；"
+                f"原因={_single_line_notice(issue['reason'], 300)}。"
+            )
         if recovery_mode == "crash_recovery" or state.has_unresolved_crash_recovery():
             cli_notice(_render_crash_recovery(
                 state, source_session_id=source_session_id,
@@ -762,7 +779,8 @@ def main():
                 cli_notice(
                     "后台子代理已收束："
                     f"child_session_id={event['child_session_id']} "
-                    f"status={event['status']} result_id={event['result_id']}；"
+                    f"round_index={event['round_index']} status={event['status']} "
+                    f"result_id={event['result_id']}；"
                     "请通过 get_subagent_result 领取正文。"
                 )
         if result == "达到最大迭代次数":
@@ -823,7 +841,8 @@ def main():
                 cli_notice(
                     "后台子代理已收束："
                     f"child_session_id={event['child_session_id']} "
-                    f"status={event['status']} result_id={event['result_id']}；"
+                    f"round_index={event['round_index']} status={event['status']} "
+                    f"result_id={event['result_id']}；"
                     "请通过 get_subagent_result 领取正文。"
                 )
 

@@ -13,7 +13,7 @@
 - **配置安全**：真实的 `BASE_URL`、`API_KEY`、`MODEL` 只放本地 `config_local.py`，不得提交到版本库。
 - **异常边界**：工具层/执行器负责把 handler 异常转换为错误结果并回灌模型；核心 agent loop 不对 LLM 或 CLI 顶层异常做兜底。
 - **协议完整**：工具调用必须为每个 call 回灌对应的 `role=tool` 结果；单轮工具结果全部回灌后再进入下一轮。
-- **持久化工具边界**：开启 `/save` 后，schema 3 必须在 handler 前提交 `handler_admitted`，每个 call 的 State、对应 `role=tool` 结果和边界状态必须按模型顺序原子提交；整轮 committed 前不得再次请求 LLM。提交失败不得进入 handler、后续 call 或下一次 LLM 请求；崩溃恢复不得重放 pending call。
+- **持久化工具边界**：开启 `/save` 后，schema 3/4 必须在 handler 前提交 `handler_admitted`，每个 call 的 State、对应 `role=tool` 结果和边界状态必须按模型顺序原子提交；整轮 committed 前不得再次请求 LLM。提交失败不得进入 handler、后续 call 或下一次 LLM 请求；崩溃恢复不得重放 pending call。
 - **Plan Contract**：复杂任务由模型通过 `commit_plan` 提交完整不可变 revision，通过 `update_plan_progress` 追加独立步骤进度事件；简单任务继续 Direct Path。计划校验失败只回灌 `plan_rejected`，不得创建 `FailureEvent`、推进 generation 或产生验证证据；计划写入不替代实际执行和独立 verification。
 - **只读规划与交接**：普通任务可经 `begin_plan` 进入只读调查；`--plan` 任务必须先调查，提交后等待用户批准当前 revision。`exploring` 的副作用、verification 和混合提交在整轮与执行器两层拒绝；批准计划不得绕过 PermissionGate。用户驳回或继续调查的反馈由 CLI 记录，不能由模型伪造。
 - **Shell 副作用分类**：所有 `run_shell` 调用均按可能有副作用处理并在获准后预留 generation；`purpose=verification` 只指定验证证据用途，不把命令降为只读。
@@ -27,7 +27,7 @@
 
 ## 当前状态
 
-稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.48`（进程内后台子代理）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
+稳定基线为 `v0.16.1`（计划驱动执行的完成提醒进展感知补丁）；主线当前开发版本为 `v0.49`（可续接子会话）。新增功能意图记录在对应 `docs/plans/`，只有运行时硬约束变化才更新本文件。
 
 v0.46 MCP 硬约束：`MCP_SERVERS` 中只有显式 `agent_enabled=True` 的配置项才进入父 Agent Runtime；默认 `False` 的 Server 仍只供独立 `python -m mini_agent.mcp` 命令使用。父侧 MCP Tool 通过 Tool Registry、ToolExecutor、PermissionGate 和 `AgentRuntime.run()` 运行，默认 `effect_class="possible"`、默认权限 `ask`，只有同一 Server 的精确 `readonly_tools` 才能降为 `none`，仍须授权且不自动成为 verification evidence。MCP、Resource 和 Prompt 不进入 Subagent。
 配置导入不启动 Server，命令 argv 不经过 shell。Client 固定 MCP `2025-11-25`，必须按 `initialize → notifications/initialized → tools/list → tools/call` 运行，完整读取分页并冻结工具目录；独立 CLI 只有在每次请求前获得交互式明确确认后才发送 `tools/call`。父 Runtime 在新任务和恢复任务中从当前配置重新连接与发现目录，退出、`/new`、`/reset` 和恢复失败都必须有界关闭连接。
@@ -40,7 +40,7 @@ stdio MCP 的 stdout 只允许逐行 UTF-8 JSON-RPC，单条消息最多 1 MiB�
 
 模型绑定硬约束：provider/profile 只能从本地配置解析；父 binding 和子 binding 必须在对应 Runtime 创建前冻结，运行中不得通过全局变量切换模型。`delegate_task` 只能请求获准的本地 `model_profile` 别名，未知或越权别名必须在 HTTP 请求前拒绝；不得自动 provider fallback。State、Context、session、Trace、工具结果和用户可见错误只能保留无凭据的 profile/provider/protocol/fingerprint 来源摘要，不得持久化真实 endpoint、model ID、API key 或认证头。摘要请求必须使用同一 binding 并计入其 usage；provider usage 缺失时保守估算并标记来源。
 
-崩溃恢复硬约束：`active + schema 3 pending tool_boundary` 只能派生新的 session；源 session 保持只读，同一源完整性只能 claim 一次。未进入 handler 的调用补入明确的未执行结果；已准入调用一律记录为不确定事实，不自动重放。所有 issue 必须逐项由用户 `/resolve`；调查只允许获准的无副作用观察，全部 `continue` 后必须重新规划、重新授权并独立验证。恢复期间旧 PID、stdin 和当前验证资格不可继承。
+崩溃恢复硬约束：`active + schema 3/4 pending tool_boundary` 只能派生新的 session；源 session 保持只读，同一源完整性只能 claim 一次。未进入 handler 的调用补入明确的未执行结果；已准入调用一律记录为不确定事实，不自动重放。所有 issue 必须逐项由用户 `/resolve`；调查只允许获准的无副作用观察，全部 `continue` 后必须重新规划、重新授权并独立验证。恢复期间旧 PID、stdin 和当前验证资格不可继承。
 
 完成提醒硬约束：当 active Plan Contract 步骤未完成或仍需验证时，阶段性文本只触发当前
 `progress_marker` 一次 Runtime Notice；计划状态、非计划工具事实、验证证据、
@@ -51,7 +51,7 @@ State 保持一次提醒兼容行为。
 
 活动后台进程属于当前 `task_id`，必须阻止任务进入 `done`；stdin 写入在途时也必须阻止完成。模型无工具调用而进程仍运行或 stdin 写入未收束时使用 `awaiting_process` 交回 CLI；用户恢复前先同步进程。`/new`、`/reset`、EOF、`exit` 和异常退出必须先有界清理当前任务登记的进程及写入线程；清理不完整时保留旧任务并报告具体进程 ID、PID 和原因。管道 stdin 只有显式启用时可写，单次 UTF-8 输入最多 4096 字节，正文不得进入 State、Trace、工具结果、授权提示或终端输出；PTY 不属于当前能力。
 
-`/save` 仍是开启持久化的唯一入口；完整安全点保存当前任务的 State、Context 和会话元数据。持久化工具回合另允许最后一轮的有序结果前缀和待结算 attempt，但只写入 schema 3 的 `tool_boundary`，不作为普通安全点。未结算 attempt、活动进程或在途 stdin 不得保存为 safe point；`active + schema 3 + pending tool_boundary` 只能进入 v0.33 崩溃恢复并派生新 session。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。
+`/save` 仍是开启持久化的唯一入口；完整安全点保存当前任务的 State、Context 和会话元数据。持久化工具回合另允许最后一轮的有序结果前缀和待结算 attempt，但只写入 schema 3/4 的 `tool_boundary`，不作为普通安全点。未结算 attempt、活动进程或在途 stdin 不得保存为 safe point；`active + schema 3/4 + pending tool_boundary` 只能进入崩溃恢复并派生新 session。`clean` 必须在任务进程有界清理完成后提交。`write_process.input` 在会话参数中脱敏；若正文也出现在其他持久化文本中，拒绝保存。替换后同步或锁清理失败必须报告提交状态未确认及 session ID。
 
 子代理硬约束：v0.36 的 `delegate_task` 只能同步创建一个 depth=1 的只读 Subagent；子代理拥有独立 State、Context、运行状态、提示词、冻结 model binding 和固定白名单 PermissionGate，但父子调用同一个 canonical `AgentRuntime.run()`。它只能使用 `calculate`、`read_file`、`list_dir`、`grep`，不继承父 history、权限、Plan、generation 或 verification，不能写文件、运行 shell、操作进程、再次委派或决定父任务完成。子结果只能作为不可信调查材料，evidence 不进入父 `verification_evidence`；父 Agent 独占工作区修改、主计划、权限交互、generation、verification 和完成判定。固定预算、scope gate、结果合同和一次格式修正由子 Runtime policy 强制执行。
 
@@ -88,7 +88,7 @@ LLM 前拒绝且不回退。`tester` 只能分析并建议测试，不能执行�
 恢复和新任务从当前磁盘重新装配 Catalog，不信任 session 中的旧目录快照，也不重新读取历史中
 已经加载的正文；开启 `/save` 后普通工具 history 仍可能保存已加载正文。
 
-进程内后台子代理硬约束：父侧只通过 `spawn_subagent`、`get_subagent_status`、
+进程内后台子代理硬约束：父侧只通过 `spawn_subagent`、`followup_subagent`、`get_subagent_status`、
 `get_subagent_result`、`cancel_subagent` 四个 Tool Registry 工具管理后台只读调查，所有调用仍经过
 ToolExecutor、PermissionGate 和父 Runtime 阶段闸门。启动必须显式指定 `agent_profile`，且
 `purpose="investigation"`；仅 `direct`、`exploring`、`executing` 可启动。`diagnosis` 和
@@ -96,8 +96,8 @@ ToolExecutor、PermissionGate 和父 Runtime 阶段闸门。启动必须显式�
 crash recovery 阶段拒绝后台启动。子代理仍是 depth=1；结果只是不可信调查材料，不产生父侧
 verification evidence。
 
-同一模型回合只能包含一个或多个 `spawn_subagent`，不得混入其他工具。父线程逐 call 准入并按模型
-顺序提交唯一启动确认；schema 3 下每个 call 的 `handler_admitted` 和启动结果必须提交成功，整轮
+同一模型回合只能包含一个或多个 `spawn_subagent` / `followup_subagent`，不得混入其他工具。父线程逐 call 准入并按模型
+顺序提交唯一启动确认；schema 3/4 下每个 call 的 `handler_admitted` 和启动结果必须提交成功，整轮
 `tool_boundary` committed 后才能启动 worker。部分提交、提交失败或整轮提交失败都不得启动任何该轮
 worker。子 worker 只运行独立子 Runtime 并向线程安全完成队列写入有界结果；父线程独占完成收集、
 State 更新、用量结算、通知、结果领取和 session 写入。同步与后台调用共享 `MAX_SUBAGENTS=3`、
@@ -110,11 +110,26 @@ State 更新、用量结算、通知、结果领取和 session 写入。同步�
 退出和异常清理先取消并有界等待；未收束时保留旧任务并报告 ID/原因，已收束但未领取的结果在
 `clean` 前记为 `abandoned`。
 
-`active + schema 3 + committed tool_boundary` 中已持久提交启动确认但没有安全保存的后台结果，恢复时
+`active + schema 3/4 + committed tool_boundary` 中已持久提交启动确认但没有安全保存的后台结果，恢复时
 派生新 session，把后台记录标为 `interrupted`，不恢复旧 worker、不伪造结果 ID/正文，并按预留上限
 保守结算未知用量；对应恢复 issue 必须由用户逐项 `/resolve`。领取结果属于普通父工具调用，session
 必须校验 `child_session_id`、`delegation_id`、`result_id`、结果 hash 与 State 一致。Trace 只回放
 State 中的父侧 lifecycle 摘要，不观察线程或读取子 history。
+
+可续接子会话硬约束：v0.49 只允许在同一父 `task_id`、工作区、角色和模型来源下，续接上一轮
+`completed` 且已由父侧领取的子会话。`followup_subagent` 必须提交完整的新调查合同；调用方不能更换
+角色或模型，每轮 Skill 权限都重新由父 PermissionGate 授权。失败、超时、取消或中断的回合不可续接。
+续接仍是 `spawn_subagent` 类纯后台启动：可与其他启动调用同轮出现，不得混入查询或普通工具；每个确认
+和整轮边界提交成功后才可启动 worker，任一持久提交失败都不启动该轮 worker。
+
+最多 4 轮（含初始轮）；每个子会话累计最多 16 次 LLM 调用、48 次工具调用、64,000 tokens 和 240 秒。
+每轮仍受原 `SubagentBudget` 上限约束，父任务聚合预算和并发槽位仍生效；续接不增加
+`created_subagents`。只有父侧 State lifecycle 保存子会话身份、轮次、预算和结果 ID/hash，不保存子历史正文。
+只有已领取的成功结果可导出快照。schema 4 将父 State、Context、工具边界和所有 idle 子快照放入同一个
+原子安全点；活动或待领取回合不得保存。恢复时从当前本地配置重建角色、模型与 Skill Catalog 并核对指纹；
+快照生成失败仍须交付已完成报告并结算实际用量，该子会话不得续接；同进程 followup 在子 LLM 请求前复核冻结的 Skill 文件身份。
+不兼容的子会话被单独标记并报告原因，不替换模型、不恢复旧 worker，也不重放请求。schema 1/2/3
+仍可读取，schema 3 不含可续接子快照。
 
 ## 架构索引
 

@@ -41,6 +41,15 @@ _PLAN_REFERENCE_LIMIT = 50
 _MISSING = object()
 _DELEGATION_RECORD_LIMIT = 64
 _DELEGATION_SUMMARY_MAX = 1200
+CHILD_SESSION_MAX_ROUNDS = 4
+CHILD_SESSION_MAX_LLM_CALLS = 16
+CHILD_SESSION_MAX_TOOL_CALLS = 48
+CHILD_SESSION_MAX_TOKENS = 64_000
+CHILD_SESSION_MAX_ELAPSED_MS = 240_000
+_CHILD_SESSION_UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
 _MEMORY_WRITE_TOOLS = {"remember", "revise_memory", "forget_memory"}
 _MEMORY_COMMIT_UNCERTAIN = "memory_commit_uncertain"
 
@@ -187,6 +196,78 @@ class DelegationRecord:
     startup_confirmed: bool = False
     claimed_at: str | None = None
     abandoned_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ChildSessionLifecycle:
+    """Metadata-only parent ledger for one resumable child session."""
+
+    child_session_id: str
+    parent_task_id: str
+    workspace_fingerprint: str
+    agent_profile: str
+    agent_profile_fingerprint: str
+    model_binding_ref: dict[str, Any] | None
+    round_index: int
+    status: Literal[
+        "starting", "running", "result_ready", "idle", "closed",
+        "interrupted", "incompatible", "abandoned",
+    ]
+    latest_delegation_id: str
+    result_id: str | None = None
+    result_hash: str | None = None
+    last_claimed_result_id: str | None = None
+    last_claimed_result_hash: str | None = None
+    last_outcome: str | None = None
+    cumulative_usage: DelegationUsage = field(default_factory=DelegationUsage)
+    reserved_usage: DelegationUsage = field(default_factory=DelegationUsage)
+    reserved_elapsed_ms: int = 0
+    diagnostic_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("child_session_id", "parent_task_id", "agent_profile", "latest_delegation_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"child session {name} 无效")
+        if not _CHILD_SESSION_UUID_RE.fullmatch(self.child_session_id):
+            raise ValueError("child session child_session_id 必须是 UUID")
+        for name in (
+            "workspace_fingerprint", "agent_profile_fingerprint",
+            "result_hash", "last_claimed_result_hash",
+        ):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str)
+                                      or not re.fullmatch(r"[0-9a-f]{64}", value)):
+                raise ValueError(f"child session {name} 无效")
+        if isinstance(self.round_index, bool) or not isinstance(self.round_index, int) or not 1 <= self.round_index <= CHILD_SESSION_MAX_ROUNDS:
+            raise ValueError("child session round_index 无效")
+        if self.status not in {
+            "starting", "running", "result_ready", "idle", "closed",
+            "interrupted", "incompatible", "abandoned",
+        }:
+            raise ValueError("child session status 无效")
+        for name in ("result_id", "last_claimed_result_id", "last_outcome", "diagnostic_reason"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"child session {name} 无效")
+        if self.model_binding_ref is not None:
+            if not isinstance(self.model_binding_ref, dict):
+                raise ValueError("child session model_binding_ref 无效")
+            safe_fields = {"provider", "profile", "protocol", "fingerprint"}
+            if set(self.model_binding_ref) != safe_fields:
+                raise ValueError("child session model_binding_ref 字段无效")
+            if not re.fullmatch(r"[0-9a-f]{64}", str(self.model_binding_ref.get("fingerprint", ""))):
+                raise ValueError("child session model binding fingerprint 无效")
+        for name in ("cumulative_usage", "reserved_usage"):
+            value = getattr(self, name)
+            if not isinstance(value, DelegationUsage):
+                raise ValueError(f"child session {name} 无效")
+        if isinstance(self.reserved_elapsed_ms, bool) or not isinstance(self.reserved_elapsed_ms, int) or self.reserved_elapsed_ms < 0:
+            raise ValueError("child session reserved_elapsed_ms 无效")
+
+
+def _child_session_payload(item: ChildSessionLifecycle) -> dict[str, Any]:
+    return asdict(item)
 
 
 def _delegation_record_payload(record: DelegationRecord) -> dict[str, Any]:
@@ -649,6 +730,7 @@ class AgentState:
     crash_issues: list[CrashRecoveryIssue] = field(default_factory=list)
     crash_decisions: list[CrashRecoveryDecision] = field(default_factory=list)
     delegation_records: list[DelegationRecord] = field(default_factory=list)
+    child_session_records: list[ChildSessionLifecycle] = field(default_factory=list)
     delegation_budget: DelegationBudget = field(default_factory=DelegationBudget)
     trace_events: list[TraceEvent] = field(default_factory=list)
     process_records: list[ProcessRecord] = field(default_factory=list)
@@ -1057,7 +1139,7 @@ class AgentState:
         """Gate parent-side delegation lifecycle tools before their handlers."""
         if name not in {
                 "delegate_task", "spawn_subagent", "get_subagent_status",
-                "get_subagent_result", "cancel_subagent"}:
+                "get_subagent_result", "cancel_subagent", "followup_subagent"}:
             return None
         arguments = arguments if isinstance(arguments, dict) else {}
         with self._lock:
@@ -1097,6 +1179,12 @@ class AgentState:
                     return "工具调用拒绝: spawn_subagent 只允许 investigation"
                 if phase not in ("direct", "exploring", "executing"):
                     return "工具调用拒绝: 当前计划阶段不能启动后台调查"
+                return None
+            if name == "followup_subagent":
+                if purpose != "investigation":
+                    return "工具调用拒绝: followup_subagent 只允许 investigation"
+                if phase not in ("direct", "exploring", "executing"):
+                    return "工具调用拒绝: 当前计划阶段不能续接后台调查"
                 return None
             if purpose != "investigation":
                 return "工具调用拒绝: 当前空闲阶段只允许 investigation"
@@ -1329,6 +1417,13 @@ class AgentState:
                 raise ValueError("委派只能从 created 转为 running")
             updated = replace(record, delivery_status="running", started_at=_delegation_now())
             self.delegation_records[index] = updated
+            if record.mode == "background":
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None:
+                    lifecycle = self.child_session_records[lifecycle_index]
+                    if lifecycle.latest_delegation_id == delegation_id and lifecycle.status == "starting":
+                        self.child_session_records[lifecycle_index] = replace(lifecycle, status="running")
             self._append_trace_event_locked(
                 "background_subagent_started" if record.mode == "background"
                 else "delegation_started",
@@ -1350,6 +1445,195 @@ class AgentState:
                 record_id=delegation_id,
             )
             return updated
+
+    def register_child_session(
+        self, task: Any, workspace_fingerprint: str,
+    ) -> ChildSessionLifecycle:
+        """Create the v0.49 metadata ledger for an accepted initial background round."""
+        child_id = str(getattr(task, "subagent_id", ""))
+        with self._lock:
+            if any(item.child_session_id == child_id for item in self.child_session_records):
+                raise ValueError("child_session_id lifecycle 已存在")
+            _, record = self._find_delegation_locked(str(getattr(task, "delegation_id", "")))
+            if record.mode != "background" or record.subagent_id != child_id:
+                raise ValueError("初始子会话必须引用已预留的后台委派")
+            binding_ref = getattr(task, "model_binding_ref", None)
+            lifecycle = ChildSessionLifecycle(
+                child_id, self.task_id, workspace_fingerprint,
+                str(getattr(task, "agent_profile", "")),
+                str(getattr(task, "agent_profile_fingerprint", "")),
+                binding_ref.to_dict() if binding_ref is not None else None,
+                1, "starting", record.delegation_id,
+                cumulative_usage=DelegationUsage(),
+                reserved_usage=record.reserved_usage,
+                reserved_elapsed_ms=int(getattr(task.budget, "timeout_seconds", 0)) * 1000,
+            )
+            self.child_session_records.append(lifecycle)
+            return lifecycle
+
+    def reserve_background_followup(
+        self, task: Any, child_session_id: str, workspace_fingerprint: str,
+    ) -> DelegationRecord:
+        """Atomically admit another round without reserving a new child slot."""
+        usage = DelegationUsage(
+            rounds=int(task.budget.max_rounds),
+            llm_calls=int(task.budget.max_llm_calls),
+            tool_calls=int(task.budget.max_tool_calls),
+            output_tokens=int(task.budget.max_tokens),
+        )
+        timeout_ms = int(task.budget.timeout_seconds) * 1000
+        with self._lock:
+            lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                    if item.child_session_id == child_session_id), None)
+            if lifecycle_index is None:
+                raise ValueError("未知 child_session_id")
+            lifecycle = self.child_session_records[lifecycle_index]
+            if lifecycle.parent_task_id != self.task_id:
+                raise ValueError("child_session_id 属于其他父 task_id")
+            if lifecycle.workspace_fingerprint != workspace_fingerprint:
+                raise ValueError("child_session_id workspace 身份不匹配")
+            if lifecycle.status != "idle" or lifecycle.last_outcome != "completed":
+                raise ValueError("只有已领取的 completed 子会话可以续接")
+            if not lifecycle.last_claimed_result_id or not lifecycle.last_claimed_result_hash:
+                raise ValueError("上一轮结果尚未领取或缺少身份摘要")
+            if lifecycle.round_index >= CHILD_SESSION_MAX_ROUNDS:
+                raise ValueError("子会话已达到 4 轮上限")
+            if task.agent_profile != lifecycle.agent_profile or task.agent_profile_fingerprint != lifecycle.agent_profile_fingerprint:
+                raise ValueError("followup agent_profile 身份发生变化")
+            binding_ref = task.model_binding_ref.to_dict() if task.model_binding_ref is not None else None
+            if binding_ref != lifecycle.model_binding_ref:
+                raise ValueError("followup model binding 身份发生变化")
+            if task.parent_task_id != self.task_id or task.subagent_id != child_session_id:
+                raise ValueError("followup 父任务或子会话 ID 不匹配")
+            if len(self.delegation_records) >= _DELEGATION_RECORD_LIMIT:
+                raise ValueError("委派记录达到有界上限")
+            if any(item.delegation_id == task.delegation_id for item in self.delegation_records):
+                raise ValueError("delegation_id 已存在")
+            if any(item.task_contract_hash == task.contract_hash for item in self.delegation_records):
+                raise ValueError("重复的 followup 合同")
+            if lifecycle.cumulative_usage.llm_calls + usage.llm_calls > CHILD_SESSION_MAX_LLM_CALLS:
+                raise ValueError("子会话累计 LLM 调用预算不足")
+            if lifecycle.cumulative_usage.tool_calls + usage.tool_calls > CHILD_SESSION_MAX_TOOL_CALLS:
+                raise ValueError("子会话累计工具调用预算不足")
+            if lifecycle.cumulative_usage.tokens + usage.tokens > CHILD_SESSION_MAX_TOKENS:
+                raise ValueError("子会话累计 token 预算不足")
+            if lifecycle.cumulative_usage.elapsed_ms + timeout_ms > CHILD_SESSION_MAX_ELAPSED_MS:
+                raise ValueError("子会话累计时间预算不足")
+            parent_budget = self.delegation_budget
+            if usage.llm_calls > parent_budget.remaining_llm_calls:
+                raise ValueError("父任务 max_total_llm_calls 预算不足")
+            if usage.tool_calls > parent_budget.remaining_tool_calls:
+                raise ValueError("父任务 max_total_tool_calls 预算不足")
+            if usage.tokens > parent_budget.remaining_tokens:
+                raise ValueError("父任务 max_total_tokens 预算不足")
+            updated_lifecycle = replace(
+                lifecycle, round_index=lifecycle.round_index + 1,
+                status="starting", latest_delegation_id=task.delegation_id,
+                result_id=None, result_hash=None,
+                reserved_usage=usage, reserved_elapsed_ms=timeout_ms,
+            )
+            record = DelegationRecord(
+                task.delegation_id, child_session_id, self.task_id,
+                int(getattr(task, "parent_generation_id", self._verification_generation)),
+                task.contract_hash, delivery_status="created", outcome="pending",
+                created_at=_delegation_now(), contract_summary=self._delegation_summary(task),
+                reserved_usage=usage, agent_profile=task.agent_profile,
+                agent_profile_fingerprint=task.agent_profile_fingerprint,
+                mode="background",
+            )
+            self.child_session_records[lifecycle_index] = updated_lifecycle
+            self.delegation_records.append(record)
+            self.delegation_budget = replace(
+                parent_budget,
+                reserved_llm_calls=parent_budget.reserved_llm_calls + usage.llm_calls,
+                reserved_tool_calls=parent_budget.reserved_tool_calls + usage.tool_calls,
+                reserved_tokens=parent_budget.reserved_tokens + usage.tokens,
+            )
+            self._append_trace_event_locked(
+                "background_subagent_followup_created", record_type="delegation",
+                record_id=record.delegation_id,
+            )
+            return record
+
+    def _background_record_is_followup_locked(self, record: DelegationRecord) -> bool:
+        """Whether an admitted background round belongs to an existing child slot."""
+        prior_child_record = False
+        for item in self.delegation_records:
+            if item.delegation_id == record.delegation_id:
+                return prior_child_record
+            if item.mode == "background" and item.subagent_id == record.subagent_id:
+                prior_child_record = True
+        return prior_child_record
+
+    def validate_background_followup(
+        self, task: Any, child_session_id: str, workspace_fingerprint: str,
+    ) -> None:
+        """Read-only preflight used by the tool argument validator."""
+        usage = DelegationUsage(
+            rounds=int(task.budget.max_rounds),
+            llm_calls=int(task.budget.max_llm_calls),
+            tool_calls=int(task.budget.max_tool_calls),
+            output_tokens=int(task.budget.max_tokens),
+        )
+        timeout_ms = int(task.budget.timeout_seconds) * 1000
+        with self._lock:
+            lifecycle = next((item for item in self.child_session_records
+                              if item.child_session_id == child_session_id), None)
+            if lifecycle is None:
+                raise ValueError("未知 child_session_id")
+            if lifecycle.parent_task_id != self.task_id:
+                raise ValueError("child_session_id 属于其他父 task_id")
+            if lifecycle.workspace_fingerprint != workspace_fingerprint:
+                raise ValueError("child_session_id workspace 身份不匹配")
+            if lifecycle.status != "idle" or lifecycle.last_outcome != "completed":
+                raise ValueError("只有已领取的 completed 子会话可以续接")
+            if not lifecycle.last_claimed_result_id or not lifecycle.last_claimed_result_hash:
+                raise ValueError("上一轮结果尚未领取或缺少身份摘要")
+            if lifecycle.round_index >= CHILD_SESSION_MAX_ROUNDS:
+                raise ValueError("子会话已达到 4 轮上限")
+            if task.agent_profile != lifecycle.agent_profile or task.agent_profile_fingerprint != lifecycle.agent_profile_fingerprint:
+                raise ValueError("followup agent_profile 身份发生变化")
+            binding_ref = task.model_binding_ref.to_dict() if task.model_binding_ref is not None else None
+            if binding_ref != lifecycle.model_binding_ref:
+                raise ValueError("followup model binding 身份发生变化")
+            if task.parent_task_id != self.task_id or task.subagent_id != child_session_id:
+                raise ValueError("followup 父任务或子会话 ID 不匹配")
+            if lifecycle.cumulative_usage.llm_calls + usage.llm_calls > CHILD_SESSION_MAX_LLM_CALLS:
+                raise ValueError("子会话累计 LLM 调用预算不足")
+            if lifecycle.cumulative_usage.tool_calls + usage.tool_calls > CHILD_SESSION_MAX_TOOL_CALLS:
+                raise ValueError("子会话累计工具调用预算不足")
+            if lifecycle.cumulative_usage.tokens + usage.tokens > CHILD_SESSION_MAX_TOKENS:
+                raise ValueError("子会话累计 token 预算不足")
+            if lifecycle.cumulative_usage.elapsed_ms + timeout_ms > CHILD_SESSION_MAX_ELAPSED_MS:
+                raise ValueError("子会话累计时间预算不足")
+            parent_budget = self.delegation_budget
+            if usage.llm_calls > parent_budget.remaining_llm_calls:
+                raise ValueError("父任务 max_total_llm_calls 预算不足")
+            if usage.tool_calls > parent_budget.remaining_tool_calls:
+                raise ValueError("父任务 max_total_tool_calls 预算不足")
+            if usage.tokens > parent_budget.remaining_tokens:
+                raise ValueError("父任务 max_total_tokens 预算不足")
+
+    def child_session_snapshot_records(self) -> list[ChildSessionLifecycle]:
+        with self._lock:
+            return list(self.child_session_records)
+
+    def mark_child_session_incompatible(self, child_session_id: str, reason: str) -> None:
+        with self._lock:
+            index = next((i for i, item in enumerate(self.child_session_records)
+                          if item.child_session_id == child_session_id), None)
+            if index is None:
+                return
+            lifecycle = self.child_session_records[index]
+            if lifecycle.status not in {"idle", "closed", "incompatible"}:
+                raise ValueError("活动 child session 不能标记为 incompatible")
+            self.child_session_records[index] = replace(
+                lifecycle, status="incompatible", diagnostic_reason=str(reason)[:500],
+            )
+            self._append_trace_event_locked(
+                "child_session_incompatible", record_type="child_session",
+                record_id=child_session_id,
+            )
 
     def _find_delegation_locked(self, delegation_id: str) -> tuple[int, DelegationRecord]:
         for index, record in enumerate(self.delegation_records):
@@ -1396,7 +1680,10 @@ class AgentState:
             budget = self.delegation_budget
             self.delegation_budget = replace(
                 budget,
-                reserved_subagents=max(0, budget.reserved_subagents - 1),
+                reserved_subagents=max(
+                    0, budget.reserved_subagents
+                    - (0 if self._background_record_is_followup_locked(record) else 1),
+                ),
                 reserved_llm_calls=max(0, budget.reserved_llm_calls - reserved.llm_calls),
                 reserved_tool_calls=max(0, budget.reserved_tool_calls - reserved.tool_calls),
                 reserved_tokens=max(0, budget.reserved_tokens - reserved.tokens),
@@ -1417,6 +1704,37 @@ class AgentState:
                 progress_hash=progress_hash,
             )
             self.delegation_records[index] = updated
+            if record.mode == "background":
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is None:
+                    raise ValueError("后台结果缺少 child session lifecycle")
+                lifecycle = self.child_session_records[lifecycle_index]
+                if lifecycle.latest_delegation_id != delegation_id:
+                    raise ValueError("后台结果不属于 child session 最新回合")
+                round_index = raw.get("round_index")
+                if round_index is not None and round_index != lifecycle.round_index:
+                    raise ValueError("后台结果 round_index 与 child session 不一致")
+                prior = lifecycle.cumulative_usage
+                self.child_session_records[lifecycle_index] = replace(
+                    lifecycle, status="result_ready", result_id=updated.result_id,
+                    result_hash=updated.result_hash, last_outcome=outcome,
+                    cumulative_usage=DelegationUsage(
+                        rounds=prior.rounds + usage.rounds,
+                        llm_calls=prior.llm_calls + usage.llm_calls,
+                        tool_calls=prior.tool_calls + usage.tool_calls,
+                        input_tokens=prior.input_tokens + usage.input_tokens,
+                        output_tokens=prior.output_tokens + usage.output_tokens,
+                        token_accounting=(
+                            usage.token_accounting if prior.rounds == 0
+                            else usage.token_accounting if prior.token_accounting == usage.token_accounting
+                            else "mixed"
+                        ),
+                        result_bytes=prior.result_bytes + usage.result_bytes,
+                        elapsed_ms=prior.elapsed_ms + usage.elapsed_ms,
+                    ),
+                    reserved_usage=DelegationUsage(), reserved_elapsed_ms=0,
+                )
             self._append_trace_event_locked(
                 "background_subagent_result_ready" if record.mode == "background"
                 else "delegation_result_ready",
@@ -1442,6 +1760,20 @@ class AgentState:
                 claimed_at=_delegation_now() if record.mode == "background" else None,
             )
             self.delegation_records[index] = updated
+            if record.mode == "background":
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None:
+                    lifecycle = self.child_session_records[lifecycle_index]
+                    if lifecycle.latest_delegation_id == delegation_id:
+                        self.child_session_records[lifecycle_index] = replace(
+                            lifecycle,
+                            status=("idle" if lifecycle.last_outcome == "completed"
+                                    and record.diagnostic_reason != "snapshot_unavailable"
+                                    else "closed"),
+                            last_claimed_result_id=record.result_id,
+                            last_claimed_result_hash=record.result_hash,
+                        )
             self._append_trace_event_locked(
                 "background_subagent_claimed" if record.mode == "background"
                 else "delegation_committed",
@@ -1493,7 +1825,10 @@ class AgentState:
             prior_usage = record.usage if record.delivery_status == "result_ready" else DelegationUsage()
             self.delegation_budget = replace(
                 budget,
-                reserved_subagents=max(0, budget.reserved_subagents - (1 if was_reserved else 0)),
+                reserved_subagents=max(
+                    0, budget.reserved_subagents
+                    - (1 if was_reserved and not self._background_record_is_followup_locked(record) else 0),
+                ),
                 reserved_llm_calls=max(0, budget.reserved_llm_calls - (reserved.llm_calls if was_reserved else 0)),
                 reserved_tool_calls=max(0, budget.reserved_tool_calls - (reserved.tool_calls if was_reserved else 0)),
                 reserved_tokens=max(0, budget.reserved_tokens - (reserved.tokens if was_reserved else 0)),
@@ -1511,6 +1846,18 @@ class AgentState:
                 result_summary="调查中断；未恢复旧子代理",
             )
             self.delegation_records[index] = updated
+            if record.mode == "background":
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None:
+                    lifecycle = self.child_session_records[lifecycle_index]
+                    if lifecycle.latest_delegation_id == delegation_id:
+                        self.child_session_records[lifecycle_index] = replace(
+                            lifecycle, status="interrupted", last_outcome="failed",
+                            result_id=None, result_hash=None,
+                            reserved_usage=DelegationUsage(), reserved_elapsed_ms=0,
+                            diagnostic_reason=str(reason)[:500],
+                        )
             self._append_trace_event_locked(
                 "background_subagent_interrupted" if record.mode == "background"
                 else "delegation_interrupted",
@@ -1536,6 +1883,13 @@ class AgentState:
                 diagnostic_reason=str(reason)[:400],
             )
             self.delegation_records[index] = updated
+            lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                    if item.child_session_id == record.subagent_id), None)
+            if lifecycle_index is not None:
+                self.child_session_records[lifecycle_index] = replace(
+                    self.child_session_records[lifecycle_index], status="abandoned",
+                    diagnostic_reason=str(reason)[:400],
+                )
             self._append_trace_event_locked(
                 "background_subagent_abandoned", record_type="delegation",
                 record_id=delegation_id,
@@ -1560,6 +1914,13 @@ class AgentState:
                     record, delivery_status="abandoned", abandoned_at=_delegation_now(),
                     diagnostic_reason="父任务边界关闭时结果未领取",
                 )
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None:
+                    self.child_session_records[lifecycle_index] = replace(
+                        self.child_session_records[lifecycle_index], status="abandoned",
+                        diagnostic_reason="父任务边界关闭时结果未领取",
+                    )
                 self._append_trace_event_locked(
                     "background_subagent_abandoned", record_type="delegation",
                     record_id=record.delegation_id,
@@ -1580,6 +1941,12 @@ class AgentState:
                         or current.delivery_status != "abandoned"):
                     raise RuntimeError("后台结果放弃期间委派记录发生变化，不能回滚")
                 self.delegation_records[index] = record
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None and self.child_session_records[lifecycle_index].status == "abandoned":
+                    self.child_session_records[lifecycle_index] = replace(
+                        self.child_session_records[lifecycle_index], status="result_ready",
+                    )
             del self.trace_events[trace_length:]
             self._next_trace_sequence = next_sequence
             self._stagnation_progress_marker = marker
@@ -1596,8 +1963,14 @@ class AgentState:
             budget = self.delegation_budget
             self.delegation_budget = replace(
                 budget,
-                created_subagents=max(0, budget.created_subagents - 1),
-                reserved_subagents=max(0, budget.reserved_subagents - 1),
+                created_subagents=max(
+                    0, budget.created_subagents
+                    - (0 if self._background_record_is_followup_locked(record) else 1),
+                ),
+                reserved_subagents=max(
+                    0, budget.reserved_subagents
+                    - (0 if self._background_record_is_followup_locked(record) else 1),
+                ),
                 reserved_llm_calls=max(0, budget.reserved_llm_calls - reserved.llm_calls),
                 reserved_tool_calls=max(0, budget.reserved_tool_calls - reserved.tool_calls),
                 reserved_tokens=max(0, budget.reserved_tokens - reserved.tokens),
@@ -1609,6 +1982,18 @@ class AgentState:
                 result_summary="启动确认回合未提交；worker 未启动",
             )
             self.delegation_records[index] = updated
+            if record.mode == "background":
+                lifecycle_index = next((i for i, item in enumerate(self.child_session_records)
+                                        if item.child_session_id == record.subagent_id), None)
+                if lifecycle_index is not None:
+                    lifecycle = self.child_session_records[lifecycle_index]
+                    if lifecycle.latest_delegation_id == delegation_id:
+                        self.child_session_records[lifecycle_index] = replace(
+                            lifecycle, status="interrupted", last_outcome="cancelled",
+                            result_id=None, result_hash=None,
+                            reserved_usage=DelegationUsage(), reserved_elapsed_ms=0,
+                            diagnostic_reason=str(reason)[:500],
+                        )
             self._append_trace_event_locked(
                 "background_subagent_never_started", record_type="delegation",
                 record_id=delegation_id,
@@ -1708,7 +2093,9 @@ class AgentState:
         created/running records are closed as interruption facts and their
         pending budget is charged conservatively.
         """
-        pending = [item for item in calls if item.get("tool") in {"delegate_task", "spawn_subagent"}
+        pending = [item for item in calls if item.get("tool") in {
+            "delegate_task", "spawn_subagent", "followup_subagent",
+        }
                    and item.get("status") == "pending"]
         if not pending:
             return
@@ -4032,6 +4419,7 @@ class AgentState:
             self.failures.clear(); self.recovery_actions.clear(); self.recovery_notice = ""
             self.crash_recoveries.clear(); self.crash_issues.clear(); self.crash_decisions.clear()
             self.delegation_records.clear()
+            self.child_session_records.clear()
             self.delegation_budget = replace(
                 self.delegation_budget,
                 created_subagents=0, reserved_subagents=0,
@@ -4299,7 +4687,7 @@ class AgentState:
 
             payload = {
                 "format": "mini_agent.state",
-                "format_version": 2,
+                "format_version": 3,
                 "task": self.task,
                 "task_id": self.task_id,
                 "tool_history": deepcopy(self.tool_history),
@@ -4323,6 +4711,7 @@ class AgentState:
                 "crash_issues": [asdict(item) for item in self.crash_issues],
                 "crash_decisions": [asdict(item) for item in self.crash_decisions],
                 "delegation_records": [_delegation_record_payload(item) for item in self.delegation_records],
+                "child_session_records": [asdict(item) for item in self.child_session_records],
                 "delegation_budget": asdict(self.delegation_budget),
                 "trace_events": [asdict(item) for item in self.trace_events],
                 "process_records": [asdict(item) for item in self.process_records],
@@ -4401,7 +4790,7 @@ class AgentState:
         if (payload.get("format") != "mini_agent.state"
                 or isinstance(format_version, bool)
                 or not isinstance(format_version, int)
-                or format_version not in (1, 2)):
+                or format_version not in (1, 2, 3)):
             raise SessionExportError("未知或不支持的 State 导出版本")
 
         def require_type(name: str, expected: type | tuple[type, ...]) -> Any:
@@ -4425,8 +4814,12 @@ class AgentState:
             "crash_recoveries", "crash_issues", "crash_decisions",
             "delegation_records",
         )
-        optional_v1_lists = {"crash_recoveries", "crash_issues", "crash_decisions", "delegation_records"}
+        if format_version >= 3:
+            list_names = (*list_names, "child_session_records")
+        optional_v1_lists = {"crash_recoveries", "crash_issues", "crash_decisions", "delegation_records", "child_session_records"}
         for name in list_names:
+            if name == "child_session_records" and format_version < 3:
+                continue
             if name in optional_v1_lists and format_version == 1 and name not in payload:
                 continue
             require_type(name, list)
@@ -4553,6 +4946,75 @@ class AgentState:
             if delegation_budget.get("reserved_tokens", 0) < reserved_totals["tokens"]:
                 raise SessionExportError("delegation budget.reserved_tokens 小于活动委派预留")
 
+        if format_version >= 3:
+            child_sessions = payload.get("child_session_records", [])
+            if not isinstance(child_sessions, list) or len(child_sessions) > MAX_SUBAGENTS:
+                raise SessionExportError("child_session_records 数量无效")
+            background_by_child: dict[str, list[dict[str, Any]]] = {}
+            for delegation in delegation_records:
+                if delegation.get("mode", "synchronous") == "background":
+                    background_by_child.setdefault(delegation.get("subagent_id", ""), []).append(delegation)
+            seen_children: set[str] = set()
+            for raw in child_sessions:
+                if not isinstance(raw, dict):
+                    raise SessionExportError("child_session_records 含非 object 记录")
+                try:
+                    lifecycle = ChildSessionLifecycle(
+                        **{
+                            **raw,
+                            "cumulative_usage": DelegationUsage.from_value(raw.get("cumulative_usage", {})),
+                            "reserved_usage": DelegationUsage.from_value(raw.get("reserved_usage", {})),
+                        }
+                    )
+                except (TypeError, ValueError) as error:
+                    raise SessionExportError(f"child session lifecycle 无效: {error}") from error
+                if lifecycle.child_session_id in seen_children:
+                    raise SessionExportError("child_session_id lifecycle 重复")
+                seen_children.add(lifecycle.child_session_id)
+                if lifecycle.parent_task_id != task_id:
+                    raise SessionExportError("child session parent_task_id 不一致")
+                records = background_by_child.get(lifecycle.child_session_id, [])
+                if len(records) != lifecycle.round_index:
+                    raise SessionExportError("child session round_index 与父委派记录不连续")
+                latest = next((item for item in records
+                               if item.get("delegation_id") == lifecycle.latest_delegation_id), None)
+                if latest is None or records[-1] is not latest:
+                    raise SessionExportError("child session latest_delegation_id 不匹配")
+                if (latest.get("agent_profile") != lifecycle.agent_profile
+                        or latest.get("agent_profile_fingerprint") != lifecycle.agent_profile_fingerprint):
+                    raise SessionExportError("child session 角色来源摘要不匹配")
+                if lifecycle.status == "idle":
+                    if (latest.get("delivery_status") != "committed"
+                            or latest.get("outcome") != "completed"
+                            or lifecycle.last_outcome != "completed"
+                            or lifecycle.result_id != lifecycle.last_claimed_result_id
+                            or lifecycle.result_hash != lifecycle.last_claimed_result_hash
+                            or lifecycle.result_id != latest.get("result_id")
+                            or lifecycle.result_hash != latest.get("result_hash")):
+                        raise SessionExportError("idle child session 缺少已领取的 completed 结果")
+                elif lifecycle.status == "result_ready":
+                    if (latest.get("delivery_status") != "result_ready"
+                            or lifecycle.result_id != latest.get("result_id")
+                            or lifecycle.result_hash != latest.get("result_hash")):
+                        raise SessionExportError("result_ready child session 与父结果不匹配")
+                elif lifecycle.status in {"starting", "running"}:
+                    if latest.get("delivery_status") not in {"created", "running"}:
+                        raise SessionExportError("活动 child session 与父委派状态不匹配")
+                if lifecycle.status in {"starting", "running", "result_ready"} and (
+                        not allow_pending and lifecycle.status != "result_ready"):
+                    raise SessionExportError("safe point 不能包含活动 child session")
+                cumulative = lifecycle.cumulative_usage
+                if (cumulative.llm_calls > CHILD_SESSION_MAX_LLM_CALLS
+                        or cumulative.tool_calls > CHILD_SESSION_MAX_TOOL_CALLS
+                        or cumulative.tokens > CHILD_SESSION_MAX_TOKENS
+                        or cumulative.elapsed_ms > CHILD_SESSION_MAX_ELAPSED_MS):
+                    raise SessionExportError("child session 累计用量超过固定上限")
+                if (cumulative.llm_calls + lifecycle.reserved_usage.llm_calls > CHILD_SESSION_MAX_LLM_CALLS
+                        or cumulative.tool_calls + lifecycle.reserved_usage.tool_calls > CHILD_SESSION_MAX_TOOL_CALLS
+                        or cumulative.tokens + lifecycle.reserved_usage.tokens > CHILD_SESSION_MAX_TOKENS
+                        or cumulative.elapsed_ms + lifecycle.reserved_elapsed_ms > CHILD_SESSION_MAX_ELAPSED_MS):
+                    raise SessionExportError("child session 累计预留超过固定上限")
+
         required_private = {
             "verification_generation", "last_verified_generation", "verification_required",
             "next_attempt", "next_failure", "next_plan_revision", "next_plan_progress",
@@ -4563,7 +5025,7 @@ class AgentState:
             "pending_process_controls", "pending_attempts", "revision_attempt_boundaries",
         }
         optional_v1_private = {"next_crash_recovery", "next_crash_issue", "next_crash_decision"}
-        if format_version == 2:
+        if format_version >= 2:
             required_private.update(optional_v1_private)
         missing_private = sorted(required_private - set(private))
         if missing_private:
@@ -4764,7 +5226,7 @@ class AgentState:
             "next_plan_decision", "next_plan_trigger", "next_recovery", "next_trace_sequence",
             "next_task_id", "next_process_event", "repair_cycles", "reserved_repair_cycles",
         )
-        if format_version == 2:
+        if format_version >= 2:
             counters = counters + ("next_crash_recovery", "next_crash_issue", "next_crash_decision")
         for name in counters:
             if (not isinstance(private.get(name), int) or isinstance(private[name], bool)
@@ -5237,6 +5699,20 @@ class AgentState:
                 raw.get("mode", "synchronous"), raw.get("startup_confirmed", False),
                 raw.get("claimed_at"), raw.get("abandoned_at"),
             ))
+        child_session_records = []
+        for raw in payload.get("child_session_records", []):
+            child_session_records.append(ChildSessionLifecycle(
+                raw["child_session_id"], raw["parent_task_id"],
+                raw["workspace_fingerprint"], raw["agent_profile"],
+                raw["agent_profile_fingerprint"], deepcopy(raw.get("model_binding_ref")),
+                raw["round_index"], raw["status"], raw["latest_delegation_id"],
+                raw.get("result_id"), raw.get("result_hash"),
+                raw.get("last_claimed_result_id"), raw.get("last_claimed_result_hash"),
+                raw.get("last_outcome"),
+                DelegationUsage.from_value(raw.get("cumulative_usage", {})),
+                DelegationUsage.from_value(raw.get("reserved_usage", {})),
+                raw.get("reserved_elapsed_ms", 0), raw.get("diagnostic_reason"),
+            ))
         raw_budget = payload.get("delegation_budget") or {}
         delegation_budget = DelegationBudget(**{
             key: raw_budget[key] for key in (
@@ -5259,6 +5735,7 @@ class AgentState:
             crash_recoveries=crash_recoveries, crash_issues=crash_issues,
             crash_decisions=crash_decisions,
             delegation_records=delegation_records,
+            child_session_records=child_session_records,
             delegation_budget=delegation_budget,
             process_records=process_records, process_events=process_events,
             awaiting_process=awaiting, recovery_notice=payload["recovery_notice"],

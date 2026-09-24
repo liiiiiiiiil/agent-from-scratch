@@ -121,6 +121,7 @@ def test_clean_schema2_claim_upgrades_the_active_commit_to_schema3(tmp_path: Pat
     legacy = json.loads(path.read_text(encoding="utf-8"))
     legacy["schema_version"] = 2
     legacy.pop("tool_boundary")
+    legacy.pop("child_sessions")
     without_integrity = {key: value for key, value in legacy.items() if key != "integrity"}
     legacy["integrity"] = {
         "algorithm": "sha256",
@@ -132,9 +133,33 @@ def test_clean_schema2_claim_upgrades_the_active_commit_to_schema3(tmp_path: Pat
 
     runtime = prepare_resume(store, envelope["session_id"], workspace).claim()
     upgraded = store.load(envelope["session_id"])
-    assert upgraded["schema_version"] == 3
+    assert upgraded["schema_version"] == 4
+    assert upgraded["child_sessions"] == []
     assert upgraded["handoff_status"] == "active"
     assert upgraded["tool_boundary"]["status"] == "committed"
+    assert runtime.state.task == "resume this task"
+
+
+def test_clean_schema3_safe_point_remains_resumable_after_schema4_upgrade(tmp_path: Path):
+    workspace, store, _, envelope = _make_session(tmp_path)
+    path = store.path_for(envelope["session_id"])
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 3
+    legacy.pop("child_sessions")
+    without_integrity = {key: value for key, value in legacy.items() if key != "integrity"}
+    legacy["integrity"] = {
+        "algorithm": "sha256",
+        "sha256": hashlib.sha256(
+            json.dumps(without_integrity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    runtime = prepare_resume(store, envelope["session_id"], workspace).claim()
+    upgraded = store.load(envelope["session_id"])
+    assert upgraded["schema_version"] == 4
+    assert upgraded["child_sessions"] == []
+    assert upgraded["handoff_status"] == "active"
     assert runtime.state.task == "resume this task"
 
 
@@ -367,6 +392,7 @@ def test_schema1_active_corrupt_and_lock_contention_never_build_a_runtime(tmp_pa
     legacy.pop("session_generation")
     legacy.pop("workspace_manifest")
     legacy.pop("tool_boundary")
+    legacy.pop("child_sessions")
     legacy["schema_version"] = 1
     without_integrity = {key: value for key, value in legacy.items() if key != "integrity"}
     legacy["integrity"] = {

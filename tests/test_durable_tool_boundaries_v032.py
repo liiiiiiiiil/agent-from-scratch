@@ -63,7 +63,7 @@ def test_round_writes_pending_admission_result_and_complete_commits(tmp_path: Pa
         assert agent_loop(context, executor) == "done"
 
     saved = store.load(envelope["session_id"])
-    assert saved["schema_version"] == 3
+    assert saved["schema_version"] == 4
     boundary = saved["tool_boundary"]
     assert boundary["status"] == "committed"
     assert boundary["calls"][0]["status"] == "committed"

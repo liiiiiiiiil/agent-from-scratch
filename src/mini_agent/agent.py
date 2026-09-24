@@ -337,12 +337,13 @@ class ParentRuntimePolicy:
                         "delegation_batch_gate",
                     )
 
-        has_background_spawn = any(name == "spawn_subagent" for name, _ in parsed_calls)
+        background_starters = {"spawn_subagent", "followup_subagent"}
+        has_background_spawn = any(name in background_starters for name, _ in parsed_calls)
         pure_background_spawn = has_background_spawn and all(
-            name == "spawn_subagent" for name, _ in parsed_calls
+            name in background_starters for name, _ in parsed_calls
         )
         if has_background_spawn and not pure_background_spawn:
-            detail = "工具调用拒绝: spawn_subagent 只能与同一回合中的其他 spawn_subagent 一起提交"
+            detail = "工具调用拒绝: 后台子代理启动只能与同一回合中的其他启动调用一起提交"
             for index in range(len(parsed_calls)):
                 if index not in rejections:
                     rejections[index] = self._rejection(
@@ -351,6 +352,19 @@ class ParentRuntimePolicy:
                                     "message": detail}, ensure_ascii=False),
                         "background_spawn_batch_gate",
                     )
+        followup_by_child: dict[str, list[int]] = {}
+        for index, (name, arguments) in enumerate(parsed_calls):
+            child_id = arguments.get("child_session_id") if isinstance(arguments, dict) else None
+            if name == "followup_subagent" and isinstance(child_id, str):
+                followup_by_child.setdefault(child_id, []).append(index)
+        for indexes in followup_by_child.values():
+            if len(indexes) > 1:
+                detail = "工具调用拒绝: 同一工具回合不能重复续接相同 child_session_id"
+                for index in indexes:
+                    if index not in rejections:
+                        rejections[index] = self._rejection(
+                            runtime, index, detail, "duplicate_child_session_followup",
+                        )
 
         has_other_possible = any(
             effect == "possible" and not (

@@ -34,7 +34,12 @@ from mini_agent.prompt import build_subagent_prompt
 from mini_agent.providers.base import ProviderResponse
 from mini_agent.providers.catalog import ModelBinding, ModelBindingRef, ProviderCatalog
 from mini_agent.runtime import AgentRuntime, RuntimeDecision, ToolRoundPlan
-from mini_agent.state import AgentState, MAX_CONCURRENCY
+from mini_agent.state import (
+    AgentState, MAX_CONCURRENCY, delegation_result_hash,
+    CHILD_SESSION_MAX_ELAPSED_MS, CHILD_SESSION_MAX_LLM_CALLS,
+    CHILD_SESSION_MAX_ROUNDS, CHILD_SESSION_MAX_TOKENS,
+    CHILD_SESSION_MAX_TOOL_CALLS,
+)
 from mini_agent.tools.base import (
     ExecutionResult,
     ToolExecutor,
@@ -57,7 +62,14 @@ DELEGATION_MAX_LLM_CALLS = 8
 DELEGATION_MAX_TOOL_CALLS = 24
 DELEGATION_MAX_TOKENS = 32_000
 DELEGATION_MAX_TIMEOUT = 120
+CHILD_SESSION_MAX_SNAPSHOT_BYTES = 256 * 1024
+CHILD_SESSION_MAX_TOTAL_SNAPSHOT_BYTES = 720 * 1024
+CHILD_SESSION_MAX_OBSERVATIONS = 256
 _HASH_RE = re.compile(r"\A[0-9a-fA-F]{64}\Z")
+_UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
 _SENSITIVE_RE = re.compile(
     r"(?i)(api[_ -]?key|authorization|bearer\s+|access[_ -]?token|secret[_ -]?key|password|\btoken\b|\bsecret\b)"
 )
@@ -657,6 +669,7 @@ class SubagentResult:
     binding_fingerprint: str | None = None
     agent_profile: str | None = None
     agent_profile_fingerprint: str | None = None
+    round_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -680,10 +693,86 @@ class SubagentResult:
             **({"agent_profile": self.agent_profile} if self.agent_profile else {}),
             **({"agent_profile_fingerprint": self.agent_profile_fingerprint}
                if self.agent_profile_fingerprint else {}),
+            **({"round_index": self.round_index} if self.round_index is not None else {}),
         }
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class ChildSessionSnapshot:
+    """Private, bounded child Context checkpoint attached to a parent safe point."""
+
+    child_session_id: str
+    parent_task_id: str
+    workspace_fingerprint: str
+    agent_profile: str
+    agent_profile_fingerprint: str
+    model_binding_ref: dict[str, str] | None
+    skill_identities: tuple[dict[str, str], ...]
+    round_index: int
+    cumulative_usage: UsageRecord
+    last_claimed_result_id: str
+    last_claimed_result_hash: str
+    last_result_json: str
+    observations: tuple[dict[str, Any], ...]
+    context: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": "mini_agent.child_session", "format_version": 1,
+            "child_session_id": self.child_session_id,
+            "parent_task_id": self.parent_task_id,
+            "workspace_fingerprint": self.workspace_fingerprint,
+            "agent_profile": self.agent_profile,
+            "agent_profile_fingerprint": self.agent_profile_fingerprint,
+            "model_binding_ref": deepcopy(self.model_binding_ref),
+            "skill_identities": [deepcopy(item) for item in self.skill_identities],
+            "round_index": self.round_index,
+            "cumulative_usage": self.cumulative_usage.to_dict(),
+            "last_claimed_result_id": self.last_claimed_result_id,
+            "last_claimed_result_hash": self.last_claimed_result_hash,
+            "last_result_json": self.last_result_json,
+            "observations": [deepcopy(item) for item in self.observations],
+            "context": deepcopy(self.context),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "ChildSessionSnapshot":
+        if not isinstance(value, dict) or value.get("format") != "mini_agent.child_session" or value.get("format_version") != 1:
+            raise DelegationError("child session 快照格式无效")
+        try:
+            snapshot = cls(
+                value["child_session_id"], value["parent_task_id"],
+                value["workspace_fingerprint"], value["agent_profile"],
+                value["agent_profile_fingerprint"], deepcopy(value.get("model_binding_ref")),
+                tuple(deepcopy(value.get("skill_identities", []))),
+                value["round_index"], UsageRecord(**value["cumulative_usage"]),
+                value["last_claimed_result_id"], value["last_claimed_result_hash"],
+                value["last_result_json"], tuple(deepcopy(value.get("observations", []))),
+                deepcopy(value["context"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise DelegationError(f"child session 快照字段无效: {error}") from error
+        if (not isinstance(snapshot.child_session_id, str)
+                or not _UUID_RE.fullmatch(snapshot.child_session_id)
+                or isinstance(snapshot.round_index, bool)
+                or not isinstance(snapshot.round_index, int)
+                or not 1 <= snapshot.round_index <= CHILD_SESSION_MAX_ROUNDS
+                or not _HASH_RE.fullmatch(snapshot.workspace_fingerprint)
+                or not _HASH_RE.fullmatch(snapshot.agent_profile_fingerprint)
+                or not _HASH_RE.fullmatch(snapshot.last_claimed_result_hash)):
+            raise DelegationError("child session 快照身份或轮次无效")
+        if delegation_result_hash(json.loads(snapshot.last_result_json)) != snapshot.last_claimed_result_hash:
+            raise DelegationError("child session 最近结果 hash 不匹配")
+        if len(snapshot.observations) > CHILD_SESSION_MAX_OBSERVATIONS:
+            raise DelegationError("child session 观察事实超过上限")
+        encoded = json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8")
+        if len(encoded) > CHILD_SESSION_MAX_SNAPSHOT_BYTES:
+            raise DelegationError(f"child session {snapshot.child_session_id} 快照超过大小上限")
+        return snapshot
 
 
 def _contains_sensitive(value: Any) -> bool:
@@ -878,6 +967,36 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _workspace_fingerprint(workspace_root: str | os.PathLike[str]) -> str:
+    normalized = os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _skill_identity(catalog: SkillCatalog | None, skill_id: str) -> dict[str, str]:
+    if catalog is None:
+        raise DelegationError(f"恢复所需 Skill Catalog 不可用: {skill_id}")
+    try:
+        definition = catalog.get(skill_id)
+    except SkillAccessError as error:
+        raise DelegationError(f"恢复所需 Skill 不存在或不可用: {skill_id}") from error
+    snapshot = definition.file_snapshot
+    identity = {
+        "skill_id": definition.name,
+        "source": definition.source,
+        "root_identity": list(definition.root_identity),
+        "directory_identity": list(definition.directory_identity),
+        "file": {
+            "dev": snapshot.dev, "ino": snapshot.ino, "size": snapshot.size,
+            "mtime_ns": snapshot.mtime_ns, "ctime_ns": snapshot.ctime_ns,
+        },
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return {"skill_id": definition.name, "source": definition.source,
+            "fingerprint": fingerprint}
+
+
 class SubagentRunner:
     """Run one child synchronously with isolated state/context/permissions."""
 
@@ -887,7 +1006,9 @@ class SubagentRunner:
                  model_binding: ModelBinding | None = None,
                  agent_profile: AgentProfile | None = None,
                  skill_catalog: SkillCatalog | None = None,
-                 session_root: str | os.PathLike[str] | None = None):
+                 session_root: str | os.PathLike[str] | None = None,
+                 resume_snapshot: ChildSessionSnapshot | None = None,
+                 round_index: int | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root)))
         self.llm = llm if llm is not None else llm_callable
         self.parent_registry = parent_registry
@@ -895,6 +1016,9 @@ class SubagentRunner:
         self.agent_profile = agent_profile
         self.skill_catalog = skill_catalog
         self.session_root = session_root
+        self.resume_snapshot = resume_snapshot
+        self.round_index = round_index
+        self.last_snapshot: ChildSessionSnapshot | None = None
         self.last_state: AgentState | None = None
         self.last_context: ContextManager | None = None
 
@@ -939,7 +1063,8 @@ class SubagentRunner:
                      findings: tuple[Finding, ...] = (), evidence: tuple[EvidenceRef, ...] = (),
                      limitations: tuple[str, ...] = (), usage: UsageRecord | None = None,
                      started_at: str = "", error_kind: str | None = None,
-                     error_detail: str | None = None) -> SubagentResult:
+                     error_detail: str | None = None,
+                     round_index: int | None = None) -> SubagentResult:
         usage = usage or UsageRecord()
         if error_detail is None and error_kind and limitations:
             error_detail = limitations[-1]
@@ -959,6 +1084,7 @@ class SubagentRunner:
             )),
             agent_profile=task.agent_profile,
             agent_profile_fingerprint=task.agent_profile_fingerprint,
+            round_index=round_index,
         )
         # A result-size guard is authoritative and is applied to failed reports too.
         encoded = result.to_json().encode("utf-8")
@@ -1219,35 +1345,54 @@ class SubagentRunner:
             task, InstructionLoader(self.workspace_root).load(), self.workspace_root,
             role_profile=self.agent_profile,
         )
-        history: list[dict[str, Any]] = [{
+        contract_message: dict[str, Any] = {
             "role": "user",
             "content": json.dumps(
                 {"contract": task.to_dict(), "selected_parent_facts": list(task.selected_parent_facts)},
                 ensure_ascii=False, sort_keys=True,
             ),
-        }]
+        }
         policy = SubagentRuntimePolicy(
             runner=self, task=task, scope_gate=scope_gate,
             started_clock=started_clock, started_at=started_at,
             state=child_state, cancel_event=cancel_event,
             cancellation_reason=cancellation_reason,
         )
-        context = ContextManager(
-            child_state, history, observability=False,
-            budget=ContextBudget(
-                window=(self.model_binding.profile.context_window
-                        if self.model_binding is not None else 128_000),
-                output_reserve_tokens=(self.model_binding.profile.max_output_tokens
-                                       if self.model_binding is not None else None),
-            ),
-            summarizer=policy.summarize,
-            protected_messages=[{"role": "system", "content": system}],
-            model_binding=self.model_binding,
-            usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
-            skill_catalog=child_skill_catalog,
-            permission_policy=(PermissionPolicy({"skill": child_permissions["skill"]})
-                               if child_skill_catalog is not None else None),
+        context_budget = ContextBudget(
+            window=(self.model_binding.profile.context_window
+                    if self.model_binding is not None else 128_000),
+            output_reserve_tokens=(self.model_binding.profile.max_output_tokens
+                                   if self.model_binding is not None else None),
         )
+        protected = [{"role": "system", "content": system}]
+        skill_policy = (PermissionPolicy({"skill": child_permissions["skill"]})
+                        if child_skill_catalog is not None else None)
+        if self.resume_snapshot is None:
+            context = ContextManager(
+                child_state, [contract_message], observability=False,
+                budget=context_budget, summarizer=policy.summarize,
+                protected_messages=protected, model_binding=self.model_binding,
+                usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
+                skill_catalog=child_skill_catalog, permission_policy=skill_policy,
+            )
+        else:
+            context = ContextManager.restore_session(
+                child_state, self.resume_snapshot.context,
+                budget=context_budget, summarizer=policy.summarize,
+                observability=False, protected_messages=protected,
+                model_binding=self.model_binding,
+                usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
+                skill_catalog=child_skill_catalog, permission_policy=skill_policy,
+            )
+            context.history.append(contract_message)
+            for fact in self.resume_snapshot.observations:
+                path = fact.get("path") if isinstance(fact, dict) else None
+                if path is not None:
+                    try:
+                        scope_gate.validate_evidence_path(path)
+                    except DelegationError:
+                        continue
+                policy.observations.append(deepcopy(fact))
         context.before_summary = policy.before_summary
         self.last_context = context
         runtime = AgentRuntime(
@@ -1290,7 +1435,64 @@ class SubagentRunner:
                 "failed", "子代理 LLM 调用失败", error_kind="llm_error",
                 detail=_safe_error_detail(error),
             )
-        return policy.result_from_runtime(runtime_result)
+        result = policy.result_from_runtime(runtime_result)
+        if self.round_index is not None and result.round_index != self.round_index:
+            result = replace(result, round_index=self.round_index)
+        if self.round_index is not None and result.outcome == "completed":
+            try:
+                prior = self.resume_snapshot.cumulative_usage if self.resume_snapshot is not None else UsageRecord()
+                usage = UsageRecord(
+                    rounds=prior.rounds + result.usage.rounds,
+                    llm_calls=prior.llm_calls + result.usage.llm_calls,
+                    tool_calls=prior.tool_calls + result.usage.tool_calls,
+                    input_tokens=prior.input_tokens + result.usage.input_tokens,
+                    output_tokens=prior.output_tokens + result.usage.output_tokens,
+                    token_accounting=(result.usage.token_accounting if prior.rounds == 0 else
+                                      prior.token_accounting if prior.token_accounting == result.usage.token_accounting
+                                      else "mixed"),
+                    result_bytes=prior.result_bytes + result.usage.result_bytes,
+                    elapsed_ms=prior.elapsed_ms + result.usage.elapsed_ms,
+                )
+                old_skills = {
+                    item["skill_id"]: deepcopy(item)
+                    for item in (self.resume_snapshot.skill_identities if self.resume_snapshot else ())
+                }
+                for skill_id in (self.agent_profile.skills if self.agent_profile is not None
+                                 else task.authorized_skills):
+                    old_skills[skill_id] = _skill_identity(self.skill_catalog, skill_id)
+                observations = deepcopy(policy.observations)
+                unique_observations: list[dict[str, Any]] = []
+                seen_observations: set[str] = set()
+                for fact in observations:
+                    key = json.dumps(fact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    if key not in seen_observations:
+                        seen_observations.add(key)
+                        unique_observations.append(fact)
+                result_json = result.to_json()
+                candidate = ChildSessionSnapshot(
+                    task.subagent_id, task.parent_task_id,
+                    _workspace_fingerprint(self.workspace_root),
+                    task.agent_profile or "", task.agent_profile_fingerprint or "",
+                    task.model_binding_ref.to_dict() if task.model_binding_ref is not None else None,
+                    tuple(old_skills[name] for name in sorted(old_skills)),
+                    self.round_index, usage, result.result_id,
+                    delegation_result_hash(result), result_json,
+                    tuple(unique_observations), context.export_session(),
+                )
+                self.last_snapshot = ChildSessionSnapshot.from_dict(candidate.to_dict())
+            except Exception as error:
+                # The report and its actual usage remain valid even when its
+                # private continuation snapshot cannot be retained.
+                self.last_snapshot = None
+                result = self._make_result(
+                    task, "completed", result.summary, result.findings,
+                    result.evidence,
+                    result.limitations + ("子会话快照不可用，当前结果不能续接",),
+                    result.usage, result.started_at,
+                    "snapshot_unavailable", _safe_error_detail(error),
+                    round_index=self.round_index,
+                )
+        return result
 
 
 class SubagentRuntimePolicy:
@@ -1372,6 +1574,7 @@ class SubagentRuntimePolicy:
         return self.runner._make_result(
             self.task, outcome, summary, findings, evidence, combined,
             usage, self.started_at, error_kind, detail,
+            round_index=self.runner.round_index,
         )
 
     def result_from_runtime(self, runtime_result) -> SubagentResult:
@@ -1626,12 +1829,15 @@ class _PreparedDelegation:
 class _BackgroundDelegation:
     task: DelegatedTask
     state: AgentState | None
+    round_index: int = 1
+    resume_snapshot: ChildSessionSnapshot | None = None
     cancel_event: Event = field(default_factory=Event)
     status: str = "queued"
     startup_confirmed: bool = False
     round_committed: bool = False
     cancel_requested: bool = False
     result: SubagentResult | None = None
+    candidate_snapshot: ChildSessionSnapshot | None = None
     thread: Thread | None = None
 
 
@@ -1777,7 +1983,9 @@ class DelegationManager:
         self._done_event.set()
         self._interrupted = False
         self._background: dict[str, _BackgroundDelegation] = {}
-        self._background_events: Queue[tuple[str, SubagentResult]] = Queue()
+        self._background_events: Queue[tuple[str, SubagentResult, ChildSessionSnapshot | None]] = Queue()
+        self._child_snapshots: dict[str, ChildSessionSnapshot] = {}
+        self.resume_issues: list[dict[str, str]] = []
         self._concurrency_condition = Condition()
         self._running_workers = 0
         self.last_task: DelegatedTask | None = None
@@ -1832,10 +2040,12 @@ class DelegationManager:
 
     @staticmethod
     def _background_confirmation(task: DelegatedTask, accepted: bool,
-                                 budget: dict[str, Any], reason: str | None = None) -> str:
+                                 budget: dict[str, Any], reason: str | None = None,
+                                 *, round_index: int = 1) -> str:
         payload: dict[str, Any] = {
             "child_session_id": task.subagent_id,
             "delegation_id": task.delegation_id,
+            "round_index": round_index,
             "agent_profile": task.agent_profile,
             "status": "accepted" if accepted else "rejected",
             "accepted": accepted,
@@ -1870,13 +2080,14 @@ class DelegationManager:
             if state is None:
                 raise DelegationError("后台子代理需要绑定父 State")
             state.reserve_delegation(task, mode="background")
+            state.register_child_session(task, _workspace_fingerprint(self.workspace_root))
             with self._lock:
                 if task.subagent_id in self._background:
                     raise DelegationError("child_session_id 已存在")
                 self._background[task.subagent_id] = _BackgroundDelegation(task, state)
                 self._done_event.clear()
             return self._background_confirmation(
-                task, True, state.delegation_budget_snapshot(),
+                task, True, state.delegation_budget_snapshot(), round_index=1,
             )
         except Exception as error:
             if task is None:
@@ -1892,7 +2103,187 @@ class DelegationManager:
                         "budget": {}, "reason": _safe_error_detail(error, 300),
                     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             snapshot = state.delegation_budget_snapshot() if state is not None else {}
-            return self._background_confirmation(task, False, snapshot, str(error))
+            return self._background_confirmation(task, False, snapshot, str(error), round_index=1)
+
+    def _prepare_followup_task(
+        self, arguments: dict[str, Any], state: AgentState | None,
+    ) -> tuple[DelegatedTask, ChildSessionSnapshot, int]:
+        if not isinstance(arguments, dict):
+            raise DelegationError("followup_subagent 参数必须是 object")
+        child_id = arguments.get("child_session_id")
+        if not isinstance(child_id, str) or _UUID_RE.fullmatch(child_id) is None:
+            raise DelegationError("child_session_id 必须是 UUID")
+        if arguments.get("purpose") != "investigation":
+            raise DelegationError("followup_subagent 的 purpose 固定为 investigation")
+        if "model_profile" in arguments or "agent_profile" in arguments:
+            raise DelegationError("followup_subagent 不允许更换角色或模型")
+        snapshot = self._child_snapshots.get(child_id)
+        if snapshot is None:
+            raise DelegationError("child_session_id 没有可续接的已领取成功快照")
+        state = state or self.parent_state
+        if state is None:
+            raise DelegationError("followup_subagent 需要父 State")
+        lifecycle = next((item for item in state.child_session_records
+                          if item.child_session_id == child_id), None)
+        if lifecycle is None or lifecycle.status != "idle":
+            raise DelegationError("child_session_id 当前不可续接")
+        if (snapshot.round_index != lifecycle.round_index
+                or snapshot.last_claimed_result_id != lifecycle.last_claimed_result_id
+                or snapshot.last_claimed_result_hash != lifecycle.last_claimed_result_hash
+                or snapshot.cumulative_usage.to_dict() != asdict(lifecycle.cumulative_usage)):
+            raise DelegationError("child_session 快照与最近已领取结果不一致")
+        task_arguments = dict(arguments)
+        task_arguments.pop("child_session_id", None)
+        task_arguments["agent_profile"] = snapshot.agent_profile
+        task = self.create_task(task_arguments, state)
+        task = replace(task, subagent_id=child_id, contract_hash="")
+        if (task.agent_profile_fingerprint != snapshot.agent_profile_fingerprint
+                or (task.model_binding_ref.to_dict() if task.model_binding_ref else None)
+                != snapshot.model_binding_ref):
+            raise DelegationError("当前角色或模型绑定与冻结子会话不一致")
+        for identity in snapshot.skill_identities:
+            skill_id = identity["skill_id"]
+            if _skill_identity(self.skill_catalog, skill_id) != identity:
+                raise DelegationError(f"Skill 文件身份变化: {skill_id}")
+            try:
+                assert self.skill_catalog is not None
+                self.skill_catalog.verify_identity(skill_id)
+            except SkillAccessError as error:
+                raise DelegationError(f"Skill 文件身份变化: {skill_id}") from error
+        state.validate_background_followup(
+            task, child_id, _workspace_fingerprint(self.workspace_root),
+        )
+        return task, snapshot, lifecycle.round_index + 1
+
+    def validate_followup_arguments(
+        self, arguments: dict[str, Any], state: AgentState | None = None,
+    ) -> None:
+        """Run full read-only contract, identity, scope, and budget checks before handler entry."""
+        self._prepare_followup_task(arguments, state)
+
+    def followup_background(self, arguments: dict[str, Any],
+                            state: AgentState | None = None) -> str:
+        state = state or self.parent_state
+        task: DelegatedTask | None = None
+        try:
+            task, snapshot, round_index = self._prepare_followup_task(arguments, state)
+            task = self._authorize_role_skills(task)
+            assert state is not None
+            state.reserve_background_followup(
+                task, task.subagent_id, _workspace_fingerprint(self.workspace_root),
+            )
+            item = _BackgroundDelegation(
+                task, state, round_index=round_index, resume_snapshot=snapshot,
+            )
+            with self._lock:
+                current = self._background.get(task.subagent_id)
+                if current is not None and current.status not in {"claimed", "abandoned", "interrupted"}:
+                    raise DelegationError("child_session_id 已有活动回合")
+                self._background[task.subagent_id] = item
+                self._done_event.clear()
+            return self._background_confirmation(
+                task, True, state.delegation_budget_snapshot(), round_index=round_index,
+            )
+        except Exception as error:
+            child_id = (arguments.get("child_session_id")
+                        if isinstance(arguments, dict) else None)
+            return json.dumps({
+                "child_session_id": child_id,
+                "delegation_id": task.delegation_id if task is not None else None,
+                "round_index": None,
+                "status": "rejected", "accepted": False,
+                "budget": state.delegation_budget_snapshot() if state is not None else {},
+                "reason": _safe_error_detail(error, 300),
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def export_child_sessions(self, state: AgentState | None = None) -> list[dict[str, Any]]:
+        state = state or self.parent_state
+        if state is None:
+            return []
+        snapshots: list[dict[str, Any]] = []
+        for lifecycle in state.child_session_records:
+            if lifecycle.status != "idle":
+                continue
+            snapshot = self._child_snapshots.get(lifecycle.child_session_id)
+            if snapshot is None:
+                raise DelegationError(
+                    f"child_session_id={lifecycle.child_session_id} 缺少可保存的 idle 快照"
+                )
+            snapshots.append(snapshot.to_dict())
+        total = sum(len(json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")) for item in snapshots)
+        if total > CHILD_SESSION_MAX_TOTAL_SNAPSHOT_BYTES:
+            raise DelegationError(
+                "child_sessions 总大小超过 720 KiB；child_session_id="
+                + ",".join(item["child_session_id"] for item in snapshots)
+            )
+        return snapshots
+
+    def restore_child_sessions(
+        self, snapshots: list[dict[str, Any]], state: AgentState,
+    ) -> list[dict[str, str]]:
+        """Rebind idle snapshots to current local role/model/Skill catalogs."""
+        issues: list[dict[str, str]] = []
+        self._child_snapshots.clear()
+        for raw in snapshots:
+            child_id = str(raw.get("child_session_id", "<unknown>")) if isinstance(raw, dict) else "<unknown>"
+            try:
+                snapshot = ChildSessionSnapshot.from_dict(raw)
+                lifecycle = next((item for item in state.child_session_records
+                                  if item.child_session_id == snapshot.child_session_id), None)
+                if lifecycle is None or lifecycle.status != "idle":
+                    raise DelegationError("State lifecycle 不是 idle")
+                if snapshot.parent_task_id != state.task_id or lifecycle.parent_task_id != state.task_id:
+                    raise DelegationError("父 task_id 不匹配")
+                if snapshot.workspace_fingerprint != _workspace_fingerprint(self.workspace_root):
+                    raise DelegationError("workspace 身份变化")
+                profile = self.agent_profile_catalog.resolve(snapshot.agent_profile)
+                if profile.fingerprint != snapshot.agent_profile_fingerprint:
+                    raise DelegationError("agent_profile 指纹变化")
+                selected = (self.provider_catalog.resolve_child_profile(profile.model_profile)
+                            if self.provider_catalog is not None else None)
+                binding = (self.provider_catalog.bind(selected)
+                           if self.provider_catalog is not None and selected is not None else None)
+                current_ref = binding.reference.to_dict() if binding is not None else None
+                if current_ref != snapshot.model_binding_ref:
+                    raise DelegationError("model binding 指纹变化")
+                if current_ref != lifecycle.model_binding_ref:
+                    raise DelegationError("State model binding 来源摘要不匹配")
+                current_skills = {
+                    item["skill_id"]: item
+                    for item in (_skill_identity(self.skill_catalog, skill_id)
+                                 for skill_id in profile.skills)
+                }
+                saved_skills = {item["skill_id"]: item for item in snapshot.skill_identities}
+                if current_skills != saved_skills:
+                    raise DelegationError("Skill Catalog 或文件身份变化")
+                if (snapshot.round_index != lifecycle.round_index
+                        or snapshot.last_claimed_result_id != lifecycle.last_claimed_result_id
+                        or snapshot.last_claimed_result_hash != lifecycle.last_claimed_result_hash):
+                    raise DelegationError("最近领取结果与 State lifecycle 不匹配")
+                self._child_snapshots[snapshot.child_session_id] = snapshot
+            except Exception as error:
+                reason = _safe_error_detail(error, 300)
+                try:
+                    state.mark_child_session_incompatible(child_id, reason)
+                except Exception:
+                    pass
+                issue = {"child_session_id": child_id, "reason": reason}
+                issues.append(issue)
+        loaded = set(self._child_snapshots)
+        for lifecycle in state.child_session_records:
+            if lifecycle.status == "idle" and lifecycle.child_session_id not in loaded:
+                reason = "没有可用的已持久化 idle 子会话快照"
+                state.mark_child_session_incompatible(lifecycle.child_session_id, reason)
+                issues.append({"child_session_id": lifecycle.child_session_id, "reason": reason})
+        self.resume_issues = issues
+        return issues
+
+    def clear_child_sessions(self) -> None:
+        with self._lock:
+            self._child_snapshots.clear()
+            self._background.clear()
 
     def confirm_background_startup(self, child_session_id: str) -> None:
         with self._lock:
@@ -1933,13 +2324,22 @@ class DelegationManager:
 
                     def worker(selected=item):
                         try:
-                            result = self._run_child(selected.task, selected.cancel_event)
+                            result, snapshot = self._run_child(
+                                selected.task, selected.cancel_event,
+                                resume_snapshot=selected.resume_snapshot,
+                                round_index=selected.round_index,
+                                with_snapshot=True,
+                            )
                         except BaseException as error:
-                            result = self._runner_error_result(selected.task, error)
+                            result = replace(
+                                self._runner_error_result(selected.task, error),
+                                round_index=selected.round_index,
+                            )
+                            snapshot = None
                         finally:
                             # A worker publishes only the bounded completion value.
                             pass
-                        self._background_events.put((selected.task.subagent_id, result))
+                        self._background_events.put((selected.task.subagent_id, result, snapshot))
                         self.release_concurrency_slot()
 
                     thread = Thread(
@@ -1952,20 +2352,24 @@ class DelegationManager:
             except Exception as error:
                 self.release_concurrency_slot()
                 result = self._runner_error_result(item.task, error)
-                self._background_events.put((item.task.subagent_id, result))
+                self._background_events.put((item.task.subagent_id, replace(result, round_index=item.round_index), None))
         for child_session_id, item, thread in launches:
             try:
                 thread.start()
             except BaseException as error:
                 self.release_concurrency_slot()
-                self._background_events.put((child_session_id, self._runner_error_result(item.task, error)))
+                self._background_events.put((
+                    child_session_id,
+                    replace(self._runner_error_result(item.task, error), round_index=item.round_index),
+                    None,
+                ))
 
     def collect_background_events(self, *, dispatch: bool = True) -> list[dict[str, str]]:
         """Settle completed worker results on the parent Runtime thread."""
         notices: list[dict[str, str]] = []
         while True:
             try:
-                child_session_id, result = self._background_events.get_nowait()
+                child_session_id, result, snapshot = self._background_events.get_nowait()
             except Empty:
                 break
             with self._lock:
@@ -1976,18 +2380,20 @@ class DelegationManager:
                 try:
                     item.state.delegation_result_ready(item.task.delegation_id, result)
                 except BaseException:
-                    self._background_events.put((child_session_id, result))
+                    self._background_events.put((child_session_id, result, snapshot))
                     raise
             with self._lock:
                 if item.result is not None:
                     continue
                 item.result = result
+                item.candidate_snapshot = snapshot
                 item.status = "cancelled" if result.outcome == "cancelled" else "result_ready"
                 self.last_task, self.last_result = item.task, result
             notices.append({
                 "child_session_id": child_session_id,
                 "status": item.status,
                 "result_id": result.result_id,
+                "round_index": str(item.round_index),
             })
         if dispatch:
             self.activate_background_tasks()
@@ -2011,10 +2417,17 @@ class DelegationManager:
                 "status": item.status,
                 "cancel_requested": item.cancel_requested,
                 "result_id": item.result.result_id if item.result is not None else None,
+                "round_index": item.round_index,
             }
         state = state or self.parent_state
+        lifecycle = next((entry for entry in getattr(state, "child_session_records", [])
+                          if entry.child_session_id == child_session_id), None)
         record = next((record for record in getattr(state, "delegation_records", [])
-                       if record.mode == "background" and record.subagent_id == child_session_id), None)
+                       if record.mode == "background" and record.subagent_id == child_session_id
+                       and (lifecycle is None or record.delegation_id == lifecycle.latest_delegation_id)), None)
+        if record is None and lifecycle is None:
+            record = next((record for record in getattr(state, "delegation_records", [])
+                           if record.mode == "background" and record.subagent_id == child_session_id), None)
         if record is None:
             return {"child_session_id": child_session_id, "status": "not_found", "result_id": None}
         status = {
@@ -2030,6 +2443,7 @@ class DelegationManager:
             "status": status,
             "cancel_requested": bool(record.cancellation_reason),
             "result_id": record.result_id,
+            "round_index": lifecycle.round_index if lifecycle is not None else 1,
         }
 
     def background_result(self, child_session_id: str,
@@ -2040,6 +2454,12 @@ class DelegationManager:
             result = item.result if item is not None else None
         if result is not None:
             return result.to_json()
+        if item is not None:
+            status = self.background_status(child_session_id, state)
+            return json.dumps(status, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        snapshot = self._child_snapshots.get(child_session_id)
+        if snapshot is not None:
+            return snapshot.last_result_json
         status = self.background_status(child_session_id, state)
         return json.dumps(status, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -2070,7 +2490,8 @@ class DelegationManager:
             if item.status != "queued" or item.result is not None:
                 return
             confirmed = item.startup_confirmed and item.round_committed
-            result = self._cancelled_result(item.task, reason) if confirmed else None
+            result = (replace(self._cancelled_result(item.task, reason), round_index=item.round_index)
+                      if confirmed else None)
         if not confirmed:
             if item.state is not None:
                 item.state.cancel_unstarted_background_delegation(
@@ -2098,6 +2519,15 @@ class DelegationManager:
                 raise DelegationError("领取结果与内存结果 ID 不一致")
             if item.status == "claimed":
                 return
+            if item.result.outcome == "completed" and item.result.error_kind != "snapshot_unavailable":
+                if item.candidate_snapshot is None:
+                    raise DelegationError(
+                        f"child_session_id={child_session_id} completed 结果缺少可续接快照"
+                    )
+                if (item.candidate_snapshot.last_claimed_result_id != result_id
+                        or item.candidate_snapshot.round_index != item.round_index):
+                    raise DelegationError("child session 候选快照与领取结果不匹配")
+                self._child_snapshots[child_session_id] = item.candidate_snapshot
             item.status = "claimed"
             self._done_event.set()
 
@@ -2352,7 +2782,12 @@ class DelegationManager:
             if not self._active:
                 self._done_event.set()
 
-    def _run_child(self, task: DelegatedTask, cancel_event: Event) -> SubagentResult:
+    def _run_child(
+        self, task: DelegatedTask, cancel_event: Event, *,
+        resume_snapshot: ChildSessionSnapshot | None = None,
+        round_index: int | None = None,
+        with_snapshot: bool = False,
+    ) -> SubagentResult | tuple[SubagentResult, ChildSessionSnapshot | None]:
         try:
             binding = (
                 self.provider_catalog.bind(task.model_profile)
@@ -2365,17 +2800,23 @@ class DelegationManager:
             )
             if profile is not None and profile.fingerprint != task.agent_profile_fingerprint:
                 raise DelegationError("当前 Runtime 的 agent_profile 指纹与合同不一致")
-            return SubagentRunner(
+            runner = SubagentRunner(
                 self.workspace_root, llm=self.subagent_llm,
                 parent_registry=self.parent_registry, model_binding=binding,
                 agent_profile=profile, skill_catalog=self.skill_catalog,
                 session_root=self.session_root,
-            ).run(
+                resume_snapshot=resume_snapshot, round_index=round_index,
+            )
+            result = runner.run(
                 task, cancel_event=cancel_event,
                 cancellation_reason=lambda: self._cancel_reason,
             )
+            return (result, runner.last_snapshot) if with_snapshot else result
         except BaseException as error:
-            return self._runner_error_result(task, error)
+            result = self._runner_error_result(task, error)
+            if round_index is not None:
+                result = replace(result, round_index=round_index)
+            return (result, None) if with_snapshot else result
 
     def prepare_batch(self, admissions: dict[int, Any], state: AgentState | None) -> tuple[
             dict[int, DelegatedTask], dict[int, SubagentResult], dict[int, DelegatedTask]]:

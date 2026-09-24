@@ -332,7 +332,8 @@ class AgentRuntime:
                 message = (
                     "后台子代理已收束："
                     f"child_session_id={item['child_session_id']} "
-                    f"status={item['status']} result_id={item['result_id']}；"
+                    f"round_index={item['round_index']} status={item['status']} "
+                    f"result_id={item['result_id']}；"
                     "请通过 get_subagent_result 领取正文。"
                 )
                 if hasattr(self.output, "subagent_notice"):

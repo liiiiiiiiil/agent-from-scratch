@@ -1,4 +1,4 @@
-"""Safe session admission and fresh-runtime assembly for schema 2/3."""
+"""Safe session admission and fresh-runtime assembly for schema 2/3/4."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -16,6 +16,7 @@ from mini_agent.processes import ProcessManager
 from mini_agent.prompt import build_system_prompt
 from mini_agent.session import (
     SCHEMA_2_VERSION,
+    SCHEMA_3_VERSION,
     SCHEMA_VERSION,
     SessionError,
     SessionStore,
@@ -293,6 +294,7 @@ class ResumeRuntime:
     source_session_id: str | None = None
     workspace_report: list[str] | None = None
     workspace_observation: dict[str, Any] | None = None
+    child_session_issues: list[dict[str, str]] | None = None
 
 
 @dataclass
@@ -420,11 +422,17 @@ class ResumeCandidate:
                     })
                 boundary.pop("pending_delegation_results", None)
                 boundary["status"] = "committed"
+                delegation_manager = getattr(runtime.registry, "_delegation_manager", None)
+                child_snapshots = (
+                    delegation_manager.export_child_sessions(runtime.state)
+                    if delegation_manager is not None else []
+                )
                 claimed = self.store.claim_crash_recovery(
                     runtime.session_id, self.expected_envelope,
                     state_export=runtime.state.export_session(allow_pending=True),
                     context_export=runtime.context.export_session(),
                     tool_boundary=boundary,
+                    child_sessions=child_snapshots,
                     workspace_root=runtime.envelope["workspace_root"],
                     workspace_manifest=None,
                     recovery_id=(runtime.state.crash_recoveries[-1].recovery_id
@@ -436,6 +444,12 @@ class ResumeCandidate:
                     self.expected_envelope,
                     state_export=runtime.state.export_session(),
                     context_export=runtime.context.export_session(),
+                    child_sessions=(
+                        getattr(
+                            getattr(runtime.registry, "_delegation_manager", None),
+                            "export_child_sessions", lambda _state: [],
+                        )(runtime.state)
+                    ),
                 )
         except BaseException:
             self.close()
@@ -462,7 +476,7 @@ def prepare_resume(store: SessionStore, session_id: str,
         raise
     if envelope.get("schema_version") == 1:
         raise ResumeError("schema 1 会话只供诊断，不能续跑")
-    if envelope.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_VERSION}:
+    if envelope.get("schema_version") not in {SCHEMA_2_VERSION, SCHEMA_3_VERSION, SCHEMA_VERSION}:
         raise ResumeError("不支持的 session schema，不能续跑")
     active_background_records = [
         item for item in envelope.get("state", {}).get("delegation_records", [])
@@ -470,14 +484,14 @@ def prepare_resume(store: SessionStore, session_id: str,
         and item.get("delivery_status") not in {"committed", "interrupted", "abandoned"}
     ]
     committed_background_handoff = (
-        envelope.get("schema_version") == SCHEMA_VERSION
+        envelope.get("schema_version") in {SCHEMA_3_VERSION, SCHEMA_VERSION}
         and envelope.get("handoff_status") == "active"
         and envelope.get("save_kind") == "tool_boundary"
         and envelope.get("tool_boundary", {}).get("status") == "committed"
         and bool(active_background_records)
     )
     crash_mode = (
-        envelope.get("schema_version") == SCHEMA_VERSION
+        envelope.get("schema_version") in {SCHEMA_3_VERSION, SCHEMA_VERSION}
         and envelope.get("handoff_status") == "active"
         and envelope.get("save_kind") == "tool_boundary"
         and envelope.get("tool_boundary", {}).get("status") == "pending"
@@ -491,7 +505,7 @@ def prepare_resume(store: SessionStore, session_id: str,
             raise ResumeError("只有 safe_point 会话可以恢复")
         if envelope.get("handoff_status") != "clean":
             raise ResumeError("只有 clean 会话可以恢复；当前会话仍是 active")
-        if (envelope.get("schema_version") == SCHEMA_VERSION
+        if (envelope.get("schema_version") in {SCHEMA_3_VERSION, SCHEMA_VERSION}
                 and envelope.get("tool_boundary", {}).get("status") != "committed"):
             raise ResumeError("会话包含未完成但无可用恢复证据的 tool_boundary；v0.33 拒绝猜测并续跑")
         issues = check_workspace_manifest(envelope, workspace_root)
@@ -525,11 +539,12 @@ def prepare_resume(store: SessionStore, session_id: str,
             raw_boundary["calls"], pending_results,
         )
         if raw_boundary.get("status") == "pending":
-            # A spawn from this incomplete round cannot have launched: workers
-            # start only after the full round commit. Release its reservation
-            # without inventing a child execution fact.
+            # A new or followup round from this incomplete parent round cannot
+            # have launched: workers start only after the full round commit.
+            # Release its reservation without inventing a child execution fact.
             for call in raw_boundary.get("calls", []):
-                if (isinstance(call, dict) and call.get("tool") == "spawn_subagent"
+                if (isinstance(call, dict)
+                        and call.get("tool") in {"spawn_subagent", "followup_subagent"}
                         and call.get("status") == "committed"
                         and isinstance(call.get("delegation_id"), str)):
                     record = next((item for item in state.delegation_records
@@ -639,6 +654,19 @@ def prepare_resume(store: SessionStore, session_id: str,
     delegation_manager = getattr(registry, "_delegation_manager", None)
     if delegation_manager is not None and hasattr(delegation_manager, "bind_session_root"):
         delegation_manager.bind_session_root(store.root)
+    child_session_issues: list[dict[str, str]] = []
+    if (delegation_manager is not None
+            and envelope.get("schema_version") == SCHEMA_VERSION):
+        resumable_child_snapshots = [
+            deepcopy(item) for item in envelope.get("child_sessions", [])
+            if isinstance(item, dict)
+            and any(lifecycle.child_session_id == item.get("child_session_id")
+                    and lifecycle.status == "idle"
+                    for lifecycle in state.child_session_records)
+        ]
+        child_session_issues = delegation_manager.restore_child_sessions(
+            resumable_child_snapshots, state,
+        )
     # Do not restore candidates from the session.  Bind a fresh parent-side
     # retriever to the current workspace store for the next LLM request.
     try:
@@ -659,6 +687,7 @@ def prepare_resume(store: SessionStore, session_id: str,
             source_session_id=envelope["session_id"] if crash_mode else None,
             workspace_report=issues if crash_mode else None,
             workspace_observation=workspace_observation if crash_mode else None,
+            child_session_issues=child_session_issues,
         )
     except BaseException:
         manager = getattr(registry, "_mcp_manager", None)

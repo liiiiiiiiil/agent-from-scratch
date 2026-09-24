@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the mainline code has completed `v0.48` (lesson 48: in-process background Subagents). Stage 13 keeps synchronous read-only delegation and lets the parent start a named background investigation, continue its own model rounds, then query and claim the result by ID; child work runs only inside the current CLI process. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the mainline code has completed `v0.49` (lesson 49: resumable child sessions). After claiming a successful investigation, the parent can submit a new contract under the same child ID and save or resume an idle child snapshot with the parent safe point; active workers do not cross process boundaries. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -88,6 +88,7 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><th colspan="3"><a id="stage-13"></a>Stage 13 · Lightweight Agent collaboration</th></tr>
     <tr><td><strong>v0.47</strong></td><td><a href="./docs/tutorials/47-agent-profiles.md">Named Subagent roles</a></td><td>Select a frozen role prompt, read-only tool subset, model alias, and parent-preauthorized Skills for synchronous delegation; the tester role can analyze and suggest tests only.</td></tr>
     <tr><td><strong>v0.48</strong></td><td><a href="./docs/tutorials/48-background-subagents.md">In-process background Subagents</a></td><td>Let the parent continue model rounds while named read-only investigations run, then query and explicitly claim results; workers start only after the full durable round commits, and active or unclaimed work blocks safe saves and completion.</td></tr>
+    <tr><td><strong>v0.49</strong></td><td><a href="./docs/tutorials/49-resumable-child-session.md">Resumable child sessions</a></td><td>Submit a full follow-up contract for a claimed successful child result; schema 4 safe points atomically store bounded child history and recheck role, model, and Skill identities on resume while preserving cumulative budgets.</td></tr>
   </tbody>
 </table>
 

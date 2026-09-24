@@ -1,6 +1,6 @@
 # 第 48 课：进程内后台子代理
 
-上一课：[具名子代理角色](47-agent-profiles.md) · [教程总览](README.md) · 下一课：可续接子会话（规划中）
+上一课：[具名子代理角色](47-agent-profiles.md) · [教程总览](README.md) · 下一课：[可续接子会话](49-resumable-child-session.md)
 
 代码快照：`v0.48` · 相邻差异：`v0.47..v0.48`
 

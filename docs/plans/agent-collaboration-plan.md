@@ -1,6 +1,6 @@
 # 阶段十三：轻量 Agent Collaboration 实施计划
 
-> 状态：`v0.47` 与 `v0.48` 已实现；`v0.49` 待实施
+> 状态：`v0.47`、`v0.48` 与 `v0.49` 已实现
 > 建议版本范围：`v0.47` Agent Profiles / Roles、`v0.48` Background Subagent、`v0.49` Resumable Child Session
 > 能力前置：阶段十受控子代理委派（`v0.34`–`v0.39`）、阶段九会话与崩溃恢复（`v0.30`–`v0.33`）、阶段十二本地 Skills（`v0.45`）
 > 关联计划：`subagent-delegation-plan.md`、`session-persistence-resume-plan.md`、`mcp-skills-plan.md`
@@ -9,7 +9,7 @@
 
 阶段十已有单层只读 Subagent、独立 Context、共享 `AgentRuntime.run()`、多 provider、预算、取消、有界并行和持久结果交付。但现有 `delegate_task` 是同步工具：同一父工具回合内的子任务可以并行，父 Agent 仍要等全部结果按序提交后才能请求下一轮模型。`v0.39` 保存的是结果交付事实，不保存可继续对话的完整子 Context。
 
-本阶段要回答的问题是：**怎样让父 Agent 选择合适的只读角色，边做自己的工作边等待子任务，并在以后继续同一个子会话，同时保持现有工具协议、授权和恢复边界？**
+本阶段回答的问题是：**怎样让父 Agent 选择合适的只读角色，边做自己的工作边等待子任务，并在以后继续同一个子会话，同时保持现有工具协议、授权和恢复边界？**
 
 当前阶段的目标流程：
 
@@ -24,7 +24,7 @@ followup(child_session_id, task) → 同一子 Context 的下一轮工作
 `v0.48` 已将交互语义冻结为 `spawn_subagent`、`get_subagent_status`、`get_subagent_result`、
 `cancel_subagent`。保留现有 `delegate_task` 的同步行为作为兼容入口；不把它悄悄改成后台调用。
 阶段十三只扩展认知协作，父 Agent 仍独占工作区修改、主 Plan、权限交互、权威验证和完成判定。
-完成 `v0.49` 后，新增能力路线收口，阶段十四专注 Evaluation & Regression。
+`v0.49` 已完成：父 Agent 只能在成功结果已领取后提交完整的新调查合同；空闲快照与父任务安全点原子保存，并在恢复时重新核对当前角色、模型与 Skill 身份。完成本阶段后，新增能力路线收口，阶段十四专注 Evaluation & Regression。
 
 ## 2. 范围与非目标
 
@@ -120,27 +120,28 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 验收：已通过。父 Agent 能在后台子任务未完成时继续独立工作；原启动 call 恰有一个结果，后续结果可重复领取但只结算一次；活动任务不能被保存为 clean 或让父任务进入 `done`。
 
-### 4.3 `v0.49`：Resumable Child Session
+### 4.3 `v0.49`：Resumable Child Session（已实现）
 
-1. 定义稳定 `child_session_id`、子会话回合序号与空闲/运行/结果待领取状态；followup 只接受同一父 task 的空闲、已交付子会话。
-2. 让 `SubagentRunner` 从保存的子 Context/State 接续，而不是重建初始合同历史；新合同作为新一轮输入，旧结果和历史保持不可变，公共 Runtime 继续控制工具循环。
-3. 扩展私有 session schema 和安全点保存：原子保存父状态与有界子快照，读取时校验身份、长度、预算、回合序号、模型来源和结果引用；保留 schema 1/2/3 兼容。
-4. 恢复后重新绑定当前本地配置并验证 profile/Skill/权限边界；覆盖双重 followup、结果尚未领取、配置变更、子快照损坏、半写入、预算耗尽和旧 session 恢复。
+1. 已增加 `followup_subagent`，稳定复用 `child_session_id`，每轮生成新的 `delegation_id`、`result_id` 和 usage；只接受同一父 task/workspace 下已领取的成功结果，并要求完整的新调查合同。
+2. `SubagentRunner` 从 bounded `ChildSessionSnapshot` 恢复子 Context，追加本轮合同输入并调用公共 `AgentRuntime.run()`；角色和模型冻结不变，每轮 Skill 权限重新申请。子历史不进入父 State 或 Trace。
+3. 已把新写入 session schema 升至 4，与父 State、Context 和工具边界在同一原子提交中保存 idle 快照；校验结果引用、消息配对、轮次连续性、身份、用量和 256 KiB/720 KiB 快照上限，同时保留 schema 1/2/3 读取。
+4. 恢复时从当前本地配置重建并复核角色、模型绑定和 Skill 文件身份；不兼容快照单独报告。只恢复空闲快照，不恢复 worker 或重放请求。
+5. 已覆盖同一子会话两轮、父子历史隔离、领取幂等、安全点恢复、累计预算、纯启动回合、整轮提交故障、快照与 State 不匹配及 schema 3 读取兼容。
 
-验收：已收束的子会话经 `/save`、进程退出和 `/resume` 后，父 Agent 用原 ID 发后续问题；子模型能看到自己的先前调查，累计用量不回退，旧结果不重算、不重复交付。运行中的子会话不被伪装为可续接。
+验收：已通过。已领取的子会话经 `/save`、进程重建和 `/resume` 后可用原 ID 续接；子模型看到自己的历史但不看到父完整 history；累计用量不回退，旧结果不重算、不重复结算。失败、超时、取消、中断、活动和未领取回合均不可续接。
 
 ## 5. 文件与边界映射
 
 | 位置 | 预计变化 | 责任 |
 |---|---|---|
-| `src/mini_agent/delegation.py` | 已更新 | Profile 应用、进程内后台生命周期、共用并发槽位与 scope 检查；不复制 agent loop |
-| `src/mini_agent/tools/delegation.py`、`tools/__init__.py` | 已更新 | 后台启动、状态/结果查询、取消与同步工具兼容 |
-| `src/mini_agent/runtime.py`、`tools/base.py` | 已更新 | 纯启动回合、整轮提交后启动、父线程安全边界结算 |
-| `src/mini_agent/state.py`、`session.py`、`resume.py` | 已更新 | 结构化生命周期、预算、结果领取身份校验、崩溃中断与旧 schema 兼容 |
+| `src/mini_agent/delegation.py` | 已更新 | Profile、后台生命周期、受限子 Context 快照、followup、累计预算与身份复核；不复制 agent loop |
+| `src/mini_agent/tools/delegation.py`、`tools/__init__.py` | 已更新 | 后台启动、followup、状态/结果查询、取消与同步工具兼容 |
+| `src/mini_agent/runtime.py`、`agent.py`、`tools/base.py` | 已更新 | 纯启动回合、整轮提交后启动、父线程安全边界结算 |
+| `src/mini_agent/state.py`、`session.py`、`resume.py` | 已更新 | 结构化多轮生命周期、schema 4 快照、预算、身份校验、旧 schema 兼容 |
 | `src/mini_agent/permission.py`、`skills.py`、`prompt.py` | 定点修改 | Profile 权限交集、Skill 预授权和子身份提示 |
 | `src/mini_agent/__main__.py`、`config.py` | 增量 | 本地配置、完成通知、`/save`、恢复和任务边界清理 |
 | `tests/`、`docs/tutorials/`、操作手册、`README.md`、`CHANGELOG.md` | 每版同步 | 离线并发/故障测试、一版一个教学主线和导航 |
-| `AGENTS.md` | v0.47、v0.48 已更新 | 子 Skill 合同、后台生命周期、safe point、持久化与恢复硬约束 |
+| `AGENTS.md` | v0.47–v0.49 已更新 | 子 Skill 合同、多轮续接、后台生命周期、safe point、持久化与恢复硬约束 |
 
 ## 6. 横向验收与交付
 
@@ -166,8 +167,10 @@ Profile 的本地定义只使用受限字段和有界文本，不接受可执行
 
 - [x] `v0.47` 四个角色与受限自定义 profile 可复现；模型、提示、工具、权限、Skills 绑定均经运行时校验，旧 `delegate_task` 兼容。
 - [x] `v0.48` 父 Agent 可跨轮次继续工作，子完成可通知和查询；活动任务有界取消，保存与崩溃语义明确。
-- [ ] `v0.49` 同一子会话可安全 followup，空闲快照可跨进程恢复，累计预算与权限不倒退。
-- [ ] 同步委派、工具协议、持久边界、恢复、Plan、verification 和阶段十二外部能力隔离无回归。
-- [ ] 全量测试、教程/README 检查和阶段级故障注入通过，版本文档与操作手册同步。
+- [x] `v0.49` 同一子会话可安全 followup，空闲快照可跨进程恢复，累计预算与权限不倒退。
+- [x] 同步委派、工具协议、持久边界、恢复、Plan、verification 和阶段十二外部能力隔离无回归。
+- [x] 版本文档、操作手册、教程、README、CHANGELOG 与包版本信息同步；阶段级离线故障覆盖已加入。
+- [x] 全量 pytest、教程结构检查和 README 检查通过；代码编译及 `git diff --check` 通过。
+- [ ] 教程固定 tag 事实检查已运行；除 `v0.49` tag 尚未由用户创建外无其他问题，tag 建立后需重跑该检查。
 
 满足上述条件后，阶段十四只做能力、可靠性、成本和版本演进的 Evaluation & Regression；发现的缺陷作为修复处理，不默认开启更重的多代理基础设施。

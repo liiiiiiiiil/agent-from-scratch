@@ -177,7 +177,7 @@ def test_session_store_round_trip_private_directory_and_repeated_update(tmp_path
     loaded = store.load(first["session_id"])
 
     assert second["session_id"] == first["session_id"]
-    assert loaded["schema_version"] == 3
+    assert loaded["schema_version"] == 4
     assert loaded["handoff_status"] == "active"
     assert loaded["state"] == first["state"]
     assert stat.S_IMODE(tmp_path.stat().st_mode) & 0o077 == 0

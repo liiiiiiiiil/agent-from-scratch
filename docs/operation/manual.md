@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.48**（进程内后台子代理；含此前具名角色、同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.49**（可续接子会话；含此前进程内后台子代理、具名角色、同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -91,7 +91,7 @@ MCP Tool 走普通的 Tool Registry、ToolExecutor、PermissionGate、Plan gate 
 `outcome` 是 `timeout`。成功文本保留为有界 `role=tool` 正文，State/Trace excerpt 只保留
 来源、alias、原始工具名、类别和长度等元数据。
 
-开启 `/save` 后，MCP Tool 与其他 possible Tool 一样，在 handler 前先进入 schema 3 的
+开启 `/save` 后，MCP Tool 与其他 possible Tool 一样，在 handler 前先进入 schema 3/4 的
 `handler_admitted` 边界；提交失败不会发送 `tools/call`。已经准入且结果未结算的调用在
 恢复时按既有规则记为不确定事实，绝不重放。新任务、恢复任务和任务切换都从当前本地
 配置重新发现目录；连接不写入 State、Trace、session 或 Subagent。退出、`/new`、`/reset`、
@@ -283,7 +283,42 @@ State、Trace 摘要或 verification evidence。未传 `agent_profile` 的旧委
 ```
 
 运行后可在结构化委派结果中看到 `agent_profile` 与指纹，同时仍只有原有的同步 JSON 结果。
-v0.48 增加独立的后台工具组，下面说明它们与 `delegate_task` 的区别。
+v0.49 为已领取成功结果的后台子会话增加跨安全点续接，下面先说明新合同与恢复边界；随后保留 v0.48 的原始后台任务说明。
+
+## v0.49 可续接子会话
+
+v0.48 的 `child_session_id` 只在当前 CLI 进程内标识后台工作。进程退出后，父会话只能记住
+启动、完成和领取等摘要，无法凭这个 ID 还原子代理的对话历史。v0.49 新增 `followup_subagent`：父模型
+在领取某轮成功结果后，可使用同一个 ID 提交一份完整的新调查合同。子代理沿用自己的 Context 历史和
+允许续接的只读观察事实，再按本轮合同执行；父历史和其他子会话仍不可见。
+
+该工具与 `spawn_subagent` 使用相同的 `goal`、`scope`、`constraints`、`expected_findings`、
+`requested_tools`、`selected_parent_facts`、`purpose="investigation"` 和单轮 `budget` 字段，另需
+`child_session_id`。调用方不能传入或更换角色、模型。角色和模型必须与创建子会话时一致；每轮要重新
+按精确 Skill ID 经父 PermissionGate 授权，旧授权不自动延续。只有上一轮 outcome 为 `completed` 且
+父侧已领取结果时才可续接；失败、超时、取消、中断、活动中或结果未领取的会话都拒绝。
+
+续接调用走后台启动闸门。一轮父模型回复可以包含一个或多个 `spawn_subagent` / `followup_subagent`，
+但不能混入查询或普通工具。父 Runtime 按调用顺序提交每个启动确认；开启 `/save` 后，必须等所有确认和
+整轮 schema 4 `tool_boundary` 原子提交成功，才释放该轮 worker。任一提交失败都不会启动本轮 worker。
+状态查询不返回正文，结果仍通过 `get_subagent_result(child_session_id)` 领取；同一 ID 的结果带
+`round_index`，每轮有各自的 `delegation_id`、`result_id` 和 usage。重复领取保持幂等。
+
+首版最多 4 轮（包括初始轮），单子会话累计最多 16 次 LLM 调用、48 次工具调用、64,000 tokens 和
+240 秒。每轮继续遵守已有 `SubagentBudget`；父任务的聚合预算和并发上限照常生效。续接不会增加
+`created_subagents`，但会预留本轮 LLM、工具和 token 预算。达到任一会话累计上限后，已交付结果仍可读，
+下一轮请求会在发出子 LLM 请求前拒绝。
+
+安全点使用 session `schema_version=4`，将父 State、Context、工具边界与最多三个 idle 子快照放进同一个
+原子 JSON 文件。快照只包含有界的子 Context、只读观察事实、父任务/工作区身份、冻结角色与模型来源摘要、
+Skill 文件身份、累计 usage 和最近已领取结果的 ID/hash；父 State 与 Trace 只保存生命周期元数据，
+不保存子 history 正文。活动 worker 和待领取结果仍阻止 safe point；单快照上限为 256 KiB，全部快照合计
+上限为 720 KiB。单项快照生成失败时仍交付已完成报告并结算实际用量，该子会话关闭续接资格；合计超限时保存报出相关 child ID。不截断历史或身份字段。同进程 followup 也会在子 LLM 请求前复核已冻结的 Skill 文件身份。
+
+`/resume` 只恢复安全点里的 idle 快照。Runtime 从当前本地配置重新绑定 provider、角色和 Skill Catalog，
+核对冻结来源指纹与 Skill 文件身份；不兼容的子会话被标记为不可续接并显示原因，父会话和其他有效子会话
+仍可恢复。恢复不会替换模型、续跑旧 worker或重放旧请求。schema 1/2/3 仍可读；这些旧格式没有子会话
+快照，因此不能提供 v0.49 的跨进程续接。
 
 ## v0.48 进程内后台子代理
 
@@ -337,8 +372,8 @@ ScopeGate 从工作区根目录逐段使用不跟随符号链接的目录 fd 打
 fd，而不在路径检查后重新按路径打开。除常见 session 敏感目录外，还会排除当前真实
 `SessionStore.root`；根目录身份变化、符号链接或越界路径会拒绝读取。
 
-本版只支持当前 CLI 进程内运行和查询。父 Agent 不能把子结果当成权威验证；子 Context、线程和结果
-不会变成可恢复子会话。已收束子会话的 followup 与跨进程续接留给 v0.49。
+在 v0.48 基线中，后台任务只支持当前 CLI 进程内运行和查询；父 Agent 不能把子结果当成权威验证。
+第 v0.49 节为已领取成功结果的子会话加入受限 followup 与跨进程安全点恢复，但不恢复活动 worker。
 
 ## v0.42 具名本地 References
 
@@ -578,7 +613,7 @@ v0.34 每个父工具回合只允许一个 `delegate_task`，同步等待后父 
 
 ### 文件位置、格式和隐私边界
 
-默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。新写入 envelope 使用 `schema_version=3`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、保存 generation、`active/clean`、State、Context、工作区清单、`tool_boundary` 和覆盖其他字段的 SHA-256 完整性值。schema 1 仍可读取诊断，schema 2 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 3。
+默认文件位于当前用户的 `~/.mini_agent/sessions/`，目录只允许当前用户访问，每个 session 是一个不超过 16 MiB 的 JSON 文件。写入使用同目录临时文件、文件 `fsync` 和 `os.replace`，并用同名独占锁文件拒绝并发写入；遗留锁不会被自动抢占。新写入 envelope 使用 `schema_version=4`，包含 `session_id`、包版本、规范化工作区根目录、保存时间、保存 generation、`active/clean`、State、Context、工作区清单、`tool_boundary`、idle `child_sessions` 快照和覆盖其他字段的 SHA-256 完整性值。schema 1 仍可读取诊断，schema 2/3 的 clean 安全点仍可恢复，并在恢复占用时升级为 schema 4。
 
 State 导出的是权威计划、执行、失败、恢复、generation、预算私有计数、原始恢复参数和检查点**元数据**；不会写入锁、`ProcessManager`、`Popen`、线程或检查点前镜像字节。Context 导出普通任务历史、摘要、压缩标记、摘要轮数和待消费 Runtime Notice，但不导出受保护的 system prompt。assistant 工具调用必须与按序的 `role=tool` 结果一一配对。
 
@@ -592,7 +627,7 @@ SessionStore 提供读取、大小检查、schema 检查、字段/引用检查�
 PYTHONPATH=src python -m mini_agent --resume <session_id>
 ```
 
-恢复只接受 schema 2/3 中 `schema_version`、`save_kind=safe_point`、`handoff_status=clean` 且工作区清单仍匹配的完整 committed 会话。CLI 会先构造新的 State、Context、工具注册表、ProcessManager 和 PermissionGate，再在 session 独占锁内复核原提交与工作区清单，把会话改写为 schema 3 的后继 generation `active` 版本；提交成功后显示原任务状态并等待输入，不自动请求 LLM。工作区变化、无法完整检查的路径、`active` 会话、pending tool boundary、损坏文件和锁竞争都会在调用 LLM 或工具前拒绝。恢复后的正常退出才重新写入 `clean`；异常退出留下 `active`，不能再次直接恢复。
+恢复只接受 schema 2/3/4 中 `schema_version`、`save_kind=safe_point`、`handoff_status=clean` 且工作区清单仍匹配的完整 committed 会话。CLI 会先构造新的 State、Context、工具注册表、ProcessManager 和 PermissionGate，再在 session 独占锁内复核原提交与工作区清单，把会话改写为 schema 4 的后继 generation `active` 版本；schema 4 中的 idle 子会话也会从当前本地角色、模型和 Skill Catalog 重新核对身份。提交成功后显示原任务状态并等待输入，不自动请求 LLM。工作区变化、无法完整检查的路径、`active` 会话、pending tool boundary、损坏文件和锁竞争都会在调用 LLM 或工具前拒绝。恢复后的正常退出才重新写入 `clean`；异常退出留下 `active`，不能再次直接恢复。
 
 v0.30 的 schema 1 会话仍可读取诊断，但不能续跑。旧验证资格在恢复时清空，`verification_history` 只用于审计和 Trace 回放；恢复后的任务需要独立验证。旧 PID、旧 `process_id` 和没有前镜像字节的旧 `ready` checkpoint 只保留审计记录，不能控制进程或执行回滚。
 
@@ -617,7 +652,7 @@ PYTHONPATH=src python -m mini_agent --resume <session_id>
 ```
 
 - `clean + safe_point`：检查 workspace manifest，claim 原 session，创建新的 resume generation，等待用户输入。
-- `active + schema 3 + pending tool_boundary`：显示源 session、派生 session、workspace 变化和 issue 分类；claim 后只在新 session 上运行。
+- `active + schema 3/4 + pending tool_boundary`：显示源 session、派生 session、workspace 变化和 issue 分类；claim 后只在新 session 上运行。
 - schema 1、schema 2 active、没有 pending 证据或损坏的 session：拒绝进入运行时，不调用 LLM、handler 或 PermissionGate。
 
 崩溃恢复使用私有的 `crash_recovery_claims.json` sidecar，位置与 session 目录相同。它只保存源 session ID、源完整性摘要、派生 ID、恢复 ID 和 `preparing/committed` 阶段，不保存工具原始参数、shell 命令、stdin 或模型配置。先提交 `preparing` 意图，再写入并校验派生 session，最后提交 `committed`；中途失败可用同一派生 ID 重试。sidecar 或派生 session 的耐久性未确认时，不向 CLI 返回可运行对象；已 `committed` 的同一源完整性重复 claim 会报告已有的派生 session。
@@ -914,13 +949,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.48，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.49，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，v0.47 增加具名同步子代理角色，v0.48 增加进程内后台子代理。详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)、[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)、[第 47 课](../tutorials/47-agent-profiles.md)和[第 48 课](../tutorials/48-background-subagents.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，v0.47 增加具名同步子代理角色，v0.48 增加进程内后台子代理，v0.49 增加可续接子会话和 schema 4 空闲快照。详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)、[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)、[第 47 课](../tutorials/47-agent-profiles.md)、[第 48 课](../tutorials/48-background-subagents.md)和[第 49 课](../tutorials/49-resumable-child-session.md)。
 
 ### 3.1 上下文架构
 
@@ -966,7 +1001,7 @@ tool_executor = ToolExecutor(registry, on_result=state.record_tool)
 
 ### 3.2 持久化工具执行边界
 
-输入 `/save` 后，session 文件升级为 schema 3。它仍然是单个原子 JSON 文件，同时保存 State、Context 和最后一个工具回合的 `tool_boundary`；不会额外创建 journal。`session_generation` 是每次提交递增的序号。
+输入 `/save` 后，session 文件升级为 schema 4。它仍然是单个原子 JSON 文件，同时保存 State、Context、最后一个工具回合的 `tool_boundary` 和可续接的 idle 子快照；不会额外创建 journal。`session_generation` 是每次提交递增的序号。
 
 工具回合的持久化顺序是固定的：先写入 assistant 消息和按模型顺序排列的 pending call；通过权限、参数和计划前置检查后，在 handler 真正开始前提交 `handler_admitted`；handler 返回后，先记账 State，再追加对应的 `role=tool`，然后原子提交该 call 的结果。对 `delegate_task`，子结果先进入 boundary 的 `result_ready` 区；交付时再把父 attempt、State 的 `committed` 生命周期、`role=tool` 和边界状态一起提交。所有 call 都 committed 后，才允许再次请求 LLM。`run_shell` 包括 `purpose="verification"` 始终按 `possible` 记录；`recover` 可能进入另一个工具或执行回滚，外层边界也保守记录为 `possible`，实际恢复 attempt 和 generation 仍由 `RecoveryRuntime` 管理。
 

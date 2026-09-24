@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.49.0] - Resumable child sessions
+
+- Added `followup_subagent` for a complete next-round contract on the same child session after the previous successful result is claimed; each round keeps its own delegation, result identity, and usage while retaining the child Context history.
+- Added bounded cumulative limits of four child rounds, 16 LLM calls, 48 tool calls, 64,000 tokens, and 240 seconds. Followups preserve the original child slot and require fresh per-round Skill authorization while keeping parent aggregate budgets and concurrency gates.
+- Added atomic schema 4 safe points with bounded idle child snapshots, strict identity/result/Context/usage validation, and resume-time rebind checks for the current role, model, and Skill Catalog. Incompatible snapshots are reported without replaying a worker or request; schema 1/2/3 remain readable.
+- Added pure background startup-round handling for spawn and followup, round-indexed status/results, offline lifecycle/resume/failure coverage, lesson 49, and synchronized manuals, plans, README files, and package metadata.
+- Preserved provider usage provenance and actual child consumption in resumable-session accounting. A completed report whose snapshot exceeds the limit remains deliverable, with continuation explicitly closed; same-process followups recheck frozen Skill file identity before starting the child.
+
 ## [v0.48.0] - In-process background Subagents
 
 - Added parent-only `spawn_subagent`, `get_subagent_status`, `get_subagent_result`, and `cancel_subagent` tools while preserving synchronous `delegate_task` behavior. Background investigations require an explicit named role and run only in the current CLI process.

@@ -93,7 +93,7 @@ class ExecutionResult:
             return format_tool_result(self.output, max_chars=8000)
         if self.tool in {"delegate_task", "get_subagent_result"}:
             return format_tool_result(self.output, max_chars=12 * 1024)
-        if self.tool in {"spawn_subagent", "get_subagent_status", "cancel_subagent"}:
+        if self.tool in {"spawn_subagent", "followup_subagent", "get_subagent_status", "cancel_subagent"}:
             return format_tool_result(self.output, max_chars=2000)
         if self.tool == "skill":
             # SKILL.md is bounded at 32 KiB. Preserve the complete JSON tool

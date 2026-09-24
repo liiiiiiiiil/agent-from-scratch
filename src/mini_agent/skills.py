@@ -426,7 +426,7 @@ class SkillCatalog:
         encoded = result.encode("utf-8")[:maximum_bytes]
         return encoded.decode("utf-8", errors="ignore")
 
-    def _open_frozen(self, definition: SkillDefinition) -> bytes:
+    def _open_frozen(self, definition: SkillDefinition, *, read_content: bool = True) -> bytes:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             root_fd = os.open(definition.root, flags | getattr(os, "O_DIRECTORY", 0))
@@ -446,11 +446,11 @@ class SkillCatalog:
                             raise SkillAccessError("Skill 文件已发生变化")
                         if before.st_size > MAX_SKILL_FILE_BYTES:
                             raise SkillAccessError("Skill 文件超过大小上限")
-                        raw = _read_all(file_fd, MAX_SKILL_FILE_BYTES)
+                        raw = _read_all(file_fd, MAX_SKILL_FILE_BYTES) if read_content else b""
                         after = os.fstat(file_fd)
                         if not _same_snapshot(after, definition.file_snapshot):
                             raise SkillAccessError("Skill 文件已发生变化")
-                        if len(raw) != after.st_size:
+                        if read_content and len(raw) != after.st_size:
                             raise SkillAccessError("Skill 文件读取长度异常")
                         return raw
                     finally:
@@ -492,6 +492,10 @@ class SkillCatalog:
             "bytes": len(raw),
             "content": body,
         }
+
+    def verify_identity(self, name: str) -> None:
+        """Recheck a frozen Skill without reading or returning its body."""
+        self._open_frozen(self.get(name), read_content=False)
 
 
 __all__ = [

@@ -126,7 +126,7 @@ def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> To
 
 
 def make_background_subagent_tools(parent_state: Any, manager: DelegationManager) -> tuple[Tool, ...]:
-    """Build the four parent-only tools for asynchronous investigation."""
+    """Build the parent-only tools for asynchronous investigation."""
     spawn = _contract_tool(parent_state, manager, background=True)
 
     def validate_id(arguments: dict[str, Any]) -> None:
@@ -158,8 +158,38 @@ def make_background_subagent_tools(parent_state: Any, manager: DelegationManager
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
 
+    followup_parameters = json.loads(json.dumps(spawn.parameters))
+    followup_parameters["properties"].pop("agent_profile", None)
+    followup_parameters["properties"].pop("model_profile", None)
+    followup_parameters["properties"].pop("source_id", None)
+    followup_parameters["properties"]["child_session_id"] = {
+        "type": "string", "minLength": 36, "maxLength": 36,
+        "pattern": _CHILD_SESSION_ID.pattern,
+    }
+    followup_parameters["required"] = [
+        "child_session_id",
+        *(name for name in followup_parameters["required"]
+          if name not in {"agent_profile", "model_profile", "source_id"}),
+    ]
+
+    def validate_followup(arguments: dict[str, Any]) -> None:
+        validate_id(arguments)
+        manager.validate_followup_arguments(arguments, parent_state)
+
+    def followup(**arguments: Any) -> str:
+        return manager.followup_background(arguments, parent_state)
+
     return (
         spawn,
+        Tool(
+            name="followup_subagent",
+            description=(
+                "为已领取 completed 结果的 child_session_id 提交一份完整的新调查合同并启动下一轮。"
+                "角色、模型沿用子会话；本轮 Skill 权限会重新申请。之后仍用 get_subagent_result 领取结果。"
+            ),
+            parameters=followup_parameters, handler=followup,
+            argument_validator=validate_followup,
+        ),
         Tool(
             name="get_subagent_status",
             description="按 child_session_id 查询有界状态与 result_id，不返回调查正文。",
