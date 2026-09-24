@@ -176,6 +176,17 @@ class DelegationRecord:
     reserved_usage: DelegationUsage = field(default_factory=DelegationUsage)
     progress_hash: str | None = None
     parent_attempt_id: str | None = None
+    agent_profile: str | None = None
+    agent_profile_fingerprint: str | None = None
+
+
+def _delegation_record_payload(record: DelegationRecord) -> dict[str, Any]:
+    """Keep legacy role-free State/session record shapes byte-compatible."""
+    payload = asdict(record)
+    if payload.get("agent_profile") is None:
+        payload.pop("agent_profile", None)
+        payload.pop("agent_profile_fingerprint", None)
+    return payload
 
 
 def delegation_progress_hash(result: Any) -> str:
@@ -1130,6 +1141,10 @@ class AgentState:
             "scope": [bounded(item, 240) for item in tuple(getattr(task, "scope", ()))[:8]],
             "purpose": bounded(getattr(task, "purpose", ""), 80),
             "requested_tools": list(tuple(getattr(task, "requested_tools", ()))[:4]),
+            **({"agent_profile": getattr(task, "agent_profile")}
+               if getattr(task, "agent_profile", None) else {}),
+            **({"agent_profile_fingerprint": getattr(task, "agent_profile_fingerprint")}
+               if getattr(task, "agent_profile_fingerprint", None) else {}),
         }
 
     def reserve_delegation(self, task: Any) -> DelegationRecord:
@@ -1210,6 +1225,8 @@ class AgentState:
                     created_at=_delegation_now(),
                     contract_summary=self._delegation_summary(task),
                     reserved_usage=request_usage,
+                    agent_profile=getattr(task, "agent_profile", None),
+                    agent_profile_fingerprint=getattr(task, "agent_profile_fingerprint", None),
                 )
                 self.delegation_records.append(record)
                 budget = replace(
@@ -1245,6 +1262,8 @@ class AgentState:
                 task_contract_hash=str(getattr(task, "contract_hash", "")),
                 delivery_status="created", outcome="pending", created_at=_delegation_now(),
                 contract_summary=self._delegation_summary(task),
+                agent_profile=getattr(task, "agent_profile", None),
+                agent_profile_fingerprint=getattr(task, "agent_profile_fingerprint", None),
             ))
         return self.delegation_result_ready(
             task.delegation_id, result, diagnostic_reason=reason,
@@ -1290,6 +1309,9 @@ class AgentState:
                     or raw.get("parent_task_id") != record.parent_task_id
                     or raw.get("contract_hash") != record.task_contract_hash):
                 raise ValueError("SubagentResult 身份或合同不一致")
+            if (raw.get("agent_profile") != record.agent_profile
+                    or raw.get("agent_profile_fingerprint") != record.agent_profile_fingerprint):
+                raise ValueError("SubagentResult agent_profile 身份不一致")
             if record.delivery_status == "committed":
                 if record.result_id == result_id and record.result_hash == result_hash:
                     return record
@@ -4075,7 +4097,7 @@ class AgentState:
                 "crash_recoveries": [asdict(item) for item in self.crash_recoveries],
                 "crash_issues": [asdict(item) for item in self.crash_issues],
                 "crash_decisions": [asdict(item) for item in self.crash_decisions],
-                "delegation_records": [asdict(item) for item in self.delegation_records],
+                "delegation_records": [_delegation_record_payload(item) for item in self.delegation_records],
                 "delegation_budget": asdict(self.delegation_budget),
                 "trace_events": [asdict(item) for item in self.trace_events],
                 "process_records": [asdict(item) for item in self.process_records],
@@ -4239,6 +4261,16 @@ class AgentState:
                 raise SessionExportError("delegation outcome 无效")
             if not isinstance(raw.get("task_contract_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", raw.get("task_contract_hash", "")):
                 raise SessionExportError("delegation contract hash 无效")
+            role_id = raw.get("agent_profile")
+            role_fingerprint = raw.get("agent_profile_fingerprint")
+            if (role_id is None) != (role_fingerprint is None):
+                raise SessionExportError("delegation agent_profile 身份字段不完整")
+            if role_id is not None and (
+                    not isinstance(role_id, str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role_id)
+                    or not isinstance(role_fingerprint, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", role_fingerprint)):
+                raise SessionExportError("delegation agent_profile 身份无效")
             if delivery_status in {"result_ready", "committed"}:
                 if not isinstance(raw.get("result_id"), str) or not raw["result_id"]:
                     raise SessionExportError(f"{delivery_status} delegation 缺少 result_id")
@@ -4958,6 +4990,7 @@ class AgentState:
                 deepcopy(raw.get("contract_summary", {})),
                 DelegationUsage.from_value(raw.get("reserved_usage", {})),
                 raw.get("progress_hash"), raw.get("parent_attempt_id"),
+                raw.get("agent_profile"), raw.get("agent_profile_fingerprint"),
             ))
         raw_budget = payload.get("delegation_budget") or {}
         delegation_budget = DelegationBudget(**{
@@ -5126,7 +5159,7 @@ class AgentState:
                 "crash_recoveries": [asdict(x) for x in self.crash_recoveries],
                 "crash_issues": [asdict(x) for x in self.crash_issues],
                 "crash_decisions": [asdict(x) for x in self.crash_decisions],
-                "delegations": [asdict(x) for x in self.delegation_records],
+                "delegations": [_delegation_record_payload(x) for x in self.delegation_records],
                 "delegation_budget": {
                     **asdict(self.delegation_budget),
                     "remaining_subagents": max(0, self.delegation_budget.remaining_subagents),

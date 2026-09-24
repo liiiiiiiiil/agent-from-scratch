@@ -18,6 +18,21 @@ MEMORY_RETRIEVAL_ENABLED = True
 # ]
 REFERENCES = []
 
+# Optional named Subagent roles. Built-in IDs (explorer, reviewer, tester,
+# general) are reserved. This placeholder role is intentionally local-only;
+# replace the ID and guidance with project-specific, non-secret text.
+# AGENT_PROFILES = {
+#     "docs_auditor": {
+#         "description": "检查文档中的链接和术语一致性",
+#         "prompt": "只检查已授权的文档范围，并引用具体证据。",
+#         "tools": ["read_file", "list_dir", "grep"],
+#         "permissions": {"grep": "allow", "read_file": "allow"},
+#         "skills": [],
+#         # "model_profile": "child-anthropic",
+#     },
+# }
+AGENT_PROFILES = {}
+
 # Local and loopback HTTP MCP servers.  They remain available to
 # ``python -m mini_agent.mcp``; set ``agent_enabled=True`` to also connect them
 # from the parent Agent.  HTTP uses only JSON responses in this version.

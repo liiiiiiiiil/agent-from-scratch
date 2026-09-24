@@ -32,6 +32,7 @@ from mini_agent.references import ReferenceCatalog
 from mini_agent.tools.references import make_reference_tools
 from mini_agent.skills import SkillCatalog
 from mini_agent.tools.skill import make_skill_tool
+from mini_agent.agent_profiles import AgentProfileCatalog
 
 def create_registry(state: AgentState | None = None,
                     workspace_root: str | None = None,
@@ -42,7 +43,8 @@ def create_registry(state: AgentState | None = None,
                     memory_store: MemoryStore | None = None,
                     reference_catalog: ReferenceCatalog | None = None,
                     include_mcp: bool | None = None,
-                    skill_catalog: SkillCatalog | None = None) -> ToolRegistry:
+                    skill_catalog: SkillCatalog | None = None,
+                    agent_profile_catalog: AgentProfileCatalog | None = None) -> ToolRegistry:
     result = ToolRegistry()
     for tool in (calculate_tool, read_file_tool, write_file_tool, edit_file_tool, list_dir_tool, grep_tool, run_shell_tool):
         result.register(tool)
@@ -51,6 +53,12 @@ def create_registry(state: AgentState | None = None,
     if include_delegation:
         if state is None:
             raise ValueError("delegate_task 必须绑定父 AgentState")
+        # Both catalogs are Runtime-scoped and rebuilt for new and resumed
+        # tasks; session data never supplies local role or Skill definitions.
+        skill_catalog = skill_catalog or SkillCatalog(workspace_root or os.getcwd())
+        agent_profile_catalog = agent_profile_catalog or AgentProfileCatalog(
+            runtime_config.AGENT_PROFILES, provider_catalog=provider_catalog,
+        )
         from mini_agent.delegation import DelegationManager
         from mini_agent.tools.delegation import make_delegate_task_tool
         manager = DelegationManager(
@@ -59,6 +67,8 @@ def create_registry(state: AgentState | None = None,
             parent_registry=result,
             provider_catalog=provider_catalog,
             parent_state=state,
+            agent_profile_catalog=agent_profile_catalog,
+            skill_catalog=skill_catalog,
         )
         result._delegation_manager = manager
         result.register(make_delegate_task_tool(state, manager))

@@ -16,7 +16,7 @@ Build a working AI agent from scratch with the Python standard library, one conc
 
 For developers who want to understand how an LLM agent runs without a framework. Each lesson focuses on one concept added since the previous version, with source, diffs, and design trade-offs kept traceable.
 
-**Current status**: the code and tutorial for `v0.46` are complete (lesson 46: restricted HTTP MCP, text Resources, and Prompts); Stage 12 now includes local/loopback HTTP MCP, parent MCP Tools, text Resources, text Prompts, and local Skills. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
+**Current status**: the code and tutorial for `v0.47` are complete (lesson 47: named Subagent roles); Stage 13 begins with synchronous read-only delegation roles: `explorer`, `reviewer`, `tester`, `general`, and local custom roles. The authoritative tutorials are the current files under `docs/tutorials/`; check out the lesson's declared tag only when running its code.
 
 Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial guide](./docs/tutorials/README.md) · [manual](./docs/operation/manual.md)
 
@@ -85,6 +85,8 @@ Quick links: [run](#quick-start) · [learning path](#learning-path) · [tutorial
     <tr><td><strong>v0.44</strong></td><td><a href="./docs/tutorials/44-mcp-tools-runtime.md">MCP Tools in the parent Agent Runtime</a></td><td>Expose only explicitly enabled local MCP Tools through the shared Registry, permission, planning, durable boundary, and recovery flow with strict schemas, classified failures, and Subagent isolation.</td></tr>
     <tr><td><strong>v0.45</strong></td><td><a href="./docs/tutorials/45-local-skills.md">Local Skills discovery and on-demand loading</a></td><td>Show bounded Skill metadata, load a body only after permission, and keep workflow guidance separate from Tool authorization, State/Trace summaries, verification evidence, and Subagent capabilities.</td></tr>
     <tr><td><strong>v0.46</strong></td><td><a href="./docs/tutorials/46-mcp-http-resources-prompts.md">Restricted HTTP MCP, text Resources, and Prompts</a></td><td>Connect to JSON-only HTTP MCP, freeze paginated Resource and Prompt directories, and let the parent CLI select untrusted material or reviewed templates within permission and preview boundaries.</td></tr>
+    <tr><th colspan="3"><a id="stage-13"></a>Stage 13 · Lightweight Agent collaboration</th></tr>
+    <tr><td><strong>v0.47</strong></td><td><a href="./docs/tutorials/47-agent-profiles.md">Named Subagent roles</a></td><td>Select a frozen role prompt, read-only tool subset, model alias, and parent-preauthorized Skills for synchronous delegation; the tester role can analyze and suggest tests only.</td></tr>
   </tbody>
 </table>
 

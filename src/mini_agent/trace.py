@@ -111,7 +111,7 @@ _DELEGATION_FIELDS = (
     "task_contract_hash", "delivery_status", "outcome", "result_id", "result_hash",
     "usage", "created_at", "started_at", "result_ready_at", "committed_at",
     "cancellation_reason", "diagnostic_reason", "result_summary", "contract_summary",
-    "reserved_usage", "progress_hash",
+    "reserved_usage", "progress_hash", "agent_profile", "agent_profile_fingerprint",
 )
 
 _ACCEPTED_RECOVERY_STATUSES = {"reserved", "executed", "terminal"}

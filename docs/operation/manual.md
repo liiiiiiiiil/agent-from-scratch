@@ -1,6 +1,6 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.46**（受限 HTTP MCP、文本 Resource 与 Prompt；含此前父 Agent Runtime MCP Tool、Memory、相关检索、具名本地 References 与本地 Skills）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.47**（具名子代理角色；含此前同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
 
 ## v0.43 独立 stdio MCP Client
 
@@ -140,8 +140,10 @@ Runtime 创建时固定扫描两处目录：
 
 成功结果会包含 Skill ID、来源、字节数和完整正文。完整正文只作为当前调用的普通 `role=tool`
 历史结果，并沿用现有 Context 裁剪；State、Trace 和额外目录快照只保留 ID、来源和字节数。
-开启 `/save` 后，已经进入普通工具 history 的正文可能随会话保存。Catalog、Skill Tool、正文、
-父权限和目录提示都不进入 Subagent；Skill 也不会成为 Plan 或 verification evidence。
+开启 `/save` 后，已经进入普通工具 history 的正文可能随会话保存。除 v0.47 具名角色明确
+列出且父侧按精确 ID 预授权的 Skills 外，Catalog、Skill Tool、正文、父权限和目录提示不会
+进入 Subagent；角色子 Catalog 只能加载本次获准 ID。Skill 也不会成为 Plan 或 verification
+evidence。
 
 ### 观察一个本地 Skill
 
@@ -227,6 +229,61 @@ history，也不会请求 LLM；确认后沿用现有 `run_task` 路径运行父
 列表和读取都处理完整分页，检测重复游标；Resource 返回 URI 必须与请求一致，并拒绝 blob、
 图片、音频和嵌入内容。Prompt 参数必须命中冻结定义，展开结果拒绝 system/tool 角色和非文本
 内容。目录、正文、HTTP 认证和 session ID 都不会开放给 Subagent。
+
+## v0.47 具名子代理角色
+
+v0.47 为已有的同步 `delegate_task` 增加可选 `agent_profile`。未传该字段时继续使用原来的
+通用子代理合同、模型选择、结果 JSON 和持久化字段；传入角色后，运行时冻结该角色的提示、
+工具子集、模型别名、静态权限和可申请的 Skill ID。委派依然是单层、同步、只读调用。
+
+四个内置角色分别是 `explorer`（定位文件和实现）、`reviewer`（寻找具体缺陷和风险）、
+`tester`（分析测试并提出建议）和 `general`（通用只读调查）。前三个默认工具集为
+`read_file`、`list_dir`、`grep`；`general` 还可以使用纯计算工具 `calculate`。每次实际可用
+工具都必须同时在子代理总白名单、角色工具集和本次 `requested_tools` 中，并通过 ScopeGate。
+角色 `permissions` 只能针对角色工具写 `allow` 或 `deny`；被拒绝的工具不会出现在子模型
+工具目录中，子 Runtime 不会提示用户授权。
+
+本地可在未跟踪的 `config_local.py` 中增加自定义角色；`AGENT_PROFILES` 默认为空。内置名称
+不能覆盖，角色 ID 必须以小写字母开头，后面只能包含小写字母、数字、`_`、`-`，最多 64
+字符。每个角色必填 `description`、`prompt`、`tools`，并可设置 `model_profile`、
+`permissions` 和 `skills`。受跟踪的 `config_example.py` 有不含真实凭据的占位示例。
+
+`model_profile` 是现有 provider catalog 中的模型别名；`agent_profile` 是一组角色规则。
+角色没有配置模型时沿用子代理默认模型。显式同时传入两个字段时，模型别名必须与角色解析
+出的子模型一致；未知、越权或冲突的别名会在子代理发出 LLM 请求前拒绝，不会自动切换。
+
+角色列出的 Skill ID 只是可申请的本地工作流资料。启动子 Runtime 前，父侧会针对每个精确
+ID 调用当前 `PermissionGate`；拒绝的 ID 不进入子 Runtime，角色引用不存在的 ID 则拒绝此次委派。获准项使用只含这些 ID
+的子 Catalog 和独立 allow/deny 策略，正文只有在子模型按需调用 `skill(name)` 后才读取。
+正文仍是不可信 `role=tool` 结果，不增加工具能力、不自动执行其中的命令，也不会进入父
+State、Trace 摘要或 verification evidence。未传 `agent_profile` 的旧委派没有 Skill 工具。
+
+`tester` 没有 shell 或测试执行工具，角色提示要求它只提出测试建议；报告校验也拒绝“测试已
+通过”一类说法，并要求明确说明本次没有执行测试。实际测试仍由父 Agent 按原计划和权限流程
+决定是否运行。
+
+显式角色的委派记录和结果只保存角色 ID 与配置指纹，不保存角色提示正文或子 Skill 正文。
+合同哈希会包含这两个角色身份字段，所以相同调查选不同角色会有不同身份；未传角色的合同
+哈希及 session 字段保持旧形状。ScopeGate 还会按 realpath 检查 `config_local.py`、工作区
+内 session 敏感目录、当前实际使用的 `SessionStore.root` 和它们的符号链接终点。
+
+例如，让模型使用审阅角色时，调用只需在原合同上增加一个字段：
+
+```json
+{
+  "goal": "检查模块的错误处理边界",
+  "scope": ["src/mini_agent"],
+  "constraints": [],
+  "expected_findings": ["具体缺陷与证据"],
+  "requested_tools": ["read_file", "grep"],
+  "selected_parent_facts": [],
+  "purpose": "investigation",
+  "agent_profile": "reviewer"
+}
+```
+
+运行后可在结构化委派结果中看到 `agent_profile` 与指纹，同时仍只有原有的同步 JSON 结果。
+本版没有后台子代理或子会话续接能力；它们属于后续版本计划。
 
 ## v0.42 具名本地 References
 
@@ -766,6 +823,7 @@ PYTHONPATH=src python -m mini_agent
 | `PARENT_MODEL_PROFILE` | `default` | 新配置中的父 profile 别名 |
 | `SUBAGENT_MODEL_PROFILE` | `None` | 子默认 profile；为空时按白名单回退到父 profile |
 | `SUBAGENT_ALLOWED_MODEL_PROFILES` | `("default",)` | `delegate_task.model_profile` 可请求的 profile 白名单 |
+| `AGENT_PROFILES` | `{}` | v0.47 本地自定义具名子代理角色；不能覆盖四个内置角色 |
 | `MAX_ITERATIONS` | `50` | agent loop 最大轮数 |
 | `CONTEXT_WINDOW` | `128000` | 模型上下文窗口的 token 估算值 |
 | `OUTPUT_MODE` | `normal` | 终端输出级别：`quiet`、`normal` 或 `debug` |
@@ -801,13 +859,13 @@ python -m mini_agent
 
 ---
 
-## 3. 当前能力（v0.46，含 v0.18.1 完成提醒修复）
+## 3. 当前能力（v0.47，含 v0.18.1 完成提醒修复）
 
 v0.13 在 v0.12 的预算与裁剪之上加入历史压缩和 Context Observability。完整 `history` 保留在本地；每次 LLM 调用前，`ContextManager` 都生成一个可发送的、协议合法的上下文副本。预算超限且存在旧轮次时，旧历史会先尝试压缩为摘要，摘要失败则退回 v0.12 的 trimming。终端默认使用 `OUTPUT_MODE = "normal"` 显示简短进度；设置为 `debug` 可查看 token 分桶、裁剪/压缩事件和有界工具细节，设置为 `quiet` 可隐藏过程输出。`CONTEXT_OBSERVABILITY = False` 仍可关闭默认 observer。
 
 v0.14 在启动时加载适用的 `AGENTS.md`，并将项目级指令作为受保护 system context 注入每次请求。详情见[第 14 课](../tutorials/14-project-instructions.md)。
 
-v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)和[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)。
+v0.41 在父 Context 请求 LLM 前自动检索少量相关 Memory 候选，也提供显式 `search_memories`。候选是临时、不可信的 system 资料区，最多 4 条和 2400 字符，单独计入 `ContextStats.memory`，不会进入 State、history 或 session；失败只在当前请求降级并在下一次重试。v0.42 提供父侧具名本地 References，v0.43 的 MCP Client 只通过独立命令运行，v0.44 将显式启用的 MCP Tool 接入父 Runtime，v0.45 增加本地 Skills 的元数据提示与按需加载，v0.46 增加 JSON-only HTTP、文本 Resource 和文本 Prompt，v0.47 增加具名同步子代理角色，详情见[第 42 课](../tutorials/42-local-references.md)、[第 43 课](../tutorials/43-stdio-mcp-client.md)、[第 44 课](../tutorials/44-mcp-tools-runtime.md)、[第 45 课](../tutorials/45-local-skills.md)、[第 46 课](../tutorials/46-mcp-http-resources-prompts.md)和[第 47 课](../tutorials/47-agent-profiles.md)。
 
 ### 3.1 上下文架构
 

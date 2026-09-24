@@ -25,9 +25,10 @@ import time
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
+from mini_agent.agent_profiles import AgentProfile, AgentProfileCatalog
 from mini_agent.context import ContextBudget, ContextManager, count_tokens
 from mini_agent.instructions import InstructionLoader
-from mini_agent.permission import ALLOW, PermissionGate, PermissionPolicy
+from mini_agent.permission import ALLOW, DENY, PermissionGate, PermissionPolicy
 from mini_agent.prompt import build_subagent_prompt
 from mini_agent.providers.base import ProviderResponse
 from mini_agent.providers.catalog import ModelBinding, ModelBindingRef, ProviderCatalog
@@ -38,6 +39,7 @@ from mini_agent.tools.base import (
     ToolExecutor,
     ToolRegistry,
 )
+from mini_agent.skills import SkillCatalog, SkillAccessError
 
 
 ALLOWED_SUBAGENT_TOOLS = frozenset({"calculate", "read_file", "list_dir", "grep"})
@@ -144,16 +146,33 @@ class SubagentBudget:
 class ScopeGate:
     """Validate contract scope and every child workspace-reader path."""
 
-    def __init__(self, workspace_root: str | os.PathLike[str], scope: list[str] | tuple[str, ...]):
+    def __init__(self, workspace_root: str | os.PathLike[str], scope: list[str] | tuple[str, ...],
+                 *, session_root: str | os.PathLike[str] | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root)))
         if not os.path.isdir(self.workspace_root):
             raise DelegationError("workspace_root 必须是目录")
+        home_sessions = os.path.realpath(os.path.expanduser("~/.mini_agent/sessions"))
+        workspace_sensitive = (
+            os.path.join(self.workspace_root, ".mini_agent", "sessions"),
+            os.path.join(self.workspace_root, "sessions"),
+            os.path.join(self.workspace_root, ".sessions"),
+        )
+        sensitive_roots = (*workspace_sensitive, home_sessions)
+        if session_root is not None:
+            sensitive_roots += (os.fspath(session_root),)
+        self._sensitive_roots = tuple(dict.fromkeys(
+            os.path.realpath(path) for path in sensitive_roots
+        ))
+        self._sensitive_config = os.path.realpath(
+            os.path.join(self.workspace_root, "config_local.py")
+        )
         if not isinstance(scope, (list, tuple)) or not 1 <= len(scope) <= DELEGATION_MAX_SCOPE:
             raise DelegationError("scope 必须包含 1–8 个相对路径")
         self.scope = tuple(self._validate_relative(item, "scope") for item in scope)
         self._scope_realpaths = tuple(self._resolve(item) for item in self.scope)
         for path in self._scope_realpaths:
             self._require_inside_workspace(path)
+            self._reject_sensitive(path, "scope")
 
     @staticmethod
     def _validate_relative(value: Any, field_name: str) -> str:
@@ -185,6 +204,18 @@ class ScopeGate:
             if self._safe_commonpath(scope, path)
         )
 
+    def _reject_sensitive(self, path: str, field_name: str) -> None:
+        normalized = os.path.realpath(os.path.abspath(path))
+        if os.path.basename(normalized).casefold() == "config_local.py" or normalized == self._sensitive_config:
+            raise DelegationError(f"{field_name} 不允许访问 config_local.py")
+        for root in self._sensitive_roots:
+            try:
+                common = os.path.commonpath([root, normalized])
+            except ValueError:
+                continue
+            if common == root:
+                raise DelegationError(f"{field_name} 不允许访问 session 敏感目录")
+
     @staticmethod
     def _safe_commonpath(left: str, right: str) -> bool:
         try:
@@ -198,11 +229,17 @@ class ScopeGate:
         relative = self._validate_relative(value, "path")
         resolved = self._resolve(relative)
         self._require_inside_workspace(resolved)
+        self._reject_sensitive(resolved, "path")
         if not self._inside_scope(resolved):
             raise DelegationError("path 不在委派 scope 内")
         return resolved
 
     def validate_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
+        # The filtered registry admits ``skill`` only when the role runner has
+        # supplied its parent-authorized restricted catalog. It is not a path
+        # reader, so it needs no workspace scope normalization here.
+        if name == "skill":
+            return
         if name not in ALLOWED_SUBAGENT_TOOLS:
             raise DelegationError(f"工具 {name} 不在 Subagent 白名单")
         if name in {"read_file", "list_dir", "grep"}:
@@ -221,15 +258,30 @@ class ScopeGate:
 
     def wrap_handler(self, name: str, handler: Callable) -> Callable:
         """Keep broad directory readers from exposing the local config file."""
+        if name == "read_file":
+            def safe_read_file(path, *args, **kwargs):
+                self.validate_path(path)
+                return handler(path, *args, **kwargs)
+            return safe_read_file
         if name == "list_dir":
             def safe_list_dir(path="."):
+                self.validate_path(path)
                 rendered = handler(path)
                 if not isinstance(rendered, str):
                     return rendered
-                return "\n".join(
-                    line for line in rendered.splitlines()
-                    if line.strip().rstrip("/") != "config_local.py"
-                )
+                safe_lines = []
+                for line in rendered.splitlines():
+                    entry = line.strip().rstrip("/")
+                    if not entry:
+                        safe_lines.append(line)
+                        continue
+                    candidate = os.path.join(os.fspath(path), entry)
+                    try:
+                        self._reject_sensitive(candidate, "path")
+                    except DelegationError:
+                        continue
+                    safe_lines.append(line)
+                return "\n".join(safe_lines)
             return safe_list_dir
         if name != "grep":
             return handler
@@ -239,15 +291,25 @@ class ScopeGate:
             results: list[str] = []
             max_results = 100
             for root, dirs, files in os.walk(path):
-                dirs[:] = [directory for directory in dirs if (
-                    directory != "config_local.py"
-                    and self._safe_commonpath(self.workspace_root, os.path.realpath(os.path.join(root, directory)))
-                    and self._inside_scope(os.path.realpath(os.path.join(root, directory)))
-                )]
+                kept_dirs = []
+                for directory in dirs:
+                    canonical = os.path.realpath(os.path.join(root, directory))
+                    try:
+                        self._reject_sensitive(canonical, "path")
+                    except DelegationError:
+                        continue
+                    if (self._safe_commonpath(self.workspace_root, canonical)
+                            and self._inside_scope(canonical)):
+                        kept_dirs.append(directory)
+                dirs[:] = kept_dirs
                 for filename in sorted(files):
-                    if filename == "config_local.py" or not fnmatch.fnmatch(filename, include):
+                    if not fnmatch.fnmatch(filename, include):
                         continue
                     file_path = os.path.realpath(os.path.join(root, filename))
+                    try:
+                        self._reject_sensitive(file_path, "path")
+                    except DelegationError:
+                        continue
                     if not self._inside_scope(file_path):
                         continue
                     try:
@@ -388,6 +450,11 @@ class DelegatedTask:
     created_at: str = ""
     model_profile: str | None = None
     model_binding_ref: ModelBindingRef | None = None
+    agent_profile: str | None = None
+    agent_profile_fingerprint: str | None = None
+    # Parent-approved skill IDs are ephemeral Runtime grants. They are never
+    # part of the durable contract or session.
+    authorized_skills: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.depth != 1:
@@ -419,6 +486,13 @@ class DelegatedTask:
                 raise DelegationError("model_binding_ref 无效")
             if self.model_profile is not None and self.model_binding_ref.profile != self.model_profile:
                 raise DelegationError("model_profile 与 model_binding_ref 不一致")
+        if self.agent_profile is None:
+            if self.agent_profile_fingerprint is not None:
+                raise DelegationError("未指定 agent_profile 时不能有角色指纹")
+        elif (not isinstance(self.agent_profile, str)
+              or not isinstance(self.agent_profile_fingerprint, str)
+              or not _HASH_RE.fullmatch(self.agent_profile_fingerprint)):
+            raise DelegationError("agent_profile 身份无效")
         if not self.created_at:
             object.__setattr__(self, "created_at", _utc_now())
         expected = _contract_hash(self)
@@ -427,7 +501,7 @@ class DelegatedTask:
         object.__setattr__(self, "contract_hash", expected)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "delegation_id": self.delegation_id,
             "subagent_id": self.subagent_id,
             "parent_task_id": self.parent_task_id,
@@ -450,6 +524,10 @@ class DelegatedTask:
                 self.model_binding_ref.to_dict() if self.model_binding_ref is not None else None
             ),
         }
+        if self.agent_profile is not None:
+            result["agent_profile"] = self.agent_profile
+            result["agent_profile_fingerprint"] = self.agent_profile_fingerprint
+        return result
 
 
 def _contract_hash(task: DelegatedTask) -> str:
@@ -471,6 +549,9 @@ def _contract_hash(task: DelegatedTask) -> str:
         "depth": task.depth,
         "created_at": task.created_at,
     }
+    if task.agent_profile is not None:
+        payload["agent_profile"] = task.agent_profile
+        payload["agent_profile_fingerprint"] = task.agent_profile_fingerprint
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
 
@@ -494,6 +575,8 @@ class SubagentResult:
     error_detail: str | None = None
     model_profile: str | None = None
     binding_fingerprint: str | None = None
+    agent_profile: str | None = None
+    agent_profile_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -514,6 +597,9 @@ class SubagentResult:
             **({"error_detail": self.error_detail[:500]} if self.error_detail else {}),
             **({"model_profile": self.model_profile} if self.model_profile else {}),
             **({"binding_fingerprint": self.binding_fingerprint} if self.binding_fingerprint else {}),
+            **({"agent_profile": self.agent_profile} if self.agent_profile else {}),
+            **({"agent_profile_fingerprint": self.agent_profile_fingerprint}
+               if self.agent_profile_fingerprint else {}),
         }
 
     def to_json(self) -> str:
@@ -541,12 +627,14 @@ def validate_delegation_arguments(
     arguments: Any,
     state: AgentState | None = None,
     provider_catalog: ProviderCatalog | None = None,
+    agent_profile_catalog: AgentProfileCatalog | None = None,
 ) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise DelegationError("delegate_task 参数必须是对象")
     allowed = {
         "goal", "scope", "constraints", "expected_findings", "requested_tools",
         "selected_parent_facts", "purpose", "source_id", "budget", "model_profile",
+        "agent_profile",
     }
     unknown = set(arguments) - allowed
     if unknown:
@@ -594,13 +682,40 @@ def validate_delegation_arguments(
             selected_profile = provider_catalog.resolve_child_profile(requested_profile)
         except ValueError as error:
             raise DelegationError(str(error)) from error
+    role: AgentProfile | None = None
+    agent_profile = arguments.get("agent_profile")
+    if "agent_profile" in arguments and agent_profile is None:
+        raise DelegationError("agent_profile 必须省略或提供有效角色 ID")
+    if agent_profile is not None:
+        agent_profile = _require_string(agent_profile, "agent_profile", max_length=64)
+        if agent_profile_catalog is None:
+            raise DelegationError("agent_profile Catalog 未装配")
+        try:
+            role = agent_profile_catalog.resolve(agent_profile)
+        except ValueError as error:
+            raise DelegationError(str(error)) from error
+        if provider_catalog is not None:
+            role_model = provider_catalog.resolve_child_profile(role.model_profile)
+            if requested_profile is not None and selected_profile != role_model:
+                raise DelegationError(
+                    "同时指定 agent_profile 与 model_profile 时，两者必须解析为同一子模型"
+                )
+            selected_profile = role_model
+        elif requested_profile is not None:
+            raise DelegationError("显式 model_profile 需要 ProviderCatalog")
+        effective_tools = tuple(
+            tool for tool in requested
+            if tool in role.tools and role.permission_for(tool) != "deny"
+        )
+        if not effective_tools:
+            raise DelegationError("requested_tools 与角色工具及权限没有交集")
     if state is not None and hasattr(state, "delegation_gate"):
         detail = state.delegation_gate(
             "delegate_task", {**arguments, "purpose": purpose, "source_id": source_id}, "none",
         )
         if detail:
             raise DelegationError(detail)
-    return {
+    normalized = {
         "goal": goal,
         "scope": list(scope),
         "constraints": list(constraints),
@@ -617,13 +732,22 @@ def validate_delegation_arguments(
             )
         },
     }
+    if role is not None:
+        normalized["agent_profile"] = role.profile_id
+        normalized["agent_profile_fingerprint"] = role.fingerprint
+        normalized["allowed_tools"] = list(effective_tools)
+    return normalized
 
 
 def build_delegated_task(arguments: dict[str, Any], state: AgentState | None = None,
                          *, workspace_root: str | os.PathLike[str],
-                         provider_catalog: ProviderCatalog | None = None) -> DelegatedTask:
-    normalized = validate_delegation_arguments(arguments, state, provider_catalog)
-    ScopeGate(workspace_root, normalized["scope"])
+                         provider_catalog: ProviderCatalog | None = None,
+                         agent_profile_catalog: AgentProfileCatalog | None = None,
+                         session_root: str | os.PathLike[str] | None = None) -> DelegatedTask:
+    normalized = validate_delegation_arguments(
+        arguments, state, provider_catalog, agent_profile_catalog,
+    )
+    ScopeGate(workspace_root, normalized["scope"], session_root=session_root)
     parent_task_id = getattr(state, "task_id", "") if state is not None else ""
     generation = getattr(state, "current_generation_id", 0) if state is not None else 0
     budget = SubagentBudget.from_request(normalized["budget"])
@@ -641,15 +765,18 @@ def build_delegated_task(arguments: dict[str, Any], state: AgentState | None = N
         constraints=tuple(normalized["constraints"]),
         expected_findings=tuple(normalized["expected_findings"]),
         requested_tools=tuple(normalized["requested_tools"]),
-        allowed_tools=tuple(
-            tool for tool in normalized["requested_tools"] if tool in ALLOWED_SUBAGENT_TOOLS
-        ),
+        allowed_tools=tuple(normalized.get(
+            "allowed_tools",
+            [tool for tool in normalized["requested_tools"] if tool in ALLOWED_SUBAGENT_TOOLS],
+        )),
         selected_parent_facts=tuple(normalized["selected_parent_facts"]),
         purpose=normalized["purpose"],
         source_id=normalized["source_id"],
         budget=budget,
         model_profile=normalized["model_profile"],
         model_binding_ref=binding.reference if binding is not None else None,
+        agent_profile=normalized.get("agent_profile"),
+        agent_profile_fingerprint=normalized.get("agent_profile_fingerprint"),
     )
     return task
 
@@ -677,11 +804,17 @@ class SubagentRunner:
     def __init__(self, workspace_root: str | os.PathLike[str], *, llm: Callable | None = None,
                  llm_callable: Callable | None = None,
                  parent_registry: ToolRegistry | None = None,
-                 model_binding: ModelBinding | None = None):
+                 model_binding: ModelBinding | None = None,
+                 agent_profile: AgentProfile | None = None,
+                 skill_catalog: SkillCatalog | None = None,
+                 session_root: str | os.PathLike[str] | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root)))
         self.llm = llm if llm is not None else llm_callable
         self.parent_registry = parent_registry
         self.model_binding = model_binding
+        self.agent_profile = agent_profile
+        self.skill_catalog = skill_catalog
+        self.session_root = session_root
         self.last_state: AgentState | None = None
         self.last_context: ContextManager | None = None
 
@@ -744,6 +877,8 @@ class SubagentRunner:
             binding_fingerprint=(task.model_binding_ref.fingerprint if task.model_binding_ref else (
                 self.model_binding.reference.fingerprint if self.model_binding is not None else None
             )),
+            agent_profile=task.agent_profile,
+            agent_profile_fingerprint=task.agent_profile_fingerprint,
         )
         # A result-size guard is authoritative and is applied to failed reports too.
         encoded = result.to_json().encode("utf-8")
@@ -902,6 +1037,24 @@ class SubagentRunner:
         if not isinstance(limitations, list) or len(limitations) > 32:
             raise DelegationError("limitations 必须是有界数组")
         limitations = tuple(_require_string(item, f"limitations[{index}]") for index, item in enumerate(limitations))
+        if task.agent_profile == "tester":
+            prose = " ".join((
+                summary,
+                *(item.claim for item in findings),
+                *(item.caveat or "" for item in findings),
+                *(item.claim for item in evidence),
+                *limitations,
+            ))
+            if re.search(
+                    r"(?i)(?:\btests?\b.{0,48}\b(?:passed|succeeded|successful|are green)\b"
+                    r"|\b(?:passed|succeeded|successful|green)\b.{0,48}\btests?\b"
+                    r"|测试[^。！？\n]{0,32}(?:通过|成功|全绿)"
+                    r"|(?:通过|成功|全绿)[^。！？\n]{0,32}测试)",
+                    prose):
+                raise DelegationError("tester 角色不能报告测试已执行或通过")
+            if not any(re.search(r"(?i)(未执行|未运行|not run|not executed)", item)
+                       for item in limitations):
+                raise DelegationError("tester 报告必须明确说明本次未执行测试")
         return summary, tuple(findings), tuple(evidence), limitations
 
     def _observations_for_execution(self, execution: ExecutionResult,
@@ -949,7 +1102,8 @@ class SubagentRunner:
         started_clock = time.monotonic()
         started_at = _utc_now()
         budget = task.budget
-        scope_gate = ScopeGate(self.workspace_root, list(task.scope))
+        scope_gate = ScopeGate(self.workspace_root, list(task.scope),
+                               session_root=self.session_root)
         child_state = AgentState()
         child_state.begin_task(task.goal)
         self.last_state = child_state
@@ -959,14 +1113,31 @@ class SubagentRunner:
             parent = ToolRegistry()
             for tool in (calculate_tool, read_file_tool, list_dir_tool, grep_tool):
                 parent.register(tool)
+            if self.skill_catalog is not None:
+                from mini_agent.tools.skill import make_skill_tool
+                parent.register(make_skill_tool(self.skill_catalog))
         else:
             parent = self.parent_registry
-        view = parent.filtered_for_subagent(set(task.allowed_tools), scope_gate=scope_gate)
-        executor = ToolExecutor(
-            view, gate=PermissionGate(PermissionPolicy({name: ALLOW for name in task.allowed_tools})),
+        child_skill_catalog = (
+            self.skill_catalog.restricted_to(task.authorized_skills)
+            if self.skill_catalog is not None and task.authorized_skills else None
         )
+        child_tools = set(task.allowed_tools)
+        if child_skill_catalog is not None and child_skill_catalog.definitions:
+            child_tools.add("skill")
+        view = parent.filtered_for_subagent(
+            child_tools, scope_gate=scope_gate, skill_catalog=child_skill_catalog,
+        )
+        child_permissions: dict[str, Any] = {name: ALLOW for name in task.allowed_tools}
+        if child_skill_catalog is not None:
+            child_permissions["skill"] = {
+                "*": DENY,
+                **{item.name: ALLOW for item in child_skill_catalog.definitions},
+            }
+        executor = ToolExecutor(view, gate=PermissionGate(PermissionPolicy(child_permissions)))
         system = build_subagent_prompt(
             task, InstructionLoader(self.workspace_root).load(), self.workspace_root,
+            role_profile=self.agent_profile,
         )
         history: list[dict[str, Any]] = [{
             "role": "user",
@@ -993,6 +1164,9 @@ class SubagentRunner:
             protected_messages=[{"role": "system", "content": system}],
             model_binding=self.model_binding,
             usage_meter=(self.model_binding.usage_meter if self.model_binding is not None else None),
+            skill_catalog=child_skill_catalog,
+            permission_policy=(PermissionPolicy({"skill": child_permissions["skill"]})
+                               if child_skill_catalog is not None else None),
         )
         context.before_summary = policy.before_summary
         self.last_context = context
@@ -1472,7 +1646,10 @@ class DelegationManager:
                  llm_callable: Callable | None = None,
                  parent_registry: ToolRegistry | None = None,
                  provider_catalog: ProviderCatalog | None = None,
-                 parent_state: AgentState | None = None):
+                 parent_state: AgentState | None = None,
+                 agent_profile_catalog: AgentProfileCatalog | None = None,
+                 skill_catalog: SkillCatalog | None = None,
+                 session_root: str | os.PathLike[str] | None = None):
         self.workspace_root = os.path.realpath(os.path.abspath(os.fspath(workspace_root or os.getcwd())))
         self.subagent_llm = subagent_llm if subagent_llm is not None else (
             llm if llm is not None else llm_callable
@@ -1480,6 +1657,15 @@ class DelegationManager:
         self.parent_registry = parent_registry
         self.provider_catalog = provider_catalog
         self.parent_state = parent_state
+        if agent_profile_catalog is None:
+            from mini_agent import config as runtime_config
+            agent_profile_catalog = AgentProfileCatalog(
+                runtime_config.AGENT_PROFILES, provider_catalog=provider_catalog,
+            )
+        self.agent_profile_catalog = agent_profile_catalog
+        self.skill_catalog = skill_catalog
+        self.session_root = session_root
+        self.parent_permission_gate: PermissionGate | None = None
         self._lock = Lock()
         self._active: dict[str, tuple[DelegatedTask, Event, AgentState | None]] = {}
         self._cancel_reason = ""
@@ -1493,7 +1679,42 @@ class DelegationManager:
         return build_delegated_task(
             arguments, state, workspace_root=self.workspace_root,
             provider_catalog=self.provider_catalog,
+            agent_profile_catalog=self.agent_profile_catalog,
+            session_root=self.session_root,
         )
+
+    def bind_session_root(self, root: str | os.PathLike[str]) -> None:
+        """Protect the actual durable store, including non-default locations."""
+        self.session_root = os.path.realpath(os.path.abspath(os.fspath(root)))
+
+    def bind_parent_permission_gate(self, gate: PermissionGate) -> None:
+        """Bind the current parent executor's permission policy for Skill grants."""
+        self.parent_permission_gate = gate
+
+    def _authorize_role_skills(self, task: DelegatedTask) -> DelegatedTask:
+        if task.agent_profile is None:
+            return task
+        profile = self.agent_profile_catalog.resolve(task.agent_profile)
+        if profile.fingerprint != task.agent_profile_fingerprint:
+            raise DelegationError("agent_profile 在合同冻结后发生变化")
+        granted: list[str] = []
+        if profile.skills and (self.skill_catalog is None or self.parent_permission_gate is None):
+            raise DelegationError("agent_profile 所需 Skill Catalog 或父权限闸门不可用")
+        if self.skill_catalog is not None and self.parent_permission_gate is not None:
+            for skill_id in profile.skills:
+                try:
+                    definition = self.skill_catalog.get(skill_id)
+                except SkillAccessError as error:
+                    raise DelegationError(
+                        f"agent_profile 引用不存在或不可用的 Skill: {skill_id}"
+                    ) from error
+                denial = self.parent_permission_gate.guard(
+                    "skill", {"name": skill_id},
+                    display_context={"skill_id": skill_id, "source": definition.source},
+                )
+                if denial is None:
+                    granted.append(skill_id)
+        return replace(task, authorized_skills=tuple(granted))
 
     @staticmethod
     def _contract_identity(task: DelegatedTask) -> str:
@@ -1511,6 +1732,9 @@ class DelegationManager:
             "budget": task.budget.__dict__,
             "model_profile": task.model_profile,
         }
+        if task.agent_profile is not None:
+            payload["agent_profile"] = task.agent_profile
+            payload["agent_profile_fingerprint"] = task.agent_profile_fingerprint
         return hashlib.sha256(json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest()
@@ -1585,7 +1809,10 @@ class DelegationManager:
         return SubagentResult(
             str(uuid4()), task.delegation_id, task.subagent_id, task.parent_task_id,
             outcome, detail, (), (), (detail,), UsageRecord(token_accounting="estimated"),
-            task.contract_hash, now, now, "aggregate_budget" if outcome == "budget_exhausted" else "lifecycle_rejected",
+            task.contract_hash, now, now,
+            "aggregate_budget" if outcome == "budget_exhausted" else "lifecycle_rejected",
+            agent_profile=task.agent_profile,
+            agent_profile_fingerprint=task.agent_profile_fingerprint,
         )
 
     @staticmethod
@@ -1597,6 +1824,7 @@ class DelegationManager:
             UsageRecord(token_accounting="estimated"), task.contract_hash,
             now, now, "cancelled", detail, task.model_profile,
             task.model_binding_ref.fingerprint if task.model_binding_ref else None,
+            task.agent_profile, task.agent_profile_fingerprint,
         )
 
     @staticmethod
@@ -1610,6 +1838,7 @@ class DelegationManager:
             UsageRecord(token_accounting="estimated"), task.contract_hash,
             now, now, kind, _safe_error_detail(error), task.model_profile,
             task.model_binding_ref.fingerprint if task.model_binding_ref else None,
+            task.agent_profile, task.agent_profile_fingerprint,
         )
 
     def _register(self, tasks: list[tuple[DelegatedTask, Event, AgentState | None]]) -> None:
@@ -1639,9 +1868,17 @@ class DelegationManager:
                 if self.provider_catalog is not None and task.model_profile is not None
                 else None
             )
+            profile = (
+                self.agent_profile_catalog.resolve(task.agent_profile)
+                if task.agent_profile is not None else None
+            )
+            if profile is not None and profile.fingerprint != task.agent_profile_fingerprint:
+                raise DelegationError("当前 Runtime 的 agent_profile 指纹与合同不一致")
             return SubagentRunner(
                 self.workspace_root, llm=self.subagent_llm,
                 parent_registry=self.parent_registry, model_binding=binding,
+                agent_profile=profile, skill_catalog=self.skill_catalog,
+                session_root=self.session_root,
             ).run(
                 task, cancel_event=cancel_event,
                 cancellation_reason=lambda: self._cancel_reason,
@@ -1658,7 +1895,7 @@ class DelegationManager:
         seen_identities: set[str] = set()
         for index, admission in sorted(admissions.items()):
             try:
-                task = self.create_task(admission.arguments, state)
+                task = self._authorize_role_skills(self.create_task(admission.arguments, state))
                 identity = self._contract_identity(task)
                 if identity in seen_identities:
                     ready[index] = self._rejected_result(
@@ -1769,6 +2006,7 @@ class DelegationManager:
         state = state or self.parent_state
         try:
             task = arguments if isinstance(arguments, DelegatedTask) else self.create_task(arguments, state)
+            task = self._authorize_role_skills(task)
         except Exception as error:
             now = _utc_now()
             return SubagentResult(

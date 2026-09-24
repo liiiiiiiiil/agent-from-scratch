@@ -269,6 +269,10 @@ class AgentRuntime:
         self.max_rounds = max_rounds
         self.output = output
         self.session_boundary = session_boundary
+        delegation_manager = getattr(getattr(executor, "registry", None), "_delegation_manager", None)
+        session_store = getattr(session_boundary, "store", None)
+        if delegation_manager is not None and session_store is not None:
+            delegation_manager.bind_session_root(session_store.root)
         self.model_binding = model_binding or getattr(context, "model_binding", None)
         self.usage_meter = usage_meter or getattr(self.model_binding, "usage_meter", None)
         self._usage_start = self.usage_meter.snapshot() if self.usage_meter is not None else None

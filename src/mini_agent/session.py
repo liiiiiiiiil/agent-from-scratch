@@ -46,7 +46,7 @@ _DELEGATION_RESULT_FIELDS = {
     "result_id", "delegation_id", "subagent_id", "parent_task_id", "outcome",
     "summary", "findings", "evidence", "limitations", "usage", "contract_hash",
     "started_at", "finished_at", "error_kind", "error_detail", "model_profile",
-    "binding_fingerprint",
+    "binding_fingerprint", "agent_profile", "agent_profile_fingerprint",
 }
 
 
@@ -56,6 +56,16 @@ def _canonical_delegation_result(raw: Any) -> tuple[str, str, dict[str, Any]]:
         raise SessionValidationError("待交付委派结果必须是 object")
     if set(raw) - _DELEGATION_RESULT_FIELDS:
         raise SessionValidationError("待交付委派结果含未知字段")
+    role_id = raw.get("agent_profile")
+    role_fingerprint = raw.get("agent_profile_fingerprint")
+    if (role_id is None) != (role_fingerprint is None):
+        raise SessionValidationError("待交付委派结果 agent_profile 字段不完整")
+    if role_id is not None and (
+            not isinstance(role_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role_id)
+            or not isinstance(role_fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", role_fingerprint)):
+        raise SessionValidationError("待交付委派结果 agent_profile 身份无效")
     required = {
         "result_id", "delegation_id", "subagent_id", "parent_task_id", "outcome",
         "summary", "findings", "evidence", "limitations", "usage", "contract_hash",
@@ -549,6 +559,7 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
         }
         extended_call_fields = call_fields | {
             "delegation_id", "subagent_id", "delegation_result_hash",
+            "agent_profile", "agent_profile_fingerprint",
         }
         # v0.32 boundaries did not retain the original reservation hash.  They
         # remain readable for clean replay diagnostics, but a pending admitted
@@ -577,6 +588,17 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                 or not call.get("subagent_id")
         ):
             raise SessionValidationError("tool_boundary subagent_id 引用无效")
+        role_id = call.get("agent_profile")
+        role_fingerprint = call.get("agent_profile_fingerprint")
+        if (role_id is None) != (role_fingerprint is None):
+            raise SessionValidationError("tool_boundary agent_profile 身份字段不完整")
+        if role_id is not None and (
+                call.get("tool") != "delegate_task"
+                or not isinstance(role_id, str)
+                or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role_id)
+                or not isinstance(role_fingerprint, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", role_fingerprint)):
+            raise SessionValidationError("tool_boundary agent_profile 身份无效")
         if call.get("delegation_result_hash") is not None and (
                 not isinstance(call.get("delegation_result_hash"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", call["delegation_result_hash"])
@@ -621,6 +643,10 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                 raise SessionValidationError("tool_boundary delegate_task 缺少 State delegation record")
             if call.get("subagent_id") is not None and call["subagent_id"] != delegation.get("subagent_id"):
                 raise SessionValidationError("tool_boundary subagent_id 与 State 不一致")
+            if (call.get("agent_profile") != delegation.get("agent_profile")
+                    or call.get("agent_profile_fingerprint")
+                    != delegation.get("agent_profile_fingerprint")):
+                raise SessionValidationError("tool_boundary agent_profile 与 State 不一致")
             if (delegation.get("parent_attempt_id") is not None
                     and delegation["parent_attempt_id"] != attempt_id):
                 raise SessionValidationError("tool_boundary parent attempt 与 State 不一致")
@@ -638,7 +664,10 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                     raise SessionValidationError("待交付委派结果原文无法解析") from error
                 if (ready_raw.get("subagent_id") != delegation.get("subagent_id")
                         or ready_raw.get("parent_task_id") != delegation.get("parent_task_id")
-                        or ready_raw.get("contract_hash") != delegation.get("task_contract_hash")):
+                        or ready_raw.get("contract_hash") != delegation.get("task_contract_hash")
+                        or ready_raw.get("agent_profile") != delegation.get("agent_profile")
+                        or ready_raw.get("agent_profile_fingerprint")
+                        != delegation.get("agent_profile_fingerprint")):
                     raise SessionValidationError("待交付委派结果身份或合同不一致")
             if call.get("status") == "committed":
                 delivery_status = delegation.get("delivery_status")
@@ -660,7 +689,10 @@ def _validate_tool_boundary(boundary: Any, state: dict[str, Any],
                         raise SessionValidationError("committed 委派结果原文无效") from error
                     if (content_hash != delegation.get("result_hash")
                             or content_raw.get("result_id") != delegation.get("result_id")
-                            or content_raw.get("delegation_id") != delegation_id):
+                            or content_raw.get("delegation_id") != delegation_id
+                            or content_raw.get("agent_profile") != delegation.get("agent_profile")
+                            or content_raw.get("agent_profile_fingerprint")
+                            != delegation.get("agent_profile_fingerprint")):
                         raise SessionValidationError("committed 委派结果与 State 不一致")
         elif invocation_id in pending_result_by_invocation:
             raise SessionValidationError("待交付结果只能引用 delegate_task")
@@ -1635,6 +1667,12 @@ class DurableToolBoundary:
                 "delegation_id": str(getattr(task, "delegation_id", "")),
                 "subagent_id": str(getattr(task, "subagent_id", "")),
             })
+            role_id = getattr(task, "agent_profile", None)
+            if role_id is not None:
+                call["agent_profile"] = role_id
+                call["agent_profile_fingerprint"] = getattr(
+                    task, "agent_profile_fingerprint", None,
+                )
         return self._save(state, context)
 
     # Explicit spelling used by integrations that treat reservation/start as
@@ -1735,11 +1773,18 @@ class DurableToolBoundary:
             raise SessionValidationError("State 必须先保存 result_ready 生命周期")
         if state_record.result_id != raw.get("result_id") or state_record.result_hash != result_hash:
             raise SessionValidationError("result_ready 与 State 摘要不一致")
+        if (state_record.agent_profile != raw.get("agent_profile")
+                or state_record.agent_profile_fingerprint
+                != raw.get("agent_profile_fingerprint")):
+            raise SessionValidationError("result_ready agent_profile 与 State 不一致")
         # A budget rejection can be materialized after batch preparation, so
         # its boundary call did not yet receive the frozen task identity.
         # Attach the identity before saving the result-ready boundary.
         call["delegation_id"] = delegation_id
         call.setdefault("subagent_id", raw.get("subagent_id"))
+        if raw.get("agent_profile") is not None:
+            call["agent_profile"] = raw["agent_profile"]
+            call["agent_profile_fingerprint"] = raw["agent_profile_fingerprint"]
         if hasattr(state, "bind_delegation_parent_attempt") and call.get("attempt_id") is not None:
             state.bind_delegation_parent_attempt(delegation_id, call["attempt_id"])
         pending = self.boundary.setdefault("pending_delegation_results", [])

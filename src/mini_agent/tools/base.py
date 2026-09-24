@@ -15,7 +15,9 @@ from mini_agent.tools.file_errors import EditMultipleMatchesError, EditNoMatchEr
 RESULT_BRIEF_MAX_LENGTH = 200
 RESULT_BRIEF_FALLBACK = "<unavailable>"
 ResultCallback = Callable[[str, dict[str, Any], bool, str], None]
-DelegationCapability = Literal["unavailable", "readonly_workspace", "pure_compute"]
+DelegationCapability = Literal[
+    "unavailable", "readonly_workspace", "pure_compute", "readonly_skill",
+]
 
 
 def format_tool_result(value: Any, max_chars: int = 4000) -> str:
@@ -146,7 +148,7 @@ class ToolRegistry:
         if tool.effect_class not in ("none", "possible"):
             raise ValueError(f"非法 effect_class: {tool.effect_class}")
         if tool.delegation_capability not in (
-                "unavailable", "readonly_workspace", "pure_compute"):
+                "unavailable", "readonly_workspace", "pure_compute", "readonly_skill"):
             raise ValueError(f"非法 delegation_capability: {tool.delegation_capability}")
         if internal is not None:
             tool.internal = internal
@@ -175,9 +177,11 @@ class ToolRegistry:
         return normalized
 
     def filtered_for_subagent(self, allowed: set[str] | frozenset[str],
-                              scope_gate: Any = None):
+                              scope_gate: Any = None, skill_catalog: Any = None):
         """Return a frozen, capability-based view for a read-only child runtime."""
-        return FilteredToolRegistryView(self, allowed, scope_gate=scope_gate)
+        return FilteredToolRegistryView(
+            self, allowed, scope_gate=scope_gate, skill_catalog=skill_catalog,
+        )
 
 
 class FilteredToolRegistryView:
@@ -189,13 +193,24 @@ class FilteredToolRegistryView:
     """
 
     def __init__(self, parent: ToolRegistry, allowed: set[str] | frozenset[str],
-                 scope_gate: Any = None):
+                 scope_gate: Any = None, skill_catalog: Any = None):
         allowed = set(allowed)
         frozen: dict[str, Tool] = {}
         for name, tool in parent._tools.items():
             if name not in allowed:
                 continue
             if tool.delegation_capability == "unavailable":
+                continue
+            if tool.delegation_capability == "readonly_skill":
+                if name != "skill" or skill_catalog is None:
+                    continue
+                from mini_agent.tools.skill import make_skill_tool
+                cloned = make_skill_tool(skill_catalog)
+                frozen[name] = cloned
+                continue
+            if name == "skill":
+                # A Skill tool is never inherited from a parent handler that
+                # can see the full parent catalog.
                 continue
             cloned = Tool(
                 name=tool.name,
@@ -214,6 +229,7 @@ class FilteredToolRegistryView:
         self._tools = frozen
         self._schemas = tuple(deepcopy(tool.to_llm_schema()) for tool in frozen.values())
         self._scope_gate = scope_gate
+        self._skill_catalog = skill_catalog
 
     @staticmethod
     def _copy_tool(tool: Tool) -> Tool:
@@ -483,6 +499,9 @@ class ToolExecutor:
         recovery_runtime = getattr(registry, "_recovery_runtime", None)
         if recovery_runtime is not None:
             recovery_runtime.bind_executor(self)
+        delegation_manager = getattr(registry, "_delegation_manager", None)
+        if delegation_manager is not None and hasattr(delegation_manager, "bind_parent_permission_gate"):
+            delegation_manager.bind_parent_permission_gate(self.gate)
 
     def authorize(self, name: str, arguments: dict[str, Any]) -> str | None:
         """Run the same session permission gate used by normal execution."""

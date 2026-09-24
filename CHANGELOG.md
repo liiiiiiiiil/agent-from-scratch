@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v0.47.0] - Named Subagent roles
+
+- Added the optional `delegate_task.agent_profile` selector with frozen `explorer`, `reviewer`, `tester`, `general`, and validated local custom roles; role prompts, tool subsets, static permissions, child model aliases, and configuration fingerprints are fixed when each Runtime is assembled.
+- Intersected requested child tools with role tools and the existing read-only allowlist, rejected role/model conflicts before a child LLM request, and preserved the no-role contract hash, result shape, and durable fields.
+- Added parent-side exact-ID Skill preauthorization for role-listed Skills and a child catalog/tool view restricted to granted IDs. Skill text stays an untrusted child tool result; `tester` cannot run tests and its report contract rejects claims that tests passed.
+- Extended State, schema 3 durable results, and Trace with optional role identity fields; hardened Subagent scope checks for canonical `config_local.py` and workspace session paths. Added lesson 47 and synchronized the runbook and README files.
+
 ## [v0.46.0] - Restricted HTTP MCP, text Resources, and Prompts
 
 - Added explicit stdio/JSON-only HTTP MCP transport configuration with HTTPS-by-default URL validation, opt-in loopback HTTP, local headers, bounded responses, session headers, 202 notifications, bounded session DELETE, and no SSE/redirect/OAuth/retry fallback.

@@ -56,8 +56,9 @@ def make_skill_tool(catalog: SkillCatalog) -> Tool:
         handler=lambda name: skill(catalog, name),
         effect_class="none",
         argument_validator=_validate_skill_arguments,
-        # A Skill never enters the fixed child capability view.
-        delegation_capability="unavailable",
+        # Only a role runner can select this capability, and it supplies a
+        # catalog restricted to the skills admitted by the parent gate.
+        delegation_capability="readonly_skill",
     )
 
 

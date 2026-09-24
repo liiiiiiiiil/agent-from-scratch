@@ -187,6 +187,7 @@ class SkillCatalog:
         self.global_root = _safe_root(global_root)
         self._definitions: tuple[SkillDefinition, ...]
         self._diagnostics: tuple[dict[str, str], ...]
+        self._allowed_names: frozenset[str] | None = None
         self._definitions, self._diagnostics = self._discover()
 
     @property
@@ -354,10 +355,29 @@ class SkillCatalog:
     def get(self, name: str) -> SkillDefinition:
         if not isinstance(name, str) or SKILL_NAME_PATTERN.fullmatch(name) is None:
             raise SkillAccessError("Skill ID 格式非法")
+        if self._allowed_names is not None and name not in self._allowed_names:
+            raise SkillAccessError("Skill 未获准用于此 Subagent")
         for definition in self._definitions:
             if definition.name == name:
                 return definition
         raise SkillAccessError("未知 Skill")
+
+    def restricted_to(self, names: tuple[str, ...] | list[str] | set[str]) -> "SkillCatalog":
+        """Return a frozen view that can load only the supplied role grants."""
+        allowed = frozenset(names)
+        if any(not isinstance(name, str) or SKILL_NAME_PATTERN.fullmatch(name) is None
+               for name in allowed):
+            raise SkillAccessError("Skill grant ID 格式非法")
+        view = object.__new__(SkillCatalog)
+        view.workspace_root = self.workspace_root
+        view.project_root = self.project_root
+        view.global_root = self.global_root
+        view._definitions = tuple(
+            definition for definition in self._definitions if definition.name in allowed
+        )
+        view._diagnostics = ()
+        view._allowed_names = frozenset(definition.name for definition in view._definitions)
+        return view
 
     def list_skills(self) -> list[dict[str, str]]:
         return [definition.public_metadata() for definition in self._definitions]

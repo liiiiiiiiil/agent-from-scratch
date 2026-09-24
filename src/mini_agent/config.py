@@ -17,6 +17,7 @@ MEMORY_DIR = "~/.mini_agent/memory"
 MEMORY_RETRIEVAL_ENABLED = True
 REFERENCES = []
 MCP_SERVERS = []
+AGENT_PROFILES = {}
 # v0.36 provider/profile mappings.  Empty mappings intentionally select the
 # legacy BASE_URL/API_KEY/MODEL compatibility path above.
 PROVIDERS = {}
@@ -86,6 +87,8 @@ def validate_runtime_config() -> None:
         raise ValueError("MEMORY_RETRIEVAL_ENABLED 必须是 bool")
     if not isinstance(REFERENCES, list):
         raise ValueError("REFERENCES 必须是数组")
+    from mini_agent.agent_profiles import validate_agent_profiles_config
+    validate_agent_profiles_config(AGENT_PROFILES)
     for index, item in enumerate(REFERENCES):
         if not isinstance(item, dict):
             raise ValueError(f"REFERENCES[{index}] 必须是对象")

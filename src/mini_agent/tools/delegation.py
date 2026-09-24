@@ -14,7 +14,10 @@ from mini_agent.tools.base import Tool
 
 def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> Tool:
     def validate(arguments: dict[str, Any]) -> None:
-        validate_delegation_arguments(arguments, parent_state, manager.provider_catalog)
+        validate_delegation_arguments(
+            arguments, parent_state, manager.provider_catalog,
+            manager.agent_profile_catalog,
+        )
 
     def delegate_task(**arguments: Any) -> str:
         result = manager.run(arguments, parent_state)
@@ -23,10 +26,26 @@ def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> To
     profile_schema: dict[str, Any] = {"type": "string", "maxLength": 120}
     if manager.provider_catalog is not None:
         profile_schema["enum"] = list(manager.provider_catalog.subagent_allowed_profiles)
+    agent_profile_schema: dict[str, Any] = {"type": "string", "maxLength": 64}
+    agent_profile_schema["enum"] = [
+        item.profile_id for item in manager.agent_profile_catalog.profiles
+    ]
+    agent_profile_schema["description"] = (
+        "选择调查角色；各角色的用途见 delegate_task 工具说明。"
+    )
+    profile_descriptions = "\n".join(
+        f"- {item.profile_id}: {item.description}"
+        for item in manager.agent_profile_catalog.profiles
+    )
 
     return Tool(
         name="delegate_task",
-        description="委派一个单层、只读的调查子代理；同一回合可提交多个相互独立的委派，结果按 tool-call 顺序返回结构化 JSON 发现",
+        description=(
+            "委派一个单层、只读的调查子代理；可选 agent_profile 指定具名角色，"
+            "model_profile 指定子模型。未指定角色时沿用通用兼容合同。"
+            "同时提供角色和模型时，两者必须解析到同一模型。可选角色用途：\n"
+            + profile_descriptions
+        ),
         parameters={
             "type": "object",
             "additionalProperties": False,
@@ -58,6 +77,7 @@ def make_delegate_task_tool(parent_state: Any, manager: DelegationManager) -> To
                 },
                 "source_id": {"type": "string", "maxLength": 200},
                 "model_profile": profile_schema,
+                "agent_profile": agent_profile_schema,
                 "budget": {
                     "type": "object", "additionalProperties": False,
                     "properties": {
