@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from mini_agent.agent import ParentRuntimePolicy
-from mini_agent.agent_profiles import AgentProfileCatalog
+from mini_agent.agent_profiles import AgentProfileCatalog, MAX_PROFILE_SKILLS
 from mini_agent.context import ContextManager
 from mini_agent.delegation import DelegationError, DelegationManager, UsageRecord
 import mini_agent.delegation as delegation_module
@@ -437,6 +437,73 @@ def test_changed_skill_file_marks_only_its_child_snapshot_incompatible(
     assert resumed.state.child_session_records[0].status == "incompatible"
     assert resumed.registry._delegation_manager.export_child_sessions(resumed.state) == []
     assert json.loads(raw)["summary"] == "complete before replacement"
+
+
+def test_profile_with_max_skills_can_save_and_resume_child_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    workspace = tmp_path / "workspace"
+    skill_ids = [f"note{i:02d}" for i in range(MAX_PROFILE_SKILLS)]
+    for skill_id in skill_ids:
+        skill_dir = workspace / "skills" / skill_id
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_id}\ndescription: Investigation note\n---\nRead only.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(runtime_config, "AGENT_PROFILES", {
+        "reader": {
+            "description": "Read files using approved guidance.",
+            "prompt": "Report observations from the requested scope.",
+            "tools": ["read_file"], "skills": skill_ids,
+        },
+    })
+    state = AgentState()
+    state.begin_task("save a child with the maximum allowed Skills")
+    context = ContextManager(state, [{"role": "user", "content": "inspect"}],
+                             observability=False)
+    catalog = ProviderCatalog.from_settings(
+        {"test": {"protocol": "openai_chat", "endpoint": "https://example.test/v1/chat/completions",
+                  "api_key": "test-only"}},
+        {"default": {"provider_id": "test", "model_id": "model",
+                      "context_window": 4096, "max_output_tokens": 256}},
+        parent_profile="default",
+    )
+    manager = DelegationManager(
+        workspace, parent_state=state, provider_catalog=catalog,
+        agent_profile_catalog=AgentProfileCatalog(runtime_config.AGENT_PROFILES,
+                                                  provider_catalog=catalog),
+        skill_catalog=SkillCatalog(workspace),
+        subagent_llm=lambda *_args, **_kwargs: _report("complete with all Skills"),
+    )
+    manager.parent_permission_gate = PermissionGate(PermissionPolicy({"skill": ALLOW}))
+    arguments = _contract("inspect one file")
+    arguments["agent_profile"] = "reader"
+    arguments["requested_tools"] = ["read_file"]
+    confirmation = json.loads(manager.spawn_background(arguments, state))
+    assert confirmation["accepted"] is True
+    child_id = confirmation["child_session_id"]
+    manager.confirm_background_startup(child_id)
+    manager.commit_background_spawn_round()
+    manager.activate_background_tasks()
+    assert manager.wait(2)
+    manager.collect_background_events()
+    raw = manager.background_result(child_id, state)
+    result = json.loads(raw)
+    assert result["outcome"] == "completed"
+    state.commit_delegation_tool_result(raw)
+    manager.mark_background_claimed(child_id, result["result_id"])
+
+    store = SessionStore(tmp_path / "sessions")
+    saved = store.save(
+        None, state, context, workspace_root=workspace,
+        handoff_status="clean", child_sessions=manager.export_child_sessions(state),
+    )
+    assert len(saved["child_sessions"][0]["skill_identities"]) == MAX_PROFILE_SKILLS
+    resumed = prepare_resume(store, saved["session_id"], workspace, catalog).claim()
+    assert resumed.child_session_issues == []
+    assert resumed.state.child_session_records[0].status == "idle"
+    assert child_id in resumed.registry._delegation_manager._child_snapshots
 
 
 def test_provider_usage_source_stays_equal_in_state_and_child_snapshot(

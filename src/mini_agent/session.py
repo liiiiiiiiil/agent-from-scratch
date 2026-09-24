@@ -19,6 +19,7 @@ import tempfile
 from typing import Any
 
 from mini_agent import __version__
+from mini_agent.agent_profiles import MAX_PROFILE_SKILLS
 from mini_agent.config import MAX_SESSION_FILE_BYTES
 from mini_agent.state import (
     AgentState, SessionExportError, canonical_arguments_hash, delegation_result_hash,
@@ -952,7 +953,7 @@ def _validate_child_session_snapshots(
                 or not re.fullmatch(r"[0-9a-f]{64}", model_ref.get("fingerprint", ""))):
             raise SessionValidationError(f"child session {child_id} model binding 来源摘要无效")
         skills = snapshot.get("skill_identities")
-        if not isinstance(skills, list) or len(skills) > 16:
+        if not isinstance(skills, list) or len(skills) > MAX_PROFILE_SKILLS:
             raise SessionValidationError(f"child session {child_id} Skill 身份列表无效")
         seen_skills: set[str] = set()
         for skill in skills:
