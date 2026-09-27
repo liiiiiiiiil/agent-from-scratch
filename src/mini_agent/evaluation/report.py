@@ -1,4 +1,4 @@
-"""Rebuild aggregate reports from immutable schema 1 TrialResult files."""
+"""Rebuild aggregate reports from immutable schema 1 and 2 TrialResult files."""
 
 from __future__ import annotations
 
@@ -136,3 +136,10 @@ def build_report(output_dir: str | Path) -> dict[str, Any]:
             for row in rows
         ],
     }
+
+
+def build_suite_report(suite_run_dir: str | Path) -> dict[str, Any]:
+    """Rebuild a suite report from its atomic ledger and referenced raw trials."""
+    from mini_agent.evaluation.benchmark import build_suite_report as rebuild
+
+    return rebuild(suite_run_dir)

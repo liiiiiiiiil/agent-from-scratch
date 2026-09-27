@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "suite_id": "coding-benchmark",
+  "version": "1.0",
+  "description": "四道纯标准库 Python 编码任务；固定顺序和摘要，live 与 fixture 分开统计。",
+  "default_repeats": 3,
+  "cases": [
+    {
+      "case_id": "pagination-boundary",
+      "case_path": "pagination-boundary/case.json",
+      "case_sha256": "b0f12d73da56674356863cc0403ed16c25edb9f3cc3eb0b69b9f56f5dff9fc7a",
+      "task_sha256": "07c5b9071b4b18f05b848bdb815ccd1400c11fc83c6b9bb02fa9e704b82d644f",
+      "initial_sha256": "20fd1da78089a4a97126cdeca06e8f01fcb45cdc767f13c61f5d9ab12d740fcf",
+      "grader_sha256": "60c70f7cc2716a92324322ba543e6945bd2ec91d141319d27c6ca12bba6a1e69",
+      "known_good_sha256": "23f4fd5e8fe18d2d6e3d874fae54d8ee387a0b2282c99a4e810f89dd564b1894",
+      "regression_test_required": false
+    },
+    {
+      "case_id": "orders-discount-receipt",
+      "case_path": "orders-discount-receipt/case.json",
+      "case_sha256": "7d62ef6076a02c97009e73d5b8fb815dca74b231c42b682f40f4b54993cc42cd",
+      "task_sha256": "decdadf831d81d82374f5c529780fa4d4acd8b9a720d0833330999b744b540d9",
+      "initial_sha256": "f0b133ee8255c4d7a317f1decb6cf87a192392d77bfb317650336e76a838f3e8",
+      "grader_sha256": "157c3a8ad564317d3360c9bd11c07c66294569cdae6c5b75f27f9e6b8a588aab",
+      "known_good_sha256": "3312510e4bbda8e3b5cef79f1c4a9ee6039b465a815a7616f3442d93ddf0ae7f",
+      "regression_test_required": false
+    },
+    {
+      "case_id": "cache-expiry-regression",
+      "case_path": "cache-expiry-regression/case.json",
+      "case_sha256": "45be2e8e754a46f0081af322a6755c5a72502a322ffab1461db3f842c17388ff",
+      "task_sha256": "f741df8c4dc3f6b9ef82e8369886e9648c9a79e640e3b37716938a322efabf60",
+      "initial_sha256": "131195d4c85e9d28e830a9511c8a891765d55b5fe103786e82fd4c5bb8de4f32",
+      "grader_sha256": "eb45e877fc24f626993513a3bf6a88a624e7cf37092a795c0fc3b9ad4b132335",
+      "known_good_sha256": "4e2e3696265c1109815b0ed7d0362138b0a9b28ff0436bd7e9df01fbcff6979a",
+      "regression_test_required": true
+    },
+    {
+      "case_id": "config-priority-investigation",
+      "case_path": "config-priority-investigation/case.json",
+      "case_sha256": "13974ab005ee9ea71927993425d49edc78a8a6fcd4d30f693312cad089a5f393",
+      "task_sha256": "4baefb8e2b0c72c89d86de3457a87086ea4512bccd61592bffd39734b9b25b5f",
+      "initial_sha256": "daea38f8b3f098f17df40434f9900868366ad157c35e0bc81b65e574ddff82d2",
+      "grader_sha256": "c7092ef7d112465743d53f20670e93db0cb9f37bd364284c6dee588da31f7eb0",
+      "known_good_sha256": "1ccd38f796efe77d504b5bf29f7f83e310d43c7f21477f5b9d623df0bc9bb4f0",
+      "regression_test_required": false
+    }
+  ],
+  "suite_sha256": "bf728faf8cff54e173a73c21946499b48b81fccce73a2b187f3d7b20b7e12d16"
+}

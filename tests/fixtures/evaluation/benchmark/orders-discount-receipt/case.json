@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "orders-discount-receipt",
+  "version": "1.0",
+  "task": "修复订单折扣和收据展示。折扣按订单小计（整数分）计算，折扣百分比为整数，折扣金额按四舍五入规则 half-up 舍入到分；应付金额等于小计减折扣。收据必须准确展示小计、折扣百分比与金额、应付金额，并用两位小数格式化美元金额。折扣计算和收据展示都要正确，保留现有公开函数参数。",
+  "fixture_dir": "initial",
+  "grader_script": "grader.py",
+  "agent_timeout_seconds": 120,
+  "grader_timeout_seconds": 30,
+  "max_rounds": 18,
+  "allowed_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "authorized_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "description": "双模块修改：订单折扣精度和收据字段。",
+  "tags": ["coding", "multi-file", "decimal"]
+}

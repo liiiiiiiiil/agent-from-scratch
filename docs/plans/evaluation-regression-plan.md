@@ -16,6 +16,14 @@
 - 真实 `--live` 验收已完成：在沙箱内的首次 ProviderConnectionError 作为失败 live trial 保留；经网络权限批准后成功 trial `fecf1d04-48f2-4c86-bf42-e0588dabc1fa` 以 `agent_stop_reason=text`、State `done`、grader 通过和 cleanup complete 收束。成功 trial 有 4 次成功模型响应、3 次工具调用、provider usage 6,520 input / 243 output tokens，Agent 3,004 ms、grader 38 ms；价格快照缺失，成本仍为 null。
 - live 原始结果目录：`/private/tmp/mini-agent-eval-v050-live`；保留两条 live trial，报告分母 2、通过 1、连接错误 1。该小样本仅用于验证链路，不作为编码能力基准。
 
+## v0.51 实施记录
+
+- 已新增冻结题集 `coding-benchmark@1.0`，固定顺序为 `pagination-boundary`、`orders-discount-receipt`、`cache-expiry-regression`、`config-priority-investigation`。每题均有独立初始文件、grader 和正确版本；配置调查题没有在任务正文中指出故障文件。
+- 离线预检已逐题确认：四个原始版本均被拒绝，四个正确版本均通过。缓存题要求的 unittest 还必须在正确代码上通过，并在原始错误实现上以断言失败；分页、订单单侧修复、弱缓存测试、配置优先级错误变体均被 grader 拒绝。
+- 已新增 Suite / SuiteRun 有界合同、题目和文件树摘要、ID/version 指纹、schema 2 suite TrialResult、12 槽位顺序编排、原子账本更新、启动失败/中断保留及逐题报告重建；suite run 固定 Git revision、运行时代码指纹和模型来源，并在 trial 前后检查实现来源；原 schema 1 Case/TrialRequest/单题 TrialResult 保持可读。
+- 已新增 `validate-suite`、`run-suite --live --repeats 3`、`report-suite`，并更新第 51 课、操作手册、评测说明、中英文 README、CHANGELOG 和包版本。
+- 当前实现已通过 `tests/test_evaluation_v051.py` 的离线回归。任务与成功标准等待用户审阅；尚未启动任何 v0.51 live trial，不能报告模型成绩。用户审定后，才在同一代码 revision、模型来源和 suite 摘要下顺序运行 12 次；失败与基础设施错误均保留，不自动重试。
+
 ## 1. 目标与定位
 
 前十三阶段回答了“Agent 能做什么、如何约束它”。最后一个阶段回答：**给它同一批真实任务，它能独立完成多少，失败后能恢复多少，新增能力是否改善结果，代价是多少？**

@@ -26,6 +26,26 @@ PYTHONPATH=src python -m mini_agent.evaluation report ./evaluation-live
 
 真实模型绑定从本地 `config_local.py` 解析。结果只记录 profile、provider、protocol 和不可逆 fingerprint 摘要；没有价格快照时 `cost_usd` 与 `price_snapshot` 都是 `null`。
 
+## v0.51 编码任务集
+
+`tests/fixtures/evaluation/benchmark/suite.json` 固定四题及顺序：分页末页边界、订单折扣与收据双模块修改、缓存 TTL 修复并新增回归测试、配置来源优先级调查与修复。每题有独立的 `initial/`、`grader.py` 和 `known_good/`。Agent 只收到 case 的任务与 `initial/`；评分器和已知正确版本不会复制进 Agent 工作区。
+
+Suite 清单同时保存 case、任务文字、初始文件树、grader 和正确版本的 SHA-256。套件还有由代码固定的 ID/version 指纹。任何摘要变化都会拒绝运行；重新审核题目后要提升 suite version 并更新固定指纹。`validate-suite` 会预先检查所有题目，并要求 grader 拒绝原始版本、接受正确版本；缓存题还要验证所交 unittest 在原始错误实现上出现断言失败。
+
+先审阅 `validate-suite` 输出中的任务文字、成功标准、预算和获准工具。只有审定后才执行显式 live 套件命令：
+
+```bash
+PYTHONPATH=src python -m mini_agent.evaluation validate-suite tests/fixtures/evaluation/benchmark/suite.json
+PYTHONPATH=src python -m mini_agent.evaluation run-suite tests/fixtures/evaluation/benchmark/suite.json --live --repeats 3 --output ./evaluation-baselines/v0.51
+PYTHONPATH=src python -m mini_agent.evaluation report-suite ./evaluation-baselines/v0.51
+```
+
+运行器先校验全部题目、离线基线和模型 binding，再创建包含 12 个顺序槽位的 `suite-run.json`。每个槽位只尝试一次；启动前故障记为基础设施错误，中断留下 `not_run` 槽位，已完成 trial 保留其原始目录引用。每次 trial 的 schema 2 记录 suite ID/version/摘要、run ID、重复序号、初始 fixture 摘要、Git code revision、运行时代码指纹和模型来源；运行时代码指纹也在 trial 前后核对。单题 schema 1 与 TrialRequest schema 1 保持兼容。报告从账本和被引用的原始 trial 重建，不把 `fixture` 与 `live` 混算。
+
+每题分别报告计划、运行、可评分数量、独立 grader 通过数、Agent 最终成功数、错误类别、调用/token 观测数、耗时分布和 trial 路径。`scorable_trials` 要求独立 grader 返回布尔结果且没有 grader/runner 基础设施错误；`final_successes` 还要求 Agent 正常完成。`live_baseline_complete` 只有在 live run 收束且每个计划槽位都有可评分结果时为真；少于每题 3 个可评分样本会明确保持未完成。未观测到的 token 和调用保持缺失；没有价格快照时成本为 `null`。报告另列基础设施错误、实际模型来源摘要、用量缺失 trial，以及 Agent 正常停止但 grader 未通过、grader 与最终成功条件不一致等人工复核项。fixture 只用于验证评测链路，不能计入模型成绩。
+
+首次基线的结果目录预留在 [`baselines/v0.51/`](baselines/v0.51/README.md)。目前任务和成功标准待用户审阅，12 次 live trial 尚未开始；在记录生成前，不报告编码模型成绩。
+
 ## 题目格式
 
 `case.json` 使用严格的 schema 1。fixture 与 grader 路径都是相对题目目录的路径；`..`、绝对路径、符号链接、特殊文件、缺失评分器和超限 fixture 会在启动 Agent 前拒绝。

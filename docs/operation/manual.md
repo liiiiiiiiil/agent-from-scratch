@@ -1,6 +1,22 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.50**（Evaluation Harness；含此前计划驱动执行、工具权限、父侧 Memory/References/MCP/Skills 和轻量子代理协作）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.51**（编码任务集与真实模型基线；含此前 Evaluation Harness、计划驱动执行、工具权限、父侧 Memory/References/MCP/Skills 和轻量子代理协作）。
+
+## v0.51 编码任务集
+
+编码基线用固定 suite 顺序运行四道纯标准库 Python 题，每题从同一份初始文件复制到独立 trial 工作区。题目覆盖分页末页边界、订单折扣与收据的双模块改动、缓存过期与回归测试、以及不预先指出故障文件的配置优先级调查。独立 grader 在 Agent 停止后运行。
+
+Suite 摘要绑定 case、任务文字、初始文件、grader 和已知正确版本。执行前必须审阅 `validate-suite` 打印的题目、成功标准、时间/轮次上限和获准工具。命令要求显式 `--live`；任务审定仍是启动这 12 次首轮真实调用的前置条件：
+
+```bash
+PYTHONPATH=src python -m mini_agent.evaluation validate-suite tests/fixtures/evaluation/benchmark/suite.json
+PYTHONPATH=src python -m mini_agent.evaluation run-suite tests/fixtures/evaluation/benchmark/suite.json --live --repeats 3 --output ./evaluation-baselines/v0.51
+PYTHONPATH=src python -m mini_agent.evaluation report-suite ./evaluation-baselines/v0.51
+```
+
+`run-suite` 在开始前完整预检所有题目和本地模型 binding；每个 trial 仅尝试一次，并按 suite 顺序写入 `suite-run.json`。启动失败、中断或未运行槽位都保留在计划分母中；已有原始 trial 不会被重试覆盖。结果目录保存套件清单副本、账本和 `trials/` 原始证据。单题 `TrialResult` schema 1 继续可读，套件 trial 使用 schema 2，并记录 Git revision 与运行时代码指纹。
+
+`report-suite` 从账本和引用的原始 trial 重建逐题及总报告。计划次数、已运行、可评分、独立验收通过、最终成功、基础设施错误、失败类别、已观测调用/token 和耗时分别列出，并为每个数字保留 trial 引用。`live_baseline_complete` 表示 12 个计划槽位是否都有可评分 live 结果；不足时保留未完成状态。Live 与 fixture 分开；无价格快照时成本为 `null`。首份基线计划为每题 3 次、共 12 次，结果尚待任务审阅，不把离线检查当作模型成绩。详细字段和统计口径见[评测说明](../evaluation/README.md)及[基线目录](../evaluation/baselines/v0.51/README.md)。
 
 ## v0.50 Evaluation Harness
 

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "config-priority-investigation",
+  "version": "1.0",
+  "task": "调查并修复配置来源优先级问题。约定优先级从低到高为：内置默认值、项目配置、环境变量；同一设置在多个来源出现时，最终值必须来自最高优先级来源，其他设置仍保留。复现时默认值为 APP_MODE=development、APP_RETRIES=3，项目值为 APP_MODE=staging、APP_RETRIES=5，环境变量为 APP_MODE=production、APP_TIMEOUT=7。请修复后保证结果为 APP_MODE=production、APP_RETRIES=5、APP_TIMEOUT=7，并保留现有公开入口。",
+  "fixture_dir": "initial",
+  "grader_script": "grader.py",
+  "agent_timeout_seconds": 120,
+  "grader_timeout_seconds": 30,
+  "max_rounds": 20,
+  "allowed_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "authorized_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "description": "先通过观察配置来源和代码定位优先级错误，再修复。任务不指定故障文件。",
+  "tags": ["coding", "investigation", "configuration"]
+}

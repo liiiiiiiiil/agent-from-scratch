@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "pagination-boundary",
+  "version": "1.0",
+  "task": "修复分页函数遗漏末页的问题。请保证空集合返回空分页；对 6 条记录按每页 3 条分页时返回两页且第二页是最后 3 条；对 7 条记录仍返回三页且末页只有 1 条。page_size 小于 1 必须抛出 ValueError。请保持公开函数的参数和返回类型兼容。",
+  "fixture_dir": "initial",
+  "grader_script": "grader.py",
+  "agent_timeout_seconds": 120,
+  "grader_timeout_seconds": 30,
+  "max_rounds": 16,
+  "allowed_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "authorized_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "description": "单文件边界修复：分页必须包含末页。",
+  "tags": ["coding", "single-file", "boundary"]
+}

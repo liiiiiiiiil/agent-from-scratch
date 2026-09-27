@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case_id": "cache-expiry-regression",
+  "version": "1.0",
+  "task": "修复缓存过期边界错误：条目存活时间达到 ttl_seconds 时就已经过期，读取应返回 None；过期前仍返回原值。请在 tests/test_cache_expiry.py 新增标准库 unittest 回归测试，使用可控时钟验证过期前和恰好到期两个时刻。新测试必须在当前实现通过，并能在原始错误实现上失败。",
+  "fixture_dir": "initial",
+  "grader_script": "grader.py",
+  "agent_timeout_seconds": 120,
+  "grader_timeout_seconds": 30,
+  "max_rounds": 18,
+  "allowed_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "authorized_tools": ["read_file", "list_dir", "grep", "write_file", "edit_file", "calculate"],
+  "description": "修复缓存 TTL 边界并提交可证明捕获旧错误的回归测试。",
+  "tags": ["coding", "regression-test", "time-boundary"]
+}

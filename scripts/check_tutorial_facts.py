@@ -61,6 +61,8 @@ EXPECTED = {
     "47-agent-profiles.md": ("v0.47", "v0.46..v0.47"),
     "48-background-subagents.md": ("v0.48", "v0.47..v0.48"),
     "49-resumable-child-session.md": ("v0.49", "v0.48..v0.49"),
+    "50-evaluation-harness.md": ("v0.50", "v0.49..v0.50"),
+    "51-coding-benchmark.md": ("v0.51", "v0.50..v0.51"),
 }
 PATCHES = {
     "16-plan-driven-execution.md": ("v0.16.1", "v0.16..v0.16.1"),

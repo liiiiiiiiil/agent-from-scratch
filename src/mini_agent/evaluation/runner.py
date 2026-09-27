@@ -215,6 +215,7 @@ def _copy_fixture(source: Path, destination: Path) -> None:
         raise ValueError("fixture_limit_exceeded")
     destination.mkdir(parents=True, mode=0o700, exist_ok=True)
     for current, dirs, files in os.walk(source, topdown=True, followlinks=False):
+        dirs[:] = [directory for directory in dirs if directory != "__pycache__"]
         relative = Path(current).relative_to(source)
         target_dir = destination / relative
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -224,6 +225,8 @@ def _copy_fixture(source: Path, destination: Path) -> None:
                 raise ValueError("fixture_symlink_race")
             (target_dir / directory).mkdir(exist_ok=True)
         for name in files:
+            if name.endswith((".pyc", ".pyo")):
+                continue
             origin = Path(current) / name
             if origin.is_symlink() or not origin.is_file():
                 raise ValueError("fixture_file_changed_during_copy")
@@ -375,6 +378,11 @@ class EvaluationRunner:
     def validate_live_configuration(self, case: Case) -> tuple[dict[str, str], tuple[str, ...]]:
         return _load_live_binding(case)
 
+    def run_suite(self, suite, output, **options) -> Path:
+        from mini_agent.evaluation.benchmark import run_suite
+
+        return run_suite(suite, output, runner=self, **options)
+
     def run_case(
         self,
         case: Case,
@@ -383,6 +391,8 @@ class EvaluationRunner:
         run_kind: str,
         live_confirmed: bool = False,
         responses: tuple[dict[str, Any], ...] = (),
+        suite_metadata: dict[str, Any] | None = None,
+        expected_model_binding_ref: dict[str, str] | None = None,
     ) -> Path:
         if run_kind not in {"live", "fixture"}:
             raise ValueError("run_kind must be live or fixture")
@@ -405,10 +415,21 @@ class EvaluationRunner:
         if len(grader_source) > 64 * 1024:
             raise ValueError("grader_script 超过 64 KiB")
         grader_sha256 = hashlib.sha256(grader_source).hexdigest()
+        if suite_metadata is not None:
+            from mini_agent.evaluation.benchmark import runtime_fingerprint, tree_sha256
+
+            if suite_metadata.get("grader_sha256") != grader_sha256:
+                raise ValueError("suite grader 摘要在预检后发生变化")
+            if tree_sha256(fixture_root) != suite_metadata.get("initial_fixture_sha256"):
+                raise ValueError("suite initial fixture 摘要在预检后发生变化")
+            if runtime_fingerprint() != suite_metadata.get("runtime_fingerprint"):
+                raise ValueError("Agent runtime source changed before trial")
         model_ref: dict[str, str] | None = None
         redactions: tuple[str, ...] = ()
         if run_kind == "live":
             model_ref, redactions = self.validate_live_configuration(case)
+            if expected_model_binding_ref is not None and model_ref != expected_model_binding_ref:
+                raise ValueError("model_binding_changed_before_trial")
 
         output_root = Path(output).expanduser().absolute()
         if output_root.resolve(strict=False).is_relative_to(Path(case.case_dir).resolve()):
@@ -437,6 +458,8 @@ class EvaluationRunner:
         workspace_limit_error = None
         cleanup_complete = True
         cleanup_issue = None
+        runtime_fingerprint_end = None
+        runtime_fingerprint_changed = False
         workspace = tmp_root / "workspace"
         frozen_grader = tmp_root / "grader.py"
         frozen_grader.write_bytes(grader_source)
@@ -448,6 +471,20 @@ class EvaluationRunner:
         (home / ".mini_agent" / "memory").mkdir(mode=0o700)
         try:
             _copy_fixture(fixture_root, workspace)
+            grader_reference = None
+            if suite_metadata is not None:
+                from mini_agent.evaluation.benchmark import tree_sha256
+
+                if tree_sha256(workspace) != suite_metadata["initial_fixture_sha256"]:
+                    raise ValueError("复制后的 trial workspace 与冻结 initial fixture 不一致")
+                grader_reference = tmp_root / "grader-reference"
+                _copy_fixture(workspace, grader_reference / "initial")
+                for current, dirs, files in os.walk(grader_reference, topdown=False):
+                    current_path = Path(current)
+                    for name in files:
+                        os.chmod(current_path / name, 0o400)
+                    os.chmod(current_path, 0o500)
+                os.chmod(grader_reference, 0o500)
             before, _before_count, _before_size = _snapshot(workspace)
             if run_kind == "fixture" and len(responses) > case.max_rounds:
                 raise ValueError("fixture responses exceed case max_rounds")
@@ -470,6 +507,11 @@ class EvaluationRunner:
                 cwd=workspace, env=worker_env, timeout=case.agent_timeout_seconds,
                 stdout_path=worker_stdout, stderr_path=worker_stderr,
             )
+            if suite_metadata is not None:
+                from mini_agent.evaluation.benchmark import runtime_fingerprint
+
+                runtime_fingerprint_end = runtime_fingerprint()
+                runtime_fingerprint_changed = runtime_fingerprint_end != suite_metadata["runtime_fingerprint"]
             result_payload = None if worker_info["timed_out"] else _worker_payload(worker_stdout)
             if result_payload is not None and result_payload.get("trial_id") != trial_id:
                 result_payload = None
@@ -488,6 +530,7 @@ class EvaluationRunner:
                 grader_stdout = tmp_root / "grader.stdout"
                 grader_stderr = tmp_root / "grader.stderr"
                 grader_env = _process_environment(home, include_proxy=False)
+                grader_env["MINI_AGENT_EVALUATION_REFERENCE_ROOT"] = str(grader_reference or case.case_dir)
                 grader_info = _run_child(
                     [sys.executable, str(frozen_grader), str(workspace)],
                     cwd=workspace, env=grader_env, timeout=case.grader_timeout_seconds,
@@ -537,6 +580,15 @@ class EvaluationRunner:
             if grader_error and failure_kind == "none":
                 failure_kind = "grader_infrastructure_error"
             if not cleanup_complete:
+                failure_kind = "infrastructure_error"
+            if runtime_fingerprint_changed:
+                failure_kind = "infrastructure_error"
+            observed_binding = result_payload.get("model_binding_ref") if result_payload else None
+            if (
+                expected_model_binding_ref is not None
+                and observed_binding is not None
+                and observed_binding != expected_model_binding_ref
+            ):
                 failure_kind = "infrastructure_error"
             success = bool(
                 failure_kind == "none"
@@ -607,6 +659,10 @@ class EvaluationRunner:
                 "price_snapshot": None,
                 "grader_sha256": grader_sha256,
             }
+            if suite_metadata is not None:
+                trial.update(suite_metadata)
+                trial["runtime_fingerprint_end"] = runtime_fingerprint_end
+                trial["schema_version"] = 2
             validate_trial_result(trial)
             (stage_dir / "diff.patch").write_text(diff_text, encoding="utf-8")
             (stage_dir / "agent.log").write_text(agent_log, encoding="utf-8")
@@ -621,6 +677,17 @@ class EvaluationRunner:
             _atomic_write(stage_dir / "trial.json", result_bytes)
         finally:
             try:
+                for current, dirs, files in os.walk(tmp_root, topdown=False):
+                    current_path = Path(current)
+                    for name in files:
+                        try:
+                            os.chmod(current_path / name, 0o600)
+                        except OSError:
+                            pass
+                    try:
+                        os.chmod(current_path, 0o700)
+                    except OSError:
+                        pass
                 shutil.rmtree(tmp_root)
             except OSError as error:
                 cleanup_complete = False
@@ -643,7 +710,10 @@ class EvaluationRunner:
         return final_dir
 
 
-def run_grader_for_workspace(case: Case, workspace: Path, *, timeout: int = 30) -> tuple[bool | None, str | None]:
+def run_grader_for_workspace(
+    case: Case, workspace: Path, *, timeout: int = 30,
+    reference_root: Path | None = None,
+) -> tuple[bool | None, str | None]:
     """Run the case's frozen grader against a prepared baseline workspace."""
     grader = Path(case.case_dir) / case.grader_script
     home = Path(tempfile.mkdtemp(prefix="mini-agent-eval-grader-home-"))
@@ -653,7 +723,10 @@ def run_grader_for_workspace(case: Case, workspace: Path, *, timeout: int = 30) 
     try:
         info = _run_child(
             [sys.executable, str(grader), str(workspace)], cwd=workspace,
-            env=_process_environment(home, include_proxy=False), timeout=timeout,
+            env={
+                **_process_environment(home, include_proxy=False),
+                "MINI_AGENT_EVALUATION_REFERENCE_ROOT": str(reference_root or case.case_dir),
+            }, timeout=timeout,
             stdout_path=out, stderr_path=err,
         )
         if info["timed_out"] or info["returncode"] != 0:

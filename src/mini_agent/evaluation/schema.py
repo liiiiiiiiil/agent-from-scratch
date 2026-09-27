@@ -25,6 +25,10 @@ MAX_AGENT_ROUNDS = 50
 MAX_AGENT_TIMEOUT_SECONDS = 600
 MAX_GRADER_TIMEOUT_SECONDS = 120
 MAX_RESULT_BYTES = 256 * 1024
+MAX_SUITE_BYTES = 64 * 1024
+MAX_SUITE_CASES = 16
+MAX_SUITE_REPEATS = 10
+MAX_SUITE_SLOTS = MAX_SUITE_CASES * MAX_SUITE_REPEATS
 
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){0,2}(?:[-+][a-zA-Z0-9.-]+)?\Z")
@@ -133,6 +137,100 @@ TRIAL_RESULT_SCHEMA_V1: dict[str, Any] = {
     },
 }
 
+TRIAL_RESULT_SCHEMA_V2: dict[str, Any] = {
+    **TRIAL_RESULT_SCHEMA_V1,
+    "$id": "mini-agent-evaluation-trial-result-v2",
+    "required": [
+        *TRIAL_RESULT_SCHEMA_V1["required"], "suite_id", "suite_version", "suite_sha256",
+        "suite_run_id", "repetition", "initial_fixture_sha256", "runtime_fingerprint",
+        "runtime_fingerprint_end",
+    ],
+    "properties": {
+        **TRIAL_RESULT_SCHEMA_V1["properties"],
+        "schema_version": {"const": 2},
+        "suite_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "suite_version": {"type": "string", "maxLength": 64},
+        "suite_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "suite_run_id": {"type": "string", "pattern": "^[a-f0-9-]{36}$"},
+        "repetition": {"type": "integer", "minimum": 1, "maximum": MAX_SUITE_REPEATS},
+        "initial_fixture_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "runtime_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "runtime_fingerprint_end": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    },
+}
+
+SUITE_SCHEMA_V1: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "mini-agent-evaluation-suite-v1",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schema_version", "suite_id", "version", "description", "default_repeats", "cases", "suite_sha256"],
+    "properties": {
+        "schema_version": {"const": 1},
+        "suite_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "version": {"type": "string", "maxLength": 64},
+        "description": {"type": "string", "maxLength": 2000},
+        "default_repeats": {"type": "integer", "minimum": 1, "maximum": MAX_SUITE_REPEATS},
+        "suite_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "cases": {
+            "type": "array", "minItems": 1, "maxItems": MAX_SUITE_CASES,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["case_id", "case_path", "case_sha256", "task_sha256", "initial_sha256", "grader_sha256", "known_good_sha256", "regression_test_required"],
+                "properties": {
+                    "case_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+                    "case_path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "case_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "task_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "initial_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "grader_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "known_good_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "regression_test_required": {"type": "boolean"},
+                },
+            },
+        },
+    },
+}
+
+SUITE_RUN_SCHEMA_V1: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "mini-agent-evaluation-suite-run-v1",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schema_version", "suite_run_id", "suite_id", "suite_version", "suite_sha256", "run_kind", "repeats", "planned_trials", "started_at", "updated_at", "status", "code_revision", "runtime_fingerprint", "model_binding_ref", "slots"],
+    "properties": {
+        "schema_version": {"const": 1},
+        "suite_run_id": {"type": "string", "pattern": "^[a-f0-9-]{36}$"},
+        "suite_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "suite_version": {"type": "string", "maxLength": 64},
+        "suite_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "run_kind": {"enum": ["live", "fixture"]},
+        "repeats": {"type": "integer", "minimum": 1, "maximum": MAX_SUITE_REPEATS},
+        "planned_trials": {"type": "integer", "minimum": 1, "maximum": MAX_SUITE_SLOTS},
+        "started_at": {"type": "string", "maxLength": 64},
+        "updated_at": {"type": "string", "maxLength": 64},
+        "status": {"enum": ["running", "completed", "interrupted"]},
+        "code_revision": {"type": ["string", "null"], "maxLength": 80},
+        "runtime_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "model_binding_ref": {"type": ["object", "null"]},
+        "slots": {
+            "type": "array", "minItems": 1, "maxItems": MAX_SUITE_SLOTS,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["slot_id", "case_id", "repetition", "status", "trial_path", "error_kind"],
+                "properties": {
+                    "slot_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+                    "case_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+                    "repetition": {"type": "integer", "minimum": 1, "maximum": MAX_SUITE_REPEATS},
+                    "status": {"enum": ["not_run", "running", "completed", "infrastructure_error"]},
+                    "trial_path": {"type": ["string", "null"], "maxLength": 512},
+                    "error_kind": {"type": ["string", "null"], "maxLength": 120},
+                },
+            },
+        },
+    },
+}
+
 
 @dataclass(frozen=True)
 class Case:
@@ -227,9 +325,24 @@ class TrialResult:
     price_snapshot: dict[str, Any] | None = None
     grader_sha256: str | None = None
     schema_version: int = SCHEMA_VERSION
+    suite_id: str | None = None
+    suite_version: str | None = None
+    suite_sha256: str | None = None
+    suite_run_id: str | None = None
+    repetition: int | None = None
+    initial_fixture_sha256: str | None = None
+    runtime_fingerprint: str | None = None
+    runtime_fingerprint_end: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.schema_version == 1:
+            for name in (
+                "suite_id", "suite_version", "suite_sha256", "suite_run_id",
+                "repetition", "initial_fixture_sha256", "runtime_fingerprint", "runtime_fingerprint_end",
+            ):
+                value.pop(name)
+        return value
 
 
 def _require(condition: bool, message: str) -> None:
@@ -316,6 +429,7 @@ def _safe_relative(value: Any, name: str) -> str:
     path = Path(value)
     _require(not path.is_absolute() and not re.match(r"^[A-Za-z]:", value), f"{name} 必须是相对路径")
     _require(all(part not in ("", ".", "..") for part in path.parts), f"{name} 不得包含 . 或 ..")
+    _require(path.as_posix() == value, f"{name} 必须使用规范相对路径")
     return path.as_posix()
 
 
@@ -449,11 +563,17 @@ def validate_trial_request(raw: Any) -> TrialRequest:
 
 def validate_trial_result(raw: Any) -> dict[str, Any]:
     _require(isinstance(raw, dict), "TrialResult 必须是 JSON object")
-    _validate_json_schema(raw, TRIAL_RESULT_SCHEMA_V1, "TrialResult")
-    required = set(TRIAL_RESULT_SCHEMA_V1["required"])
-    allowed = set(TRIAL_RESULT_SCHEMA_V1["properties"])
-    _require(required <= set(raw) <= allowed, "TrialResult 字段不匹配 schema 1")
-    _require(raw.get("schema_version") == SCHEMA_VERSION, "TrialResult schema_version 必须为 1")
+    schema_version = raw.get("schema_version")
+    if schema_version == 1:
+        result_schema = TRIAL_RESULT_SCHEMA_V1
+    elif schema_version == 2:
+        result_schema = TRIAL_RESULT_SCHEMA_V2
+    else:
+        raise ValueError("TrialResult schema_version 必须为 1 或 2")
+    _validate_json_schema(raw, result_schema, "TrialResult")
+    required = set(result_schema["required"])
+    allowed = set(result_schema["properties"])
+    _require(required <= set(raw) <= allowed, f"TrialResult 字段不匹配 schema {schema_version}")
     _require(raw.get("run_kind") in ("live", "fixture"), "TrialResult run_kind 非法")
     _require(isinstance(raw.get("trial_id"), str) and re.fullmatch(
         r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", raw["trial_id"]
@@ -499,4 +619,85 @@ def validate_trial_result(raw: Any) -> dict[str, Any]:
              "没有价格快照时 cost_usd 必须为 null")
     encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     _require(len(encoded) <= MAX_RESULT_BYTES, f"TrialResult 超过 {MAX_RESULT_BYTES} bytes")
+    if schema_version == 2:
+        _require(isinstance(raw.get("suite_version"), str) and _VERSION.fullmatch(raw["suite_version"]) is not None,
+                 "suite_version 格式非法")
+        _require(isinstance(raw.get("repetition"), int) and not isinstance(raw.get("repetition"), bool)
+                 and 1 <= raw["repetition"] <= MAX_SUITE_REPEATS, "repetition 超出允许范围")
     return raw
+
+
+def validate_suite(raw: Any) -> dict[str, Any]:
+    """Validate the bounded, ordered suite manifest contract."""
+    _require(isinstance(raw, dict), "Suite 必须是 JSON object")
+    _validate_json_schema(raw, SUITE_SCHEMA_V1, "Suite")
+    _require(isinstance(raw.get("version"), str) and _VERSION.fullmatch(raw["version"]) is not None,
+             "Suite version 格式非法")
+    entries = raw["cases"]
+    ids = [entry["case_id"] for entry in entries]
+    paths = [entry["case_path"] for entry in entries]
+    _require(len(ids) == len(set(ids)), "Suite 含重复 case_id")
+    _require(len(paths) == len(set(paths)), "Suite 含重复 case_path")
+    for entry in entries:
+        relative = _safe_relative(entry["case_path"], "case_path")
+        _require(relative.endswith("/case.json") or relative == "case.json", "case_path 必须指向 case.json")
+    _require(len(_canonical_contract_bytes(raw)) <= MAX_SUITE_BYTES, f"Suite 超过 {MAX_SUITE_BYTES} bytes")
+    return raw
+
+
+def validate_suite_run(raw: Any) -> dict[str, Any]:
+    """Validate a bounded suite-run ledger, including every planned slot."""
+    _require(isinstance(raw, dict), "SuiteRun 必须是 JSON object")
+    _validate_json_schema(raw, SUITE_RUN_SCHEMA_V1, "SuiteRun")
+    binding = raw["model_binding_ref"]
+    if binding is not None:
+        _require(set(binding) == {"profile", "provider", "protocol", "fingerprint"}
+                 and all(isinstance(binding.get(key), str) for key in binding),
+                 "SuiteRun.model_binding_ref 必须是脱敏来源摘要")
+        _require(re.fullmatch(r"[0-9a-f]{64}", binding["fingerprint"]) is not None,
+                 "SuiteRun.model_binding_ref fingerprint 格式非法")
+    slots = raw["slots"]
+    _require(raw["planned_trials"] == len(slots), "planned_trials 必须等于 slots 数量")
+    keys = [(slot["case_id"], slot["repetition"]) for slot in slots]
+    _require(len(keys) == len(set(keys)), "SuiteRun 含重复 case/repetition 槽位")
+    _require(len({slot["slot_id"] for slot in slots}) == len(slots), "SuiteRun 含重复 slot_id")
+    seen_case_ids: set[str] = set()
+    ordered_case_ids: list[str] = []
+    repetition_counts: dict[str, int] = {}
+    for slot in slots:
+        case_id = slot["case_id"]
+        if case_id not in repetition_counts:
+            _require(case_id not in seen_case_ids, "SuiteRun 槽位必须按 case 连续排列")
+            seen_case_ids.add(case_id)
+            ordered_case_ids.append(case_id)
+            repetition_counts[case_id] = 0
+        repetition_counts[case_id] += 1
+        _require(slot["repetition"] == repetition_counts[case_id], "SuiteRun repetition 必须从 1 顺序递增")
+        _require(slot["slot_id"] == f"{case_id}-{slot['repetition']:02d}", "SuiteRun slot_id 与 case/repetition 不一致")
+        if slot["trial_path"] is not None:
+            _safe_relative(slot["trial_path"], "trial_path")
+        if slot["status"] == "completed":
+            _require(isinstance(slot["trial_path"], str) and slot["error_kind"] is None,
+                     "completed 槽位必须引用 trial 且不能含 error_kind")
+        elif slot["status"] == "infrastructure_error":
+            _require(isinstance(slot["error_kind"], str), "基础设施错误槽位必须保留 error_kind")
+            _require(slot["trial_path"] is None, "启动前基础设施错误槽位不能引用 trial")
+        else:
+            _require(slot["trial_path"] is None, "未完成槽位不能引用 trial")
+    if raw["status"] == "completed":
+        _require(all(slot["status"] in {"completed", "infrastructure_error"} for slot in slots),
+                 "completed SuiteRun 仍有未运行槽位")
+    _require(len(set(repetition_counts.values())) == 1, "SuiteRun 每题必须计划相同重复次数")
+    _require(next(iter(repetition_counts.values())) == raw["repeats"], "SuiteRun repeats 与槽位不一致")
+    _require(raw["planned_trials"] == len(ordered_case_ids) * raw["repeats"], "SuiteRun 计划槽位总数不一致")
+    for name in ("started_at", "updated_at"):
+        try:
+            datetime.fromisoformat(raw[name])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"SuiteRun.{name} 必须是 ISO-8601 时间") from error
+    _require(len(_canonical_contract_bytes(raw)) <= MAX_SUITE_BYTES, f"SuiteRun 超过 {MAX_SUITE_BYTES} bytes")
+    return raw
+
+
+def _canonical_contract_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

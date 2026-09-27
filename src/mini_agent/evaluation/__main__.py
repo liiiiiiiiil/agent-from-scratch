@@ -10,10 +10,12 @@ import sys
 import tempfile
 
 from mini_agent.evaluation.report import build_report
+from mini_agent.evaluation.report import build_suite_report
 from mini_agent.evaluation.runner import (
     EvaluationRunner, _copy_fixture, run_grader_for_workspace,
 )
 from mini_agent.evaluation.schema import load_case, validate_fixture_directory
+from mini_agent.evaluation.benchmark import load_suite, run_suite, suite_plan, validate_suite_baselines
 
 
 def _default_case() -> Path:
@@ -80,6 +82,18 @@ def _parser() -> argparse.ArgumentParser:
 
     report = commands.add_parser("report", help="从原始 trial JSON 重建汇总")
     report.add_argument("output_dir")
+
+    validate_suite = commands.add_parser("validate-suite", help="校验固定题集摘要和原始/正确版本评分")
+    validate_suite.add_argument("suite_json")
+
+    run_suite_command = commands.add_parser("run-suite", help="按固定顺序运行编码题集")
+    run_suite_command.add_argument("suite_json")
+    run_suite_command.add_argument("--live", action="store_true", help="明确启用真实模型调用")
+    run_suite_command.add_argument("--repeats", type=int, default=None, help="每题重复次数，默认使用 suite 配置")
+    run_suite_command.add_argument("--output", required=True, help="新的独立 suite run 目录")
+
+    report_suite = commands.add_parser("report-suite", help="从 suite-run 和原始 trial 重建报告")
+    report_suite.add_argument("suite_run_dir")
     return parser
 
 
@@ -141,6 +155,62 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "report":
             print(json.dumps(build_report(args.output_dir), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "validate-suite":
+            suite = load_suite(args.suite_json)
+            baselines = validate_suite_baselines(suite)
+            print(json.dumps({
+                "valid": True, "suite_id": suite.suite_id, "version": suite.version,
+                "suite_sha256": suite.suite_sha256, "planned_trials_default": len(suite_plan(suite)),
+                "cases": [
+                    {
+                        "case_id": item.case.case_id, "case_path": str(item.case_path),
+                        "task": item.case.task, "max_rounds": item.case.max_rounds,
+                        "agent_timeout_seconds": item.case.agent_timeout_seconds,
+                        "grader_timeout_seconds": item.case.grader_timeout_seconds,
+                        "authorized_tools": list(item.case.authorized_tools),
+                        "initial_sha256": item.initial_sha256,
+                        "grader_sha256": item.grader_sha256,
+                        "known_good_sha256": item.known_good_sha256,
+                        "regression_test_required": item.regression_test_required,
+                    }
+                    for item in suite.cases
+                ],
+                "offline_baselines": baselines,
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "run-suite":
+            if not args.live:
+                raise ValueError("真实模型套件运行必须显式传 --live")
+            suite = load_suite(args.suite_json)
+            plan = suite_plan(suite, args.repeats)
+            # All topic, oracle, and provider checks happen before the first worker.
+            validate_suite_baselines(suite)
+            bindings = [runner.validate_live_configuration(item.case)[0] for item in suite.cases]
+            if any(value != bindings[0] for value in bindings[1:]):
+                raise ValueError("coding suite 的所有题目必须使用同一个冻结 model binding")
+            print(
+                f"LIVE suite: {suite.suite_id}@{suite.version}; suite_sha256={suite.suite_sha256}; "
+                f"planned_trials={len(plan)}; repeats_per_case={len(plan) // len(suite.cases)}"
+            )
+            for item in suite.cases:
+                case = item.case
+                count = sum(slot["case_id"] == case.case_id for slot in plan)
+                print(
+                    f"- {case.case_id}: {count} trial(s); rounds<={case.max_rounds}; "
+                    f"agent_timeout={case.agent_timeout_seconds}s; grader_timeout={case.grader_timeout_seconds}s; "
+                    f"authorized_tools={','.join(case.authorized_tools)}"
+                )
+                print("  Task: " + case.task)
+            ledger = run_suite(
+                suite, args.output, repeats=args.repeats, run_kind="live", live_confirmed=True,
+                runner=runner,
+            )
+            print(f"Suite run saved: {ledger.parent}")
+            print(json.dumps(build_suite_report(ledger.parent), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "report-suite":
+            print(json.dumps(build_suite_report(args.suite_run_dir), ensure_ascii=False, indent=2))
             return 0
     except Exception as error:
         print(f"evaluation error ({type(error).__name__}): {error}", file=sys.stderr)
