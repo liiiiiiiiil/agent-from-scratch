@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v0.50.0] - Evaluation Harness
+
+- Added strict schema 1 cases, trial requests, and results with bounded fixture validation, explicit tool visibility/authorization, independent grader budgets, and nullable uncollected metrics.
+- Added a non-interactive isolated worker that reuses the canonical `AgentRuntime.run()`, `ParentRuntimePolicy`, `ToolExecutor`, a frozen local model binding, and a trial-scoped file-tool surface; shell, processes, MCP, Memory writes, Skills, and Subagents remain unavailable.
+- Added an atomic runner with per-trial workspaces and HOME/Memory paths, wall-clock process-group cleanup, grader-after-Agent ordering, bounded logs/diffs/results, redacted model-source summaries, and fixture/live separation.
+- Added `validate`, explicit `run --live`, two-run offline `self-test`, and report reconstruction from immutable raw trial JSON. Costs remain `null` without a price snapshot; recovery and invalid-repeat metrics are marked not applicable/uncollected.
+- Added the fixed scale repair smoke case, independent grader checks for the broken and known-correct versions, v0.50 tutorial/manual/evaluation docs, and regression coverage for schema, path escape, permission refusal, timeout, infrastructure errors, atomic results, metrics denominator, and secret redaction.
+- Live trial acceptance: completed with a successful real model run and an independent grader pass. The first sandbox-restricted connection error is retained as a separate scorable live trial; the recorded live output therefore reports 1/2 success, without broad benchmark claims.
+
 ## [v0.49.0] - Resumable child sessions
 
 - Added `followup_subagent` for a complete next-round contract on the same child session after the previous successful result is claimed; each round keeps its own delegation, result identity, and usage while retaining the child Context history.

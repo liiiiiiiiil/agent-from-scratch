@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "case_id": "smoke-scale-repair",
+  "version": "1.0",
+  "description": "修复单文件整数与浮点数缩放行为。",
+  "task": "请修改 src/scale.py 中的 scale(value)，使它返回参数乘以 2。保留函数签名和其他文件。完成后重新读取文件确认，再用简短文本结束。",
+  "fixture_dir": "initial",
+  "grader_script": "grader.py",
+  "agent_timeout_seconds": 120,
+  "grader_timeout_seconds": 30,
+  "max_rounds": 6,
+  "allowed_tools": [
+    "read_file",
+    "list_dir",
+    "grep",
+    "write_file",
+    "edit_file",
+    "calculate"
+  ],
+  "authorized_tools": [
+    "read_file",
+    "list_dir",
+    "grep",
+    "write_file",
+    "edit_file",
+    "calculate"
+  ],
+  "tags": ["smoke", "single-file", "offline-grader"]
+}

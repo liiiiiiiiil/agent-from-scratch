@@ -16,7 +16,7 @@
 
 适合想用 Python 标准库理解 LLM agent 如何运行的开发者。每课聚焦一个版本相对上一版新增的核心概念，源码、diff 和设计取舍都可追溯。
 
-**当前状态**：主线代码已完成 `v0.49`（第 49 课：可续接子会话）。父 Agent 可在领取成功调查结果后，用原 ID 为具名只读子代理提交下一轮调查，并将空闲子会话随安全点保存、恢复；活动 worker 不跨进程恢复。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
+**当前状态**：主线已实现 `v0.50`（第 50 课：Agent 任务评测），并完成一次真实模型调用与独立 grader 验收。Evaluation Harness 从固定题目建立独立工作区；固定模型响应仅用于离线自测。该版只含一个小型 smoke 题，不是编码基准。教程以默认分支的 `docs/tutorials/` 为准；运行某课时再切换该课声明的代码 tag。
 
 快速入口：[运行](#快速开始) · [学习路径](#学习路径) · [学习指南](./docs/tutorials/README.md) · [完整手册](./docs/operation/manual.md)
 
@@ -89,6 +89,8 @@
     <tr><td><strong>v0.47</strong></td><td><a href="./docs/tutorials/47-agent-profiles.md">具名子代理角色</a></td><td>为同步只读委派选择冻结的角色提示、工具子集、模型别名与父侧预授权 Skill；tester 只能分析并建议测试。</td></tr>
     <tr><td><strong>v0.48</strong></td><td><a href="./docs/tutorials/48-background-subagents.md">进程内后台子代理</a></td><td>父 Agent 启动具名只读调查后继续模型轮次，通过状态查询与显式领取接收结果；整轮持久提交前不启动 worker，活动或未领取任务不能安全保存或完成。</td></tr>
     <tr><td><strong>v0.49</strong></td><td><a href="./docs/tutorials/49-resumable-child-session.md">可续接子会话</a></td><td>用原 child ID 为已领取成功结果追加完整调查合同；schema 4 安全点原子保存有界子历史，恢复时重核角色、模型和 Skill 身份，并保留累计预算。</td></tr>
+    <tr><th colspan="3"><a id="stage-14"></a>阶段十四 · Agent 任务评测</th></tr>
+    <tr><td><strong>v0.50</strong></td><td><a href="./docs/tutorials/50-evaluation-harness.md">独立评测链路</a></td><td>从固定题目复制干净工作区，运行受限 Agent，再由独立 grader 验收；保存单次结果并分开汇总真实调用与离线自测。</td></tr>
   </tbody>
 </table>
 

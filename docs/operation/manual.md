@@ -1,6 +1,31 @@
 # mini_agent 操作手册
 
-> 本手册跟随最新版本更新。当前对应版本：**v0.49**（可续接子会话；含此前进程内后台子代理、具名角色、同步只读委派、父侧预授权 Skills、父 Agent Runtime MCP Tool、Memory、References 与 MCP Resource/Prompt）。
+> 本手册跟随最新版本更新。当前对应版本：**v0.50**（Evaluation Harness；含此前计划驱动执行、工具权限、父侧 Memory/References/MCP/Skills 和轻量子代理协作）。
+
+## v0.50 Evaluation Harness
+
+Evaluation Harness 从固定题目复制出一个新工作区，调用一次 canonical Agent Runtime，再由独立评分程序检查 Agent 停止时留下的文件。常规测试验证实现边界；Harness 用来记录一次具体 Agent 任务的结果。`self-test` 使用固定响应，只验证链路，不计入真实模型成功率。
+
+题目校验会检查 schema 1、fixture/grader 相对路径、符号链接、文件数量和大小、Agent 轮数及两类超时。模型工具面最多是 `read_file`、`list_dir`、`grep`、`write_file`、`edit_file`、`calculate`；题目中的 `authorized_tools` 对应无人值守时显式放行的能力。没有授权的调用由非交互 PermissionGate 拒绝，不读取 stdin。
+
+```bash
+PYTHONPATH=src python -m mini_agent.evaluation validate tests/fixtures/evaluation/smoke/case.json
+PYTHONPATH=src python -m mini_agent.evaluation self-test --output ./evaluation-results
+PYTHONPATH=src python -m mini_agent.evaluation report ./evaluation-results
+```
+
+真实模型调用只能通过显式 `--live` 启动。CLI 在运行前显示题目、轮数以及 Agent/评分时间上限；没有可用的本地 `config_local.py` 时在请求模型前报错。
+
+```bash
+PYTHONPATH=src python -m mini_agent.evaluation run tests/fixtures/evaluation/smoke/case.json --live --output ./evaluation-live
+PYTHONPATH=src python -m mini_agent.evaluation report ./evaluation-live
+```
+
+每个 `trial-<case-id>-<uuid>` 目录通过同目录原子替换发布，包含 `trial.json`、有界 `diff.patch`、`agent.log` 和 `grader.log`。`success` 要求 Agent 正常文本收束、State 为 `done`、至少一个成功模型响应、grader 通过且临时资源清理完成。Agent 自述和自行验证不改变独立评分。Agent 超时后仍会运行 grader；有有效 grader 结果的超时 trial 计入分母。Runner 或 grader 基础设施错误单独计数并从评分分母剔除。
+
+Live 与 fixture 分组汇总。当前无价格快照，所以 `cost_usd=null`；恢复成功率和无效重复次数在本版不适用/未采集，也保持 `null`。Worker 被强制停止时未写盘的 token/工具计数使用 `null`。
+
+工作区隔离保证重跑从相同 fixture 开始，但不是操作系统安全沙箱：Agent worker 与 grader 仍以调用者系统账户运行。完整题目字段、结果合同、分母和人工复核步骤见[Evaluation Harness 说明](../evaluation/README.md)；教学流程见[第 50 课](../tutorials/50-evaluation-harness.md)。
 
 ## v0.43 独立 stdio MCP Client
 
