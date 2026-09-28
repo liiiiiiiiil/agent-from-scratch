@@ -44,7 +44,9 @@ PYTHONPATH=src python -m mini_agent.evaluation report-suite ./evaluation-baselin
 
 每题分别报告计划、运行、可评分数量、独立 grader 通过数、Agent 最终成功数、错误类别、调用/token 观测数、耗时分布和 trial 路径。`scorable_trials` 要求独立 grader 返回布尔结果且没有 grader/runner 基础设施错误；`final_successes` 还要求 Agent 正常完成。`live_baseline_complete` 只有在 live run 收束且每个计划槽位都有可评分结果时为真；少于每题 3 个可评分样本会明确保持未完成。未观测到的 token 和调用保持缺失；没有价格快照时成本为 `null`。报告另列基础设施错误、实际模型来源摘要、用量缺失 trial，以及 Agent 正常停止但 grader 未通过、grader 与最终成功条件不一致等人工复核项。fixture 只用于验证评测链路，不能计入模型成绩。
 
-首次基线的结果目录预留在 [`baselines/v0.51/`](baselines/v0.51/README.md)。目前任务和成功标准待用户审阅，12 次 live trial 尚未开始；在记录生成前，不报告编码模型成绩。
+suite 1.0 的 12 次真实试跑已归档于 [`baselines/v0.51/`](baselines/v0.51/README.md)。评审发现收据题的精确展示格式未公开，原成绩保留并标为争议样本；当前 suite 1.1 已在任务中补充格式要求，尚未运行真实基线，不沿用旧成绩。
+
+运行中按 Ctrl+C 会先有界停止当前子进程，保存已启动 trial（Agent 中断为 `agent_interrupted`，评分器中断为评分基础设施错误），再将 suite 标为 `interrupted`；剩余槽位保持未运行。代码或模型来源不一致的原始 trial 仍保留，但从评分分母和最终成功数中剔除，单列 `source_mismatch_trials`，且不能标为完整基线。
 
 ## 题目格式
 

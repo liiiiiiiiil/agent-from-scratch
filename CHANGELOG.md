@@ -4,6 +4,8 @@
 
 ## [v0.51.0] - Frozen coding benchmark suite
 
+- Review fixes: publish the exact receipt format in case/suite 1.1 and mark the original baseline's format failures as disputed; preserve interrupted trials after bounded child cleanup; avoid following symlinks when restoring reference directory permissions; exclude source-inconsistent trials from scored results and baseline completion.
+
 - Added four ordered standard-library Python coding cases for pagination boundaries, multi-file order discounts and receipts, cache expiry with a required regression test, and configuration priority investigation.
 - Added independent `initial`/`known_good` grading, pinned suite and fixture digests, schema 2 suite trial metadata, an atomic 12-slot suite ledger, sequential no-retry orchestration, and per-case/aggregate reports rebuilt from referenced raw trials.
 - Added `validate-suite`, explicit `run-suite --live --repeats 3`, and `report-suite`; kept fixture and live cohorts separate and cost null without a price snapshot.

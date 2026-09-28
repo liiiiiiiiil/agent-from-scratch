@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite_id": "coding-benchmark",
-  "version": "1.0",
+  "version": "1.1",
   "description": "四道纯标准库 Python 编码任务；固定顺序和摘要，live 与 fixture 分开统计。",
   "default_repeats": 3,
   "cases": [
@@ -18,8 +18,8 @@
     {
       "case_id": "orders-discount-receipt",
       "case_path": "orders-discount-receipt/case.json",
-      "case_sha256": "7d62ef6076a02c97009e73d5b8fb815dca74b231c42b682f40f4b54993cc42cd",
-      "task_sha256": "decdadf831d81d82374f5c529780fa4d4acd8b9a720d0833330999b744b540d9",
+      "case_sha256": "f06587262efe5d0e7f498d171e204ad2ea58cbf06fed0713870c19745b796ce8",
+      "task_sha256": "6640a26cc46877f2e018609b10d556b66979a602fb8331c441894dfe5a5c6bea",
       "initial_sha256": "f0b133ee8255c4d7a317f1decb6cf87a192392d77bfb317650336e76a838f3e8",
       "grader_sha256": "157c3a8ad564317d3360c9bd11c07c66294569cdae6c5b75f27f9e6b8a588aab",
       "known_good_sha256": "3312510e4bbda8e3b5cef79f1c4a9ee6039b465a815a7616f3442d93ddf0ae7f",
@@ -46,5 +46,5 @@
       "regression_test_required": false
     }
   ],
-  "suite_sha256": "bf728faf8cff54e173a73c21946499b48b81fccce73a2b187f3d7b20b7e12d16"
+  "suite_sha256": "73f9d068d7dc19e482a74ab2f674921c4dd2e5467516c4f3a95736cafcd21469"
 }

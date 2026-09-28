@@ -22,7 +22,9 @@
 - 离线预检已逐题确认：四个原始版本均被拒绝，四个正确版本均通过。缓存题要求的 unittest 还必须在正确代码上通过，并在原始错误实现上以断言失败；分页、订单单侧修复、弱缓存测试、配置优先级错误变体均被 grader 拒绝。
 - 已新增 Suite / SuiteRun 有界合同、题目和文件树摘要、ID/version 指纹、schema 2 suite TrialResult、12 槽位顺序编排、原子账本更新、启动失败/中断保留及逐题报告重建；suite run 固定 Git revision、运行时代码指纹和模型来源，并在 trial 前后检查实现来源；原 schema 1 Case/TrialRequest/单题 TrialResult 保持可读。
 - 已新增 `validate-suite`、`run-suite --live --repeats 3`、`report-suite`，并更新第 51 课、操作手册、评测说明、中英文 README、CHANGELOG 和包版本。
-- 当前实现已通过 `tests/test_evaluation_v051.py` 的离线回归。任务与成功标准等待用户审阅；尚未启动任何 v0.51 live trial，不能报告模型成绩。用户审定后，才在同一代码 revision、模型来源和 suite 摘要下顺序运行 12 次；失败与基础设施错误均保留，不自动重试。
+- suite 1.0 经用户审阅后已顺序完成 12 次 live trial，原始记录见 `docs/evaluation/baselines/v0.51/`；未重跑或替换样本。2026-09-28 评审发现收据评分采用未公开的精确格式，旧成绩保留并标注争议；suite 已提升为 1.1，公开格式与参数拒绝要求。1.1 的真实基线尚未运行，不能沿用 1.0 成绩。
+- 评审修复：临时清理只恢复 runner 自建只读参考目录权限，不跟随符号链接；中断先有界停止子进程并保存已启动 trial，再中断套件；来源不一致的 trial 保留但排除评分，阻止完整基线判定。
+- 修复验收：评测定向测试 31 passed，完整 pytest 674 passed，suite 1.1 离线预检、教程结构、README 与 diff 检查通过；教程事实检查仅因用户尚未创建 `v0.51` tag 未通过，助手不代建 tag。未重新运行 live 或改写历史 trial。
 
 ## 1. 目标与定位
 

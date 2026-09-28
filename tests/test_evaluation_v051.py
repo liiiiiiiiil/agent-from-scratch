@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
+import sys
+import time
 
 import pytest
 
 from mini_agent.evaluation.benchmark import (
     PINNED_SUITE_FINGERPRINTS, build_suite_report, load_suite, run_suite,
-    validate_suite_baselines,
+    runtime_fingerprint, validate_suite_baselines,
 )
 from mini_agent.evaluation.runner import EvaluationRunner, _copy_fixture, run_grader_for_workspace
 from mini_agent.evaluation.schema import (
@@ -123,7 +127,7 @@ def _benchmark_responses() -> dict[str, tuple[dict, ...]]:
 def test_suite_manifest_and_all_offline_oracles_are_frozen_and_consistent():
     suite = load_suite(SUITE_PATH)
     assert suite.suite_id == "coding-benchmark"
-    assert suite.version == "1.0"
+    assert suite.version == "1.1"
     assert suite.suite_sha256 == PINNED_SUITE_FINGERPRINTS[(suite.suite_id, suite.version)]
     assert [item.case.case_id for item in suite.cases] == CASE_IDS
     assert len(validate_suite_baselines(suite)) == 8
@@ -344,3 +348,122 @@ def test_prestart_infrastructure_error_keeps_slot_and_report_denominator(tmp_pat
     assert report["runtime_fingerprint_consistent"] is True
     assert report["cases"][CASE_IDS[0]]["scorable_trials"] == 1
     assert report["cases"][CASE_IDS[0]]["scorable_sample_complete"] is False
+
+
+def test_receipt_exact_format_is_public_and_known_good_meets_it(tmp_path):
+    case = load_case(_case_dir("orders-discount-receipt") / "case.json")
+    assert case.version == "1.1"
+    assert "Subtotal: $12.35\\nDiscount (15%): -$1.85\\nAmount due: $10.50\\n" in case.task
+    assert "ValueError" in case.task
+    assert _grader(case.case_id, Path(case.case_dir) / "known_good", tmp_path / "receipt") is True
+
+
+def test_cleanup_does_not_follow_grader_symlinks(tmp_path, monkeypatch):
+    from mini_agent.evaluation import runner as module
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external")
+    outside.chmod(0o400)
+    original = module._run_child
+
+    def leave_link(argv, **kwargs):
+        info = original(argv, **kwargs)
+        if "mini_agent.evaluation.worker" not in argv:
+            (kwargs["cwd"] / "external-link").symlink_to(outside)
+        return info
+
+    monkeypatch.setattr(module, "_run_child", leave_link)
+    case = load_suite(SUITE_PATH).cases[0]
+    trial = EvaluationRunner().run_case(
+        case.case, tmp_path / "results", run_kind="fixture",
+        responses=_benchmark_responses()[case.case.case_id],
+        suite_metadata={
+            "suite_id": "coding-benchmark", "suite_version": "1.1",
+            "suite_sha256": load_suite(SUITE_PATH).suite_sha256,
+            "suite_run_id": "01234567-89ab-cdef-0123-456789abcdef", "repetition": 1,
+            "initial_fixture_sha256": case.initial_sha256,
+            "grader_sha256": case.grader_sha256,
+            "runtime_fingerprint": runtime_fingerprint(),
+        },
+    )
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o400
+    assert outside.read_text() == "external"
+    assert json.loads((trial / "trial.json").read_text())["cleanup_complete"] is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process group assertion uses POSIX")
+@pytest.mark.parametrize("stage", ["agent", "grader"])
+def test_real_child_interrupt_is_cleaned_and_published_before_suite_stops(tmp_path, monkeypatch, stage):
+    from mini_agent.evaluation import runner as module
+
+    original = module.subprocess.Popen
+    children = []
+
+    def launch(argv, **kwargs):
+        is_worker = "mini_agent.evaluation.worker" in argv
+        is_trial_grader = not is_worker and Path(argv[1]).parent.name.startswith("mini-agent-eval-")
+        if not (is_worker if stage == "agent" else is_trial_grader):
+            return original(argv, **kwargs)
+        marker = Path(argv[-1]) if is_worker else kwargs["cwd"] / "grader-started.marker"
+        process = original(
+            [sys.executable, "-c", "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('started'); time.sleep(30)", str(marker)],
+            **kwargs,
+        )
+        children.append(process)
+        wait = process.wait
+        first = True
+
+        def interrupted_wait(*args, **options):
+            nonlocal first
+            if first:
+                first = False
+                deadline = time.monotonic() + 5
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert marker.exists()
+                raise KeyboardInterrupt()
+            return wait(*args, **options)
+
+        process.wait = interrupted_wait
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", launch)
+    output = tmp_path / "interrupted-child"
+    with pytest.raises(KeyboardInterrupt):
+        run_suite(
+            load_suite(SUITE_PATH), output, repeats=3, run_kind="fixture",
+            fixture_responses=_benchmark_responses(),
+        )
+    assert len(children) == 1 and children[0].poll() is not None
+    ledger = validate_suite_run(json.loads((output / "suite-run.json").read_text()))
+    assert ledger["status"] == "interrupted"
+    assert ledger["slots"][0]["status"] == "completed"
+    assert all(slot["status"] == "not_run" for slot in ledger["slots"][1:])
+    trial = json.loads((output / ledger["slots"][0]["trial_path"] / "trial.json").read_text())
+    assert trial["agent_started"] is True
+    assert trial["failure_kind"] == ("agent_interrupted" if stage == "agent" else "grader_infrastructure_error")
+    if stage == "grader":
+        assert trial["grader_error_kind"] == "interrupted"
+    assert trial["cleanup_complete"] is True
+    assert build_suite_report(output)["run_trials"] == 1
+
+
+@pytest.mark.parametrize("field", ["model_binding_ref", "code_revision", "runtime_fingerprint_end"])
+def test_source_mismatch_is_excluded_and_baseline_incomplete(tmp_path, field):
+    source = Path(__file__).parents[1] / "docs/evaluation/baselines/v0.51/live-20260927"
+    output = tmp_path / "archive"
+    shutil.copytree(source, output)
+    trial_path = next((output / "trials").glob("trial-pagination-*/trial.json"))
+    trial = json.loads(trial_path.read_text())
+    if field == "model_binding_ref":
+        trial[field]["fingerprint"] = "0" * 64
+    else:
+        trial[field] = "0" * (40 if field == "code_revision" else 64)
+    trial_path.write_text(json.dumps(trial))
+    report = build_suite_report(output)
+    assert report["live_baseline_complete"] is False
+    assert report["source_mismatch_trials"] == 1
+    assert report["scorable_trials"] == 11
+    assert report["final_successes"] == 5
+    assert report["run_trials"] == 12
+    assert any(item["trial_path"] == trial_path.parent.relative_to(output).as_posix() for item in report["manual_review_queue"])

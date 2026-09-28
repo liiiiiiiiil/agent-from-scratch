@@ -179,14 +179,21 @@ def _run_child(
             try:
                 process.wait(timeout=timeout)
                 timed_out = False
+                interrupted = False
                 cleanup_complete, cleanup_issue = True, None
+            except (KeyboardInterrupt, SystemExit):
+                timed_out = False
+                interrupted = True
+                cleanup_complete, cleanup_issue = _terminate_group(process)
             except subprocess.TimeoutExpired:
                 timed_out = True
+                interrupted = False
                 cleanup_complete, cleanup_issue = _terminate_group(process)
         return {
             "started": True,
             "returncode": process.returncode,
             "timed_out": timed_out,
+            "interrupted": interrupted,
             "duration_ms": int((time.monotonic() - started) * 1000),
             "cleanup_complete": cleanup_complete,
             "cleanup_issue": cleanup_issue,
@@ -207,6 +214,29 @@ def _run_child(
             "pid": process.pid if process is not None else None,
             "launch_error": type(error).__name__,
         }
+
+
+def _restore_reference_permissions(root: Path) -> None:
+    """Restore only runner-owned reference directories, without following links."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def restore(fd: int) -> None:
+        os.fchmod(fd, 0o700)
+        for name in os.listdir(fd):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            child = os.open(name, flags, dir_fd=fd)
+            try:
+                restore(child)
+            finally:
+                os.close(child)
+
+    fd = os.open(root, flags)
+    try:
+        restore(fd)
+    finally:
+        os.close(fd)
 
 
 def _copy_fixture(source: Path, destination: Path) -> None:
@@ -460,6 +490,7 @@ class EvaluationRunner:
         cleanup_issue = None
         runtime_fingerprint_end = None
         runtime_fingerprint_changed = False
+        grader_reference = None
         workspace = tmp_root / "workspace"
         frozen_grader = tmp_root / "grader.py"
         frozen_grader.write_bytes(grader_source)
@@ -471,7 +502,6 @@ class EvaluationRunner:
         (home / ".mini_agent" / "memory").mkdir(mode=0o700)
         try:
             _copy_fixture(fixture_root, workspace)
-            grader_reference = None
             if suite_metadata is not None:
                 from mini_agent.evaluation.benchmark import tree_sha256
 
@@ -517,6 +547,8 @@ class EvaluationRunner:
                 result_payload = None
             if worker_info["timed_out"]:
                 agent_stop = "timeout"
+            elif worker_info.get("interrupted"):
+                agent_stop = "interrupted"
             elif result_payload is None:
                 agent_stop = "worker_error"
             else:
@@ -536,7 +568,9 @@ class EvaluationRunner:
                     cwd=workspace, env=grader_env, timeout=case.grader_timeout_seconds,
                     stdout_path=grader_stdout, stderr_path=grader_stderr,
                 )
-                if grader_info["timed_out"]:
+                if grader_info.get("interrupted"):
+                    grader_error = "interrupted"
+                elif grader_info["timed_out"]:
                     grader_error = "timeout"
                     grader_log = _redact(_read_limited(grader_stdout, MAX_GRADER_LOG_BYTES), redactions)
                 elif not grader_info["started"]:
@@ -561,6 +595,9 @@ class EvaluationRunner:
             if worker_info["timed_out"]:
                 agent_duration_ms = worker_info["duration_ms"]
                 failure_kind = "agent_timeout"
+            elif worker_info.get("interrupted"):
+                agent_duration_ms = worker_info["duration_ms"]
+                failure_kind = "agent_interrupted"
             elif not worker_info["started"]:
                 agent_duration_ms = 0
                 failure_kind = "infrastructure_error"
@@ -622,10 +659,10 @@ class EvaluationRunner:
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "agent_started": bool(result_payload.get("agent_started")) if result_payload else start_marker.is_file(),
-                "agent_stop_reason": result_payload.get("agent_stop_reason") if result_payload else ("timeout" if worker_info["timed_out"] else None),
+                "agent_stop_reason": agent_stop,
                 "agent_state_status": result_payload.get("agent_state_status") if result_payload else None,
                 "agent_error_kind": result_payload.get("agent_error_kind") if result_payload else (
-                    "worker_protocol_error" if worker_info["started"] and not worker_info["timed_out"] else None
+                    "worker_protocol_error" if worker_info["started"] and not worker_info["timed_out"] and not worker_info.get("interrupted") else None
                 ),
                 "agent_duration_ms": agent_duration_ms,
                 "agent_exit_code": worker_info["returncode"],
@@ -677,17 +714,8 @@ class EvaluationRunner:
             _atomic_write(stage_dir / "trial.json", result_bytes)
         finally:
             try:
-                for current, dirs, files in os.walk(tmp_root, topdown=False):
-                    current_path = Path(current)
-                    for name in files:
-                        try:
-                            os.chmod(current_path / name, 0o600)
-                        except OSError:
-                            pass
-                    try:
-                        os.chmod(current_path, 0o700)
-                    except OSError:
-                        pass
+                if grader_reference is not None:
+                    _restore_reference_permissions(grader_reference)
                 shutil.rmtree(tmp_root)
             except OSError as error:
                 cleanup_complete = False

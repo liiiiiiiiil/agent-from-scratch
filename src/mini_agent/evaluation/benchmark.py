@@ -25,6 +25,7 @@ from mini_agent.evaluation.schema import (
 
 # Updated only when the suite version changes after a reviewed fixture edit.
 PINNED_SUITE_FINGERPRINTS: dict[tuple[str, str], str] = {
+    ("coding-benchmark", "1.1"): "73f9d068d7dc19e482a74ab2f674921c4dd2e5467516c4f3a95736cafcd21469",
     ("coding-benchmark", "1.0"): "bf728faf8cff54e173a73c21946499b48b81fccce73a2b187f3d7b20b7e12d16",
 }
 
@@ -349,6 +350,7 @@ def run_suite(
     _atomic_json(ledger_path, ledger)
     case_by_id = {item.case.case_id: item for item in suite.cases}
     for index, slot in enumerate(ledger["slots"]):
+        interrupted = False
         suite_case = case_by_id[slot["case_id"]]
         slot["status"] = "running"
         ledger["updated_at"] = _now()
@@ -381,6 +383,8 @@ def run_suite(
             slot["status"] = "completed"
             slot["trial_path"] = trial_dir.relative_to(root).as_posix()
             slot["error_kind"] = None
+            trial = _read_json(trial_dir / "trial.json", 256 * 1024)
+            interrupted = trial.get("agent_stop_reason") == "interrupted" or trial.get("grader_error_kind") == "interrupted"
         except (KeyboardInterrupt, SystemExit):
             slot["status"] = "not_run"
             slot["error_kind"] = "interrupted"
@@ -393,9 +397,13 @@ def run_suite(
             slot["trial_path"] = None
             slot["error_kind"] = type(error).__name__
         ledger["updated_at"] = _now()
-        if index == len(ledger["slots"]) - 1:
+        if interrupted:
+            ledger["status"] = "interrupted"
+        elif index == len(ledger["slots"]) - 1:
             ledger["status"] = "completed"
         _atomic_json(ledger_path, ledger)
+        if interrupted:
+            raise KeyboardInterrupt()
     return ledger_path
 
 
@@ -445,6 +453,7 @@ def _case_report(slots: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dic
         if isinstance(row.get("grader_passed"), bool)
         and row.get("grader_error_kind") is None
         and row.get("failure_kind") not in {"infrastructure_error", "grader_infrastructure_error"}
+        and row.get("_source_consistent", True)
     ]
     durations = [row["agent_duration_ms"] for row in rows if isinstance(row.get("agent_duration_ms"), int)]
     grader_durations = [row["grader_duration_ms"] for row in rows if isinstance(row.get("grader_duration_ms"), int)]
@@ -469,8 +478,8 @@ def _case_report(slots: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dic
             reason = "trial 遇到评测或运行基础设施错误；需检查原始记录"
         elif row is not None and row.get("runtime_fingerprint_end") != row.get("runtime_fingerprint"):
             reason = "Agent 运行期间代码来源摘要发生变化；该样本不能代表冻结实现"
-        elif row is not None and row.get("_model_binding_consistent") is False:
-            reason = "trial 使用的模型来源与 suite 冻结来源不一致；建议复核并排除该样本"
+        elif row is not None and row.get("_source_consistent") is False:
+            reason = "trial 的代码或模型来源与 suite 冻结来源不一致；该样本已排除评分"
         elif row is not None and row.get("grader_error_kind") is not None:
             reason = "grader 未产生有效结果；需检查评分基础设施"
         elif row is not None and row.get("agent_stop_reason") == "text" and row.get("grader_passed") is False:
@@ -495,7 +504,8 @@ def _case_report(slots: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dic
         "scorable_trials": len(graded),
         "scorable_sample_complete": len(graded) == len(slots),
         "independent_acceptance_passed": sum(row["grader_passed"] is True for row in graded),
-        "final_successes": sum(row.get("success") is True for row in rows),
+        "final_successes": sum(row.get("success") is True for row in graded),
+        "source_mismatch_trials": sum(row.get("_source_consistent") is False for row in rows),
         "infrastructure_errors": infrastructure,
         "failure_counts": failures,
         "agent_llm_calls": _observed_total(rows, "agent_llm_calls"),
@@ -587,6 +597,11 @@ def build_suite_report(suite_run_dir: str | os.PathLike[str]) -> dict[str, Any]:
         }
         row = _read_trial(root, slot["trial_path"], expected=expected)
         row["_model_binding_consistent"] = row.get("model_binding_ref") == ledger["model_binding_ref"]
+        row["_source_consistent"] = (
+            row["_model_binding_consistent"]
+            and row.get("code_revision") == ledger["code_revision"]
+            and row.get("runtime_fingerprint_end") == ledger["runtime_fingerprint"]
+        )
         by_case[slot["case_id"]].append(row)
         trial_count += 1
     reports = {
@@ -625,6 +640,7 @@ def build_suite_report(suite_run_dir: str | os.PathLike[str]) -> dict[str, Any]:
         "independent_acceptance_passed": total_report["independent_acceptance_passed"],
         "final_successes": total_report["final_successes"],
         "infrastructure_errors": total_report["infrastructure_errors"],
+        "source_mismatch_trials": total_report["source_mismatch_trials"],
         "failure_counts": total_report["failure_counts"],
         "agent_llm_calls": total_report["agent_llm_calls"],
         "successful_model_responses": total_report["successful_model_responses"],

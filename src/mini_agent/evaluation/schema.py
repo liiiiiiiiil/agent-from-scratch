@@ -112,7 +112,7 @@ TRIAL_RESULT_SCHEMA_V1: dict[str, Any] = {
         "agent_duration_ms": {"type": "integer", "minimum": 0},
         "grader_passed": {"type": ["boolean", "null"]}, "grader_error_kind": {"type": ["string", "null"]},
         "grader_duration_ms": {"type": "integer", "minimum": 0}, "success": {"type": "boolean"},
-        "failure_kind": {"enum": ["none", "agent_timeout", "agent_error", "task_failed", "grader_infrastructure_error", "infrastructure_error", "agent_output_limit"]},
+        "failure_kind": {"enum": ["none", "agent_timeout", "agent_interrupted", "agent_error", "task_failed", "grader_infrastructure_error", "infrastructure_error", "agent_output_limit"]},
         "agent_exit_code": {"type": ["integer", "null"]}, "grader_exit_code": {"type": ["integer", "null"]},
         "agent_llm_calls": {"type": ["integer", "null"], "minimum": 0},
         "successful_model_responses": {"type": ["integer", "null"], "minimum": 0},
@@ -594,6 +594,8 @@ def validate_trial_result(raw: Any) -> dict[str, Any]:
         _require(raw.get("success") is True, "failure_kind=none 必须对应 success=true")
     if raw.get("failure_kind") == "agent_timeout":
         _require(raw.get("agent_stop_reason") == "timeout", "agent_timeout 必须对应 timeout 停止原因")
+    if raw.get("failure_kind") == "agent_interrupted":
+        _require(raw.get("agent_stop_reason") == "interrupted", "agent_interrupted 必须对应 interrupted 停止原因")
     if raw.get("failure_kind") == "agent_error":
         _require(isinstance(raw.get("agent_error_kind"), str), "agent_error 必须保留 error kind")
     if raw.get("failure_kind") == "grader_infrastructure_error":
