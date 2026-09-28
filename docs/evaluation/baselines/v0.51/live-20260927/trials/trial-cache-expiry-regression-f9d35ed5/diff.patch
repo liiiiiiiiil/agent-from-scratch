@@ -1,0 +1,62 @@
+--- a/src/cache.py
++++ b/src/cache.py
+@@ -17,7 +17,7 @@
+         if entry is None:
+             return None
+         value, stored_at = entry
+-        if self.clock() - stored_at > self.ttl_seconds:
++        if self.clock() - stored_at >= self.ttl_seconds:
+             del self._entries[key]
+             return None
+         return value
+--- /dev/null
++++ b/tests/test_cache_expiry.py
+@@ -0,0 +1,48 @@
++import os
++import sys
++import unittest
++
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
++
++from cache import ExpiringCache
++
++
++class FakeClock:
++    def __init__(self, now=0.0):
++        self.now = now
++
++    def __call__(self):
++        return self.now
++
++    def advance(self, seconds):
++        self.now += seconds
++
++
++class ExpiryBoundaryTests(unittest.TestCase):
++    def setUp(self):
++        self.clock = FakeClock()
++        self.cache = ExpiringCache(ttl_seconds=10, clock=self.clock)
++
++    def test_value_alive_before_ttl(self):
++        self.cache.put("k", "v")
++        self.clock.advance(9.999)
++        self.assertEqual(self.cache.get("k"), "v")
++
++    def test_value_expires_exactly_at_ttl(self):
++        self.cache.put("k", "v")
++        self.clock.advance(10)
++        self.assertIsNone(self.cache.get("k"))
++
++    def test_value_expires_after_ttl(self):
++        self.cache.put("k", "v")
++        self.clock.advance(11)
++        self.assertIsNone(self.cache.get("k"))
++
++    def test_zero_ttl_expires_immediately(self):
++        cache = ExpiringCache(ttl_seconds=0, clock=self.clock)
++        cache.put("k", "v")
++        self.assertIsNone(cache.get("k"))
++
++
++if __name__ == "__main__":
++    unittest.main()

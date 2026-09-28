@@ -1,0 +1,11 @@
+--- a/src/bootstrap.py
++++ b/src/bootstrap.py
+@@ -1,6 +1,6 @@
+ def resolve_settings(defaults, project_values, environment):
+     resolved = {}
++    resolved.update(defaults)
++    resolved.update(project_values)
+     resolved.update(environment)
+-    resolved.update(project_values)
+-    resolved.update(defaults)
+     return resolved

@@ -1,0 +1,1082 @@
+{
+  "schema_version": 1,
+  "suite_id": "coding-benchmark",
+  "suite_version": "1.0",
+  "suite_sha256": "bf728faf8cff54e173a73c21946499b48b81fccce73a2b187f3d7b20b7e12d16",
+  "suite_run_id": "952c79c4-0865-4c8e-b017-aaa0795fee89",
+  "run_kind": "live",
+  "run_status": "completed",
+  "code_revision": "95c533793ff1af0242ba3124ae6b33590c51b4d5",
+  "code_revision_consistent": true,
+  "runtime_fingerprint": "84e7869ed0316934915ebc15d8c143edd310a9063ac2aae26aba37893c6ef14a",
+  "runtime_fingerprint_consistent": true,
+  "model_binding_consistent": true,
+  "planned_trials": 12,
+  "run_trials": 12,
+  "scorable_trials": 12,
+  "live_baseline_complete": true,
+  "independent_acceptance_passed": 8,
+  "final_successes": 6,
+  "infrastructure_errors": 0,
+  "failure_counts": {
+    "none": 6,
+    "task_failed": 3,
+    "agent_timeout": 3
+  },
+  "agent_llm_calls": {
+    "observed_trials": 9,
+    "total": 56
+  },
+  "successful_model_responses": {
+    "observed_trials": 9,
+    "total": 56
+  },
+  "tool_calls": {
+    "observed_trials": 9,
+    "total": 59
+  },
+  "permission_denials": {
+    "observed_trials": 9,
+    "total": 0
+  },
+  "usage_source_trials": {
+    "provider": 9,
+    "unavailable": 3
+  },
+  "input_tokens": {
+    "observed_trials": 9,
+    "total": 124975
+  },
+  "output_tokens": {
+    "observed_trials": 9,
+    "total": 10016
+  },
+  "agent_duration_ms": {
+    "observed_trials": 12,
+    "median": 8445.5,
+    "p95": 120017.0
+  },
+  "cost_usd": null,
+  "cost_note": "缺少价格快照，成本为 null。",
+  "manual_review_queue": [
+    {
+      "slot_id": "orders-discount-receipt-01",
+      "case_id": "orders-discount-receipt",
+      "repetition": 1,
+      "trial_path": "trials/trial-orders-discount-receipt-04268614",
+      "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+    },
+    {
+      "slot_id": "orders-discount-receipt-02",
+      "case_id": "orders-discount-receipt",
+      "repetition": 2,
+      "trial_path": "trials/trial-orders-discount-receipt-60549c61",
+      "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+    },
+    {
+      "slot_id": "orders-discount-receipt-03",
+      "case_id": "orders-discount-receipt",
+      "repetition": 3,
+      "trial_path": "trials/trial-orders-discount-receipt-51ffeed7",
+      "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+    },
+    {
+      "slot_id": "cache-expiry-regression-02",
+      "case_id": "cache-expiry-regression",
+      "repetition": 2,
+      "trial_path": "trials/trial-cache-expiry-regression-f9d35ed5",
+      "reason": "独立 grader 通过但 Agent 未满足最终成功条件；建议复核运行状态"
+    },
+    {
+      "slot_id": "config-priority-investigation-03",
+      "case_id": "config-priority-investigation",
+      "repetition": 3,
+      "trial_path": "trials/trial-config-priority-investigation-1acd4694",
+      "reason": "独立 grader 通过但 Agent 未满足最终成功条件；建议复核运行状态"
+    }
+  ],
+  "cases": {
+    "pagination-boundary": {
+      "planned_trials": 3,
+      "run_trials": 3,
+      "scorable_trials": 3,
+      "scorable_sample_complete": true,
+      "independent_acceptance_passed": 3,
+      "final_successes": 3,
+      "infrastructure_errors": 0,
+      "failure_counts": {
+        "none": 3
+      },
+      "agent_llm_calls": {
+        "observed_trials": 3,
+        "total": 17
+      },
+      "successful_model_responses": {
+        "observed_trials": 3,
+        "total": 17
+      },
+      "tool_calls": {
+        "observed_trials": 3,
+        "total": 15
+      },
+      "permission_denials": {
+        "observed_trials": 3,
+        "total": 0
+      },
+      "usage_source_trials": {
+        "provider": 3
+      },
+      "input_tokens": {
+        "observed_trials": 3,
+        "total": 34492
+      },
+      "output_tokens": {
+        "observed_trials": 3,
+        "total": 2126
+      },
+      "agent_duration_ms": {
+        "observed_trials": 3,
+        "median": 5750,
+        "p95": 6360.0
+      },
+      "grader_duration_ms": {
+        "observed_trials": 3,
+        "median": 49,
+        "p95": 49.0
+      },
+      "cost_usd": null,
+      "manual_review_queue": [],
+      "trials": [
+        {
+          "slot_id": "pagination-boundary-01",
+          "repetition": 1,
+          "status": "completed",
+          "trial_path": "trials/trial-pagination-boundary-f9e38ded",
+          "trial_id": "f9e38ded-f39c-4640-bff7-590e22d4f7ff",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 5,
+          "permission_denials": 0,
+          "input_tokens": 11359,
+          "output_tokens": 729,
+          "agent_duration_ms": 5611,
+          "grader_duration_ms": 41,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "pagination-boundary-02",
+          "repetition": 2,
+          "status": "completed",
+          "trial_path": "trials/trial-pagination-boundary-ed429425",
+          "trial_id": "ed429425-6b03-4de1-8295-389ff7d1d8ff",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 5,
+          "permission_denials": 0,
+          "input_tokens": 11402,
+          "output_tokens": 773,
+          "agent_duration_ms": 6360,
+          "grader_duration_ms": 49,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "pagination-boundary-03",
+          "repetition": 3,
+          "status": "completed",
+          "trial_path": "trials/trial-pagination-boundary-ec2836c7",
+          "trial_id": "ec2836c7-a1dd-46de-bbb4-e26b62b0fbc2",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 5,
+          "tool_calls": 5,
+          "permission_denials": 0,
+          "input_tokens": 11731,
+          "output_tokens": 624,
+          "agent_duration_ms": 5750,
+          "grader_duration_ms": 49,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        }
+      ]
+    },
+    "orders-discount-receipt": {
+      "planned_trials": 3,
+      "run_trials": 3,
+      "scorable_trials": 3,
+      "scorable_sample_complete": true,
+      "independent_acceptance_passed": 0,
+      "final_successes": 0,
+      "infrastructure_errors": 0,
+      "failure_counts": {
+        "task_failed": 3
+      },
+      "agent_llm_calls": {
+        "observed_trials": 3,
+        "total": 21
+      },
+      "successful_model_responses": {
+        "observed_trials": 3,
+        "total": 21
+      },
+      "tool_calls": {
+        "observed_trials": 3,
+        "total": 26
+      },
+      "permission_denials": {
+        "observed_trials": 3,
+        "total": 0
+      },
+      "usage_source_trials": {
+        "provider": 3
+      },
+      "input_tokens": {
+        "observed_trials": 3,
+        "total": 51001
+      },
+      "output_tokens": {
+        "observed_trials": 3,
+        "total": 4324
+      },
+      "agent_duration_ms": {
+        "observed_trials": 3,
+        "median": 9079,
+        "p95": 9823.0
+      },
+      "grader_duration_ms": {
+        "observed_trials": 3,
+        "median": 48,
+        "p95": 49.0
+      },
+      "cost_usd": null,
+      "manual_review_queue": [
+        {
+          "slot_id": "orders-discount-receipt-01",
+          "case_id": "orders-discount-receipt",
+          "repetition": 1,
+          "trial_path": "trials/trial-orders-discount-receipt-04268614",
+          "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+        },
+        {
+          "slot_id": "orders-discount-receipt-02",
+          "case_id": "orders-discount-receipt",
+          "repetition": 2,
+          "trial_path": "trials/trial-orders-discount-receipt-60549c61",
+          "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+        },
+        {
+          "slot_id": "orders-discount-receipt-03",
+          "case_id": "orders-discount-receipt",
+          "repetition": 3,
+          "trial_path": "trials/trial-orders-discount-receipt-51ffeed7",
+          "reason": "Agent 正常停止但独立 grader 未通过；建议复核 diff 与评分细节"
+        }
+      ],
+      "trials": [
+        {
+          "slot_id": "orders-discount-receipt-01",
+          "repetition": 1,
+          "status": "completed",
+          "trial_path": "trials/trial-orders-discount-receipt-04268614",
+          "trial_id": "04268614-7ba3-4eae-8b2c-080e48ac44d2",
+          "grader_passed": false,
+          "success": false,
+          "failure_kind": "task_failed",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 8,
+          "tool_calls": 10,
+          "permission_denials": 0,
+          "input_tokens": 19902,
+          "output_tokens": 1358,
+          "agent_duration_ms": 9079,
+          "grader_duration_ms": 49,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "orders-discount-receipt-02",
+          "repetition": 2,
+          "status": "completed",
+          "trial_path": "trials/trial-orders-discount-receipt-60549c61",
+          "trial_id": "60549c61-a7fb-42a7-8302-c55b77e0408a",
+          "grader_passed": false,
+          "success": false,
+          "failure_kind": "task_failed",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 7,
+          "tool_calls": 9,
+          "permission_denials": 0,
+          "input_tokens": 17533,
+          "output_tokens": 1459,
+          "agent_duration_ms": 9823,
+          "grader_duration_ms": 48,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "orders-discount-receipt-03",
+          "repetition": 3,
+          "status": "completed",
+          "trial_path": "trials/trial-orders-discount-receipt-51ffeed7",
+          "trial_id": "51ffeed7-0ec4-4671-8a15-c8a90f45909d",
+          "grader_passed": false,
+          "success": false,
+          "failure_kind": "task_failed",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 7,
+          "permission_denials": 0,
+          "input_tokens": 13566,
+          "output_tokens": 1507,
+          "agent_duration_ms": 8542,
+          "grader_duration_ms": 48,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        }
+      ]
+    },
+    "cache-expiry-regression": {
+      "planned_trials": 3,
+      "run_trials": 3,
+      "scorable_trials": 3,
+      "scorable_sample_complete": true,
+      "independent_acceptance_passed": 2,
+      "final_successes": 1,
+      "infrastructure_errors": 0,
+      "failure_counts": {
+        "agent_timeout": 2,
+        "none": 1
+      },
+      "agent_llm_calls": {
+        "observed_trials": 1,
+        "total": 6
+      },
+      "successful_model_responses": {
+        "observed_trials": 1,
+        "total": 6
+      },
+      "tool_calls": {
+        "observed_trials": 1,
+        "total": 8
+      },
+      "permission_denials": {
+        "observed_trials": 1,
+        "total": 0
+      },
+      "usage_source_trials": {
+        "unavailable": 2,
+        "provider": 1
+      },
+      "input_tokens": {
+        "observed_trials": 1,
+        "total": 15012
+      },
+      "output_tokens": {
+        "observed_trials": 1,
+        "total": 1730
+      },
+      "agent_duration_ms": {
+        "observed_trials": 3,
+        "median": 120012,
+        "p95": 120012.0
+      },
+      "grader_duration_ms": {
+        "observed_trials": 3,
+        "median": 141,
+        "p95": 143.0
+      },
+      "cost_usd": null,
+      "manual_review_queue": [
+        {
+          "slot_id": "cache-expiry-regression-02",
+          "case_id": "cache-expiry-regression",
+          "repetition": 2,
+          "trial_path": "trials/trial-cache-expiry-regression-f9d35ed5",
+          "reason": "独立 grader 通过但 Agent 未满足最终成功条件；建议复核运行状态"
+        }
+      ],
+      "trials": [
+        {
+          "slot_id": "cache-expiry-regression-01",
+          "repetition": 1,
+          "status": "completed",
+          "trial_path": "trials/trial-cache-expiry-regression-f0f441ee",
+          "trial_id": "f0f441ee-b19e-40d4-bffe-da9d31a90c1a",
+          "grader_passed": false,
+          "success": false,
+          "failure_kind": "agent_timeout",
+          "grader_error_kind": null,
+          "agent_stop_reason": "timeout",
+          "agent_state_status": null,
+          "agent_llm_calls": null,
+          "tool_calls": null,
+          "permission_denials": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "agent_duration_ms": 120012,
+          "grader_duration_ms": 46,
+          "usage_source": "unavailable",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "cache-expiry-regression-02",
+          "repetition": 2,
+          "status": "completed",
+          "trial_path": "trials/trial-cache-expiry-regression-f9d35ed5",
+          "trial_id": "f9d35ed5-269b-455f-8378-fbce4f57e49f",
+          "grader_passed": true,
+          "success": false,
+          "failure_kind": "agent_timeout",
+          "grader_error_kind": null,
+          "agent_stop_reason": "timeout",
+          "agent_state_status": null,
+          "agent_llm_calls": null,
+          "tool_calls": null,
+          "permission_denials": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "agent_duration_ms": 120012,
+          "grader_duration_ms": 143,
+          "usage_source": "unavailable",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "cache-expiry-regression-03",
+          "repetition": 3,
+          "status": "completed",
+          "trial_path": "trials/trial-cache-expiry-regression-6f2521be",
+          "trial_id": "6f2521be-0696-4250-893e-c51f06fa5c1e",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 8,
+          "permission_denials": 0,
+          "input_tokens": 15012,
+          "output_tokens": 1730,
+          "agent_duration_ms": 8349,
+          "grader_duration_ms": 141,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        }
+      ]
+    },
+    "config-priority-investigation": {
+      "planned_trials": 3,
+      "run_trials": 3,
+      "scorable_trials": 3,
+      "scorable_sample_complete": true,
+      "independent_acceptance_passed": 3,
+      "final_successes": 2,
+      "infrastructure_errors": 0,
+      "failure_counts": {
+        "none": 2,
+        "agent_timeout": 1
+      },
+      "agent_llm_calls": {
+        "observed_trials": 2,
+        "total": 12
+      },
+      "successful_model_responses": {
+        "observed_trials": 2,
+        "total": 12
+      },
+      "tool_calls": {
+        "observed_trials": 2,
+        "total": 10
+      },
+      "permission_denials": {
+        "observed_trials": 2,
+        "total": 0
+      },
+      "usage_source_trials": {
+        "provider": 2,
+        "unavailable": 1
+      },
+      "input_tokens": {
+        "observed_trials": 2,
+        "total": 24470
+      },
+      "output_tokens": {
+        "observed_trials": 2,
+        "total": 1836
+      },
+      "agent_duration_ms": {
+        "observed_trials": 3,
+        "median": 5643,
+        "p95": 120017.0
+      },
+      "grader_duration_ms": {
+        "observed_trials": 3,
+        "median": 49,
+        "p95": 49.0
+      },
+      "cost_usd": null,
+      "manual_review_queue": [
+        {
+          "slot_id": "config-priority-investigation-03",
+          "case_id": "config-priority-investigation",
+          "repetition": 3,
+          "trial_path": "trials/trial-config-priority-investigation-1acd4694",
+          "reason": "独立 grader 通过但 Agent 未满足最终成功条件；建议复核运行状态"
+        }
+      ],
+      "trials": [
+        {
+          "slot_id": "config-priority-investigation-01",
+          "repetition": 1,
+          "status": "completed",
+          "trial_path": "trials/trial-config-priority-investigation-3c016194",
+          "trial_id": "3c016194-3019-4a4f-9d32-225012806824",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 5,
+          "permission_denials": 0,
+          "input_tokens": 11799,
+          "output_tokens": 810,
+          "agent_duration_ms": 5520,
+          "grader_duration_ms": 49,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "config-priority-investigation-02",
+          "repetition": 2,
+          "status": "completed",
+          "trial_path": "trials/trial-config-priority-investigation-fa319c8a",
+          "trial_id": "fa319c8a-59b4-4e90-a38e-35d224e37fab",
+          "grader_passed": true,
+          "success": true,
+          "failure_kind": "none",
+          "grader_error_kind": null,
+          "agent_stop_reason": "text",
+          "agent_state_status": "done",
+          "agent_llm_calls": 6,
+          "tool_calls": 5,
+          "permission_denials": 0,
+          "input_tokens": 12671,
+          "output_tokens": 1026,
+          "agent_duration_ms": 5643,
+          "grader_duration_ms": 49,
+          "usage_source": "provider",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        },
+        {
+          "slot_id": "config-priority-investigation-03",
+          "repetition": 3,
+          "status": "completed",
+          "trial_path": "trials/trial-config-priority-investigation-1acd4694",
+          "trial_id": "1acd4694-07bc-4616-9e2a-d08a5932d736",
+          "grader_passed": true,
+          "success": false,
+          "failure_kind": "agent_timeout",
+          "grader_error_kind": null,
+          "agent_stop_reason": "timeout",
+          "agent_state_status": null,
+          "agent_llm_calls": null,
+          "tool_calls": null,
+          "permission_denials": null,
+          "input_tokens": null,
+          "output_tokens": null,
+          "agent_duration_ms": 120017,
+          "grader_duration_ms": 48,
+          "usage_source": "unavailable",
+          "model_binding_ref": {
+            "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+            "profile": "legacy-default",
+            "protocol": "openai_chat",
+            "provider": "legacy-default"
+          }
+        }
+      ]
+    }
+  },
+  "trials": [
+    {
+      "slot_id": "pagination-boundary-01",
+      "repetition": 1,
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-f9e38ded",
+      "trial_id": "f9e38ded-f39c-4640-bff7-590e22d4f7ff",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 5,
+      "permission_denials": 0,
+      "input_tokens": 11359,
+      "output_tokens": 729,
+      "agent_duration_ms": 5611,
+      "grader_duration_ms": 41,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "pagination-boundary-02",
+      "repetition": 2,
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-ed429425",
+      "trial_id": "ed429425-6b03-4de1-8295-389ff7d1d8ff",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 5,
+      "permission_denials": 0,
+      "input_tokens": 11402,
+      "output_tokens": 773,
+      "agent_duration_ms": 6360,
+      "grader_duration_ms": 49,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "pagination-boundary-03",
+      "repetition": 3,
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-ec2836c7",
+      "trial_id": "ec2836c7-a1dd-46de-bbb4-e26b62b0fbc2",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 5,
+      "tool_calls": 5,
+      "permission_denials": 0,
+      "input_tokens": 11731,
+      "output_tokens": 624,
+      "agent_duration_ms": 5750,
+      "grader_duration_ms": 49,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "orders-discount-receipt-01",
+      "repetition": 1,
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-04268614",
+      "trial_id": "04268614-7ba3-4eae-8b2c-080e48ac44d2",
+      "grader_passed": false,
+      "success": false,
+      "failure_kind": "task_failed",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 8,
+      "tool_calls": 10,
+      "permission_denials": 0,
+      "input_tokens": 19902,
+      "output_tokens": 1358,
+      "agent_duration_ms": 9079,
+      "grader_duration_ms": 49,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "orders-discount-receipt-02",
+      "repetition": 2,
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-60549c61",
+      "trial_id": "60549c61-a7fb-42a7-8302-c55b77e0408a",
+      "grader_passed": false,
+      "success": false,
+      "failure_kind": "task_failed",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 7,
+      "tool_calls": 9,
+      "permission_denials": 0,
+      "input_tokens": 17533,
+      "output_tokens": 1459,
+      "agent_duration_ms": 9823,
+      "grader_duration_ms": 48,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "orders-discount-receipt-03",
+      "repetition": 3,
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-51ffeed7",
+      "trial_id": "51ffeed7-0ec4-4671-8a15-c8a90f45909d",
+      "grader_passed": false,
+      "success": false,
+      "failure_kind": "task_failed",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 7,
+      "permission_denials": 0,
+      "input_tokens": 13566,
+      "output_tokens": 1507,
+      "agent_duration_ms": 8542,
+      "grader_duration_ms": 48,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "cache-expiry-regression-01",
+      "repetition": 1,
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-f0f441ee",
+      "trial_id": "f0f441ee-b19e-40d4-bffe-da9d31a90c1a",
+      "grader_passed": false,
+      "success": false,
+      "failure_kind": "agent_timeout",
+      "grader_error_kind": null,
+      "agent_stop_reason": "timeout",
+      "agent_state_status": null,
+      "agent_llm_calls": null,
+      "tool_calls": null,
+      "permission_denials": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "agent_duration_ms": 120012,
+      "grader_duration_ms": 46,
+      "usage_source": "unavailable",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "cache-expiry-regression-02",
+      "repetition": 2,
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-f9d35ed5",
+      "trial_id": "f9d35ed5-269b-455f-8378-fbce4f57e49f",
+      "grader_passed": true,
+      "success": false,
+      "failure_kind": "agent_timeout",
+      "grader_error_kind": null,
+      "agent_stop_reason": "timeout",
+      "agent_state_status": null,
+      "agent_llm_calls": null,
+      "tool_calls": null,
+      "permission_denials": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "agent_duration_ms": 120012,
+      "grader_duration_ms": 143,
+      "usage_source": "unavailable",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "cache-expiry-regression-03",
+      "repetition": 3,
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-6f2521be",
+      "trial_id": "6f2521be-0696-4250-893e-c51f06fa5c1e",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 8,
+      "permission_denials": 0,
+      "input_tokens": 15012,
+      "output_tokens": 1730,
+      "agent_duration_ms": 8349,
+      "grader_duration_ms": 141,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "config-priority-investigation-01",
+      "repetition": 1,
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-3c016194",
+      "trial_id": "3c016194-3019-4a4f-9d32-225012806824",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 5,
+      "permission_denials": 0,
+      "input_tokens": 11799,
+      "output_tokens": 810,
+      "agent_duration_ms": 5520,
+      "grader_duration_ms": 49,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "config-priority-investigation-02",
+      "repetition": 2,
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-fa319c8a",
+      "trial_id": "fa319c8a-59b4-4e90-a38e-35d224e37fab",
+      "grader_passed": true,
+      "success": true,
+      "failure_kind": "none",
+      "grader_error_kind": null,
+      "agent_stop_reason": "text",
+      "agent_state_status": "done",
+      "agent_llm_calls": 6,
+      "tool_calls": 5,
+      "permission_denials": 0,
+      "input_tokens": 12671,
+      "output_tokens": 1026,
+      "agent_duration_ms": 5643,
+      "grader_duration_ms": 49,
+      "usage_source": "provider",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    },
+    {
+      "slot_id": "config-priority-investigation-03",
+      "repetition": 3,
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-1acd4694",
+      "trial_id": "1acd4694-07bc-4616-9e2a-d08a5932d736",
+      "grader_passed": true,
+      "success": false,
+      "failure_kind": "agent_timeout",
+      "grader_error_kind": null,
+      "agent_stop_reason": "timeout",
+      "agent_state_status": null,
+      "agent_llm_calls": null,
+      "tool_calls": null,
+      "permission_denials": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "agent_duration_ms": 120017,
+      "grader_duration_ms": 48,
+      "usage_source": "unavailable",
+      "model_binding_ref": {
+        "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+        "profile": "legacy-default",
+        "protocol": "openai_chat",
+        "provider": "legacy-default"
+      }
+    }
+  ],
+  "sample_limitations": "每题计划重复次数有限；样本用于描述本次冻结题集上的表现，不代表一般编码能力。",
+  "model_sources": [
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    },
+    {
+      "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+      "profile": "legacy-default",
+      "protocol": "openai_chat",
+      "provider": "legacy-default"
+    }
+  ],
+  "usage_unavailable_trials": 3,
+  "fixture_and_live_are_separate": true,
+  "unread_trials": 0
+}

@@ -1,0 +1,119 @@
+{
+  "code_revision": "95c533793ff1af0242ba3124ae6b33590c51b4d5",
+  "model_binding_ref": {
+    "fingerprint": "f5d29d7d52439c419e672fd0a4d7007a8197e4afe7b24083d4d0116fb4fc4cf6",
+    "profile": "legacy-default",
+    "protocol": "openai_chat",
+    "provider": "legacy-default"
+  },
+  "planned_trials": 12,
+  "repeats": 3,
+  "run_kind": "live",
+  "runtime_fingerprint": "84e7869ed0316934915ebc15d8c143edd310a9063ac2aae26aba37893c6ef14a",
+  "schema_version": 1,
+  "slots": [
+    {
+      "case_id": "pagination-boundary",
+      "error_kind": null,
+      "repetition": 1,
+      "slot_id": "pagination-boundary-01",
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-f9e38ded"
+    },
+    {
+      "case_id": "pagination-boundary",
+      "error_kind": null,
+      "repetition": 2,
+      "slot_id": "pagination-boundary-02",
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-ed429425"
+    },
+    {
+      "case_id": "pagination-boundary",
+      "error_kind": null,
+      "repetition": 3,
+      "slot_id": "pagination-boundary-03",
+      "status": "completed",
+      "trial_path": "trials/trial-pagination-boundary-ec2836c7"
+    },
+    {
+      "case_id": "orders-discount-receipt",
+      "error_kind": null,
+      "repetition": 1,
+      "slot_id": "orders-discount-receipt-01",
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-04268614"
+    },
+    {
+      "case_id": "orders-discount-receipt",
+      "error_kind": null,
+      "repetition": 2,
+      "slot_id": "orders-discount-receipt-02",
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-60549c61"
+    },
+    {
+      "case_id": "orders-discount-receipt",
+      "error_kind": null,
+      "repetition": 3,
+      "slot_id": "orders-discount-receipt-03",
+      "status": "completed",
+      "trial_path": "trials/trial-orders-discount-receipt-51ffeed7"
+    },
+    {
+      "case_id": "cache-expiry-regression",
+      "error_kind": null,
+      "repetition": 1,
+      "slot_id": "cache-expiry-regression-01",
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-f0f441ee"
+    },
+    {
+      "case_id": "cache-expiry-regression",
+      "error_kind": null,
+      "repetition": 2,
+      "slot_id": "cache-expiry-regression-02",
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-f9d35ed5"
+    },
+    {
+      "case_id": "cache-expiry-regression",
+      "error_kind": null,
+      "repetition": 3,
+      "slot_id": "cache-expiry-regression-03",
+      "status": "completed",
+      "trial_path": "trials/trial-cache-expiry-regression-6f2521be"
+    },
+    {
+      "case_id": "config-priority-investigation",
+      "error_kind": null,
+      "repetition": 1,
+      "slot_id": "config-priority-investigation-01",
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-3c016194"
+    },
+    {
+      "case_id": "config-priority-investigation",
+      "error_kind": null,
+      "repetition": 2,
+      "slot_id": "config-priority-investigation-02",
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-fa319c8a"
+    },
+    {
+      "case_id": "config-priority-investigation",
+      "error_kind": null,
+      "repetition": 3,
+      "slot_id": "config-priority-investigation-03",
+      "status": "completed",
+      "trial_path": "trials/trial-config-priority-investigation-1acd4694"
+    }
+  ],
+  "started_at": "2026-09-27T14:45:33.213+00:00",
+  "status": "completed",
+  "suite_id": "coding-benchmark",
+  "suite_run_id": "952c79c4-0865-4c8e-b017-aaa0795fee89",
+  "suite_sha256": "bf728faf8cff54e173a73c21946499b48b81fccce73a2b187f3d7b20b7e12d16",
+  "suite_version": "1.0",
+  "updated_at": "2026-09-27T17:02:49.058+00:00"
+}

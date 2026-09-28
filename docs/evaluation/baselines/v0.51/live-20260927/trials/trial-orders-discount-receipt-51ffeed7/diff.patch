@@ -1,0 +1,34 @@
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,7 +1,8 @@
+ def calculate_discount_cents(subtotal_cents, discount_percent):
+     if subtotal_cents < 0 or not 0 <= discount_percent <= 100:
+         raise ValueError("invalid order discount")
+-    return subtotal_cents * discount_percent // 100
++    # Round half-up to the nearest cent.
++    return (subtotal_cents * discount_percent + 50) // 100
+ 
+ 
+ def amount_due_cents(subtotal_cents, discount_percent):
+--- a/src/receipt.py
++++ b/src/receipt.py
+@@ -1,3 +1,17 @@
++try:
++    from .pricing import calculate_discount_cents, amount_due_cents
++except ImportError:  # pragma: no cover - fallback for direct execution
++    from pricing import calculate_discount_cents, amount_due_cents
++
++
+ def render_receipt(subtotal_cents, discount_percent):
+-    dollars = subtotal_cents / 100
+-    return f"Subtotal: ${dollars:.2f}\nAmount due: ${dollars:.2f}\n"
++    discount_cents = calculate_discount_cents(subtotal_cents, discount_percent)
++    due_cents = amount_due_cents(subtotal_cents, discount_percent)
++    subtotal = subtotal_cents / 100
++    discount = discount_cents / 100
++    due = due_cents / 100
++    return (
++        f"Subtotal: ${subtotal:.2f}\n"
++        f"Discount: {discount_percent}% (-${discount:.2f})\n"
++        f"Amount due: ${due:.2f}\n"
++    )

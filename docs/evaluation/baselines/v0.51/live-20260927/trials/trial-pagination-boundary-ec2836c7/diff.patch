@@ -1,0 +1,10 @@
+--- a/src/pagination.py
++++ b/src/pagination.py
+@@ -2,6 +2,6 @@
+     if page_size < 1:
+         raise ValueError("page_size must be positive")
+     pages = []
+-    for offset in range(0, len(items) - page_size, page_size):
++    for offset in range(0, len(items), page_size):
+         pages.append(items[offset:offset + page_size])
+     return pages
